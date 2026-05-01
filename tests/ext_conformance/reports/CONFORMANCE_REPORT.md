@@ -1,6 +1,6 @@
 # Extension Conformance Report
 
-> Generated: 2026-05-01T06:39:19Z
+> Generated: 2026-05-01T17:02:12Z
 
 ## Summary
 
@@ -155,7 +155,7 @@
 | [`npm/pi-wakatime`](tests/ext_conformance/artifacts/npm/pi-wakatime/src/index.ts) | `1.0.0` | T3 (multi-file) | N/A | - | - | - |  |
 | [`npm/pi-watch`](tests/ext_conformance/artifacts/npm/pi-watch/index.ts) | `0.1.0` | T3 (multi-file) | N/A | - | - | - |  |
 | [`npm/pi-web-access`](tests/ext_conformance/artifacts/npm/pi-web-access/index.ts) | `0.7.2` | T3 (multi-file) | N/A | - | - | - |  |
-| [`npm/qualisero-pi-agent-scip`](tests/ext_conformance/artifacts/npm/qualisero-pi-agent-scip/dist/index.js) | `0.3.0` | T3 (multi-file) | N/A | - | - | - |  |
+| [`npm/qualisero-pi-agent-scip`](tests/ext_conformance/artifacts/npm/qualisero-pi-agent-scip/dist/index.d.ts) | `0.3.0` | T3 (multi-file) | N/A | - | - | - |  |
 | [`npm/ralph-loop-pi`](tests/ext_conformance/artifacts/npm/ralph-loop-pi/ralph-loop.ts) | `1.0.1` | T3 (multi-file) | N/A | - | - | - |  |
 | [`npm/repeat-pi`](tests/ext_conformance/artifacts/npm/repeat-pi/repeat.ts) | `0.50.0` | T3 (multi-file) | N/A | - | - | - |  |
 | [`npm/shitty-extensions`](tests/ext_conformance/artifacts/npm/shitty-extensions/extensions/clipboard.ts) | - | T3 (multi-file) | N/A | - | - | - |  |

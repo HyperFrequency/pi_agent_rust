@@ -1,7 +1,7 @@
 {
   "schema": "pi.ci.preflight_lane.v1",
   "lane": "preflight",
-  "generated_at": "2026-05-01T06:39:15.887Z",
+  "generated_at": "2026-05-01T17:02:08.073Z",
   "verdict": "pass",
   "policy": "Preflight lane: evaluate blocking gates only, fail-fast on first failure. Waived gates are skipped with audit trail.",
   "gates_evaluated": 14,

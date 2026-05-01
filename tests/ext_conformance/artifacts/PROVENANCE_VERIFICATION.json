@@ -1,12 +1,12 @@
 {
   "schema": "pi.ext.provenance_verification.v1",
-  "generated_at": "2026-03-12T02:18:59.265290132+00:00",
+  "generated_at": "2026-05-01T17:08:32.773783820+00:00",
   "summary": {
     "total_artifacts": 208,
-    "verified_ok": 201,
-    "failed": 7,
+    "verified_ok": 208,
+    "failed": 0,
     "exceptions": 0,
-    "pass_rate": 0.9663461538461539
+    "pass_rate": 1.0
   },
   "artifacts": [
     {
@@ -528,16 +528,13 @@
         "id_naming_valid": true,
         "directory_layout_valid": true,
         "on_disk_checksum": "7390445b8024d0218c49da095dd72bcaf3c5390bfc5c63260df960898a0c1b05",
-        "master_catalog_checksum": "aa2baf20eddb875e8b923063384b3d86a8856cba835395f63eccc4c01db7c30a",
-        "provenance_checksum": "aa2baf20eddb875e8b923063384b3d86a8856cba835395f63eccc4c01db7c30a",
-        "checksums_consistent": false,
+        "master_catalog_checksum": "7390445b8024d0218c49da095dd72bcaf3c5390bfc5c63260df960898a0c1b05",
+        "provenance_checksum": "7390445b8024d0218c49da095dd72bcaf3c5390bfc5c63260df960898a0c1b05",
+        "checksums_consistent": true,
         "has_source_url": true,
         "has_license": true
       },
-      "verdict": "FAIL",
-      "errors": [
-        "checksum_mismatch: disk=7390445b8024d0218c49da095dd72bcaf3c5390bfc5c63260df960898a0c1b05, master=aa2baf20eddb875e8b923063384b3d86a8856cba835395f63eccc4c01db7c30a, provenance=aa2baf20eddb875e8b923063384b3d86a8856cba835395f63eccc4c01db7c30a"
-      ]
+      "verdict": "PASS"
     },
     {
       "id": "community/mitsuhiko-whimsical",
@@ -786,16 +783,13 @@
         "id_naming_valid": true,
         "directory_layout_valid": true,
         "on_disk_checksum": "55e911e7742c67d26cfdd81f3a3451a98af02a328300607fdf0f3b31c1391c1c",
-        "master_catalog_checksum": "c9ad30c099446cd31a5ae46ef1b96e12ff0cec1739af0c49cc0cb5ce990bb84b",
-        "provenance_checksum": "c9ad30c099446cd31a5ae46ef1b96e12ff0cec1739af0c49cc0cb5ce990bb84b",
-        "checksums_consistent": false,
+        "master_catalog_checksum": "55e911e7742c67d26cfdd81f3a3451a98af02a328300607fdf0f3b31c1391c1c",
+        "provenance_checksum": "55e911e7742c67d26cfdd81f3a3451a98af02a328300607fdf0f3b31c1391c1c",
+        "checksums_consistent": true,
         "has_source_url": true,
         "has_license": true
       },
-      "verdict": "FAIL",
-      "errors": [
-        "checksum_mismatch: disk=55e911e7742c67d26cfdd81f3a3451a98af02a328300607fdf0f3b31c1391c1c, master=c9ad30c099446cd31a5ae46ef1b96e12ff0cec1739af0c49cc0cb5ce990bb84b, provenance=c9ad30c099446cd31a5ae46ef1b96e12ff0cec1739af0c49cc0cb5ce990bb84b"
-      ]
+      "verdict": "PASS"
     },
     {
       "id": "community/qualisero-compact-config",
@@ -840,16 +834,13 @@
         "id_naming_valid": true,
         "directory_layout_valid": true,
         "on_disk_checksum": "8591ad4674b466e4d09a4ff538151295c8a4a2151b3513d8c6bb767a7c9f20ad",
-        "master_catalog_checksum": "011a8bcaa77ccddcccc8dfba59cf9593242e5718401fc88592677d6623b64f26",
-        "provenance_checksum": "011a8bcaa77ccddcccc8dfba59cf9593242e5718401fc88592677d6623b64f26",
-        "checksums_consistent": false,
+        "master_catalog_checksum": "8591ad4674b466e4d09a4ff538151295c8a4a2151b3513d8c6bb767a7c9f20ad",
+        "provenance_checksum": "8591ad4674b466e4d09a4ff538151295c8a4a2151b3513d8c6bb767a7c9f20ad",
+        "checksums_consistent": true,
         "has_source_url": true,
         "has_license": true
       },
-      "verdict": "FAIL",
-      "errors": [
-        "checksum_mismatch: disk=8591ad4674b466e4d09a4ff538151295c8a4a2151b3513d8c6bb767a7c9f20ad, master=011a8bcaa77ccddcccc8dfba59cf9593242e5718401fc88592677d6623b64f26, provenance=011a8bcaa77ccddcccc8dfba59cf9593242e5718401fc88592677d6623b64f26"
-      ]
+      "verdict": "PASS"
     },
     {
       "id": "community/qualisero-safe-rm",
@@ -1251,16 +1242,13 @@
         "id_naming_valid": true,
         "directory_layout_valid": true,
         "on_disk_checksum": "f30bbefe1cafe5c97dc3811b42fd6ea3463c7c9cba72ea6d2a7291e453561389",
-        "master_catalog_checksum": "5c269a38b71e7e18003daaf3cf752a99e42eb6afa017e295c47fc9f8cd0ad51a",
-        "provenance_checksum": "5c269a38b71e7e18003daaf3cf752a99e42eb6afa017e295c47fc9f8cd0ad51a",
-        "checksums_consistent": false,
+        "master_catalog_checksum": "f30bbefe1cafe5c97dc3811b42fd6ea3463c7c9cba72ea6d2a7291e453561389",
+        "provenance_checksum": "f30bbefe1cafe5c97dc3811b42fd6ea3463c7c9cba72ea6d2a7291e453561389",
+        "checksums_consistent": true,
         "has_source_url": true,
         "has_license": true
       },
-      "verdict": "FAIL",
-      "errors": [
-        "checksum_mismatch: disk=f30bbefe1cafe5c97dc3811b42fd6ea3463c7c9cba72ea6d2a7291e453561389, master=5c269a38b71e7e18003daaf3cf752a99e42eb6afa017e295c47fc9f8cd0ad51a, provenance=5c269a38b71e7e18003daaf3cf752a99e42eb6afa017e295c47fc9f8cd0ad51a"
-      ]
+      "verdict": "PASS"
     },
     {
       "id": "dynamic-resources",
@@ -1764,16 +1752,13 @@
         "id_naming_valid": true,
         "directory_layout_valid": true,
         "on_disk_checksum": "684b860fbc30ff6493bc665e41720b116d7e3f86b28bb7e84b7bb9ce63e85379",
-        "master_catalog_checksum": "4c8d489332cd87e504ce064a2cfe32dfe3e9dec4cca1e8b1452a3533b4aeab6c",
-        "provenance_checksum": "4c8d489332cd87e504ce064a2cfe32dfe3e9dec4cca1e8b1452a3533b4aeab6c",
-        "checksums_consistent": false,
+        "master_catalog_checksum": "684b860fbc30ff6493bc665e41720b116d7e3f86b28bb7e84b7bb9ce63e85379",
+        "provenance_checksum": "684b860fbc30ff6493bc665e41720b116d7e3f86b28bb7e84b7bb9ce63e85379",
+        "checksums_consistent": true,
         "has_source_url": true,
         "has_license": true
       },
-      "verdict": "FAIL",
-      "errors": [
-        "checksum_mismatch: disk=684b860fbc30ff6493bc665e41720b116d7e3f86b28bb7e84b7bb9ce63e85379, master=4c8d489332cd87e504ce064a2cfe32dfe3e9dec4cca1e8b1452a3533b4aeab6c, provenance=4c8d489332cd87e504ce064a2cfe32dfe3e9dec4cca1e8b1452a3533b4aeab6c"
-      ]
+      "verdict": "PASS"
     },
     {
       "id": "npm/marckrenn-pi-sub-core",
@@ -1801,16 +1786,13 @@
         "id_naming_valid": true,
         "directory_layout_valid": true,
         "on_disk_checksum": "101dc9871cb4edb92a70a150a448dbc9a9b725e1a3e71fcdabc8ff7353c04258",
-        "master_catalog_checksum": "604fdc741ab17d3f482737615532e86d39a0d95a0e4254135139a9b645f2c803",
-        "provenance_checksum": "604fdc741ab17d3f482737615532e86d39a0d95a0e4254135139a9b645f2c803",
-        "checksums_consistent": false,
+        "master_catalog_checksum": "101dc9871cb4edb92a70a150a448dbc9a9b725e1a3e71fcdabc8ff7353c04258",
+        "provenance_checksum": "101dc9871cb4edb92a70a150a448dbc9a9b725e1a3e71fcdabc8ff7353c04258",
+        "checksums_consistent": true,
         "has_source_url": true,
         "has_license": true
       },
-      "verdict": "FAIL",
-      "errors": [
-        "checksum_mismatch: disk=101dc9871cb4edb92a70a150a448dbc9a9b725e1a3e71fcdabc8ff7353c04258, master=604fdc741ab17d3f482737615532e86d39a0d95a0e4254135139a9b645f2c803, provenance=604fdc741ab17d3f482737615532e86d39a0d95a0e4254135139a9b645f2c803"
-      ]
+      "verdict": "PASS"
     },
     {
       "id": "npm/permission-pi",
@@ -3232,16 +3214,13 @@
         "id_naming_valid": true,
         "directory_layout_valid": true,
         "on_disk_checksum": "64060313b1939dbb9a51446473701929fc18e1e7a15abb47a48671e75a801528",
-        "master_catalog_checksum": "893ecf1c25c7c23b5b2a65c1b9812144fbd4b42a87a838b11b93f538c8e98568",
-        "provenance_checksum": "893ecf1c25c7c23b5b2a65c1b9812144fbd4b42a87a838b11b93f538c8e98568",
-        "checksums_consistent": false,
+        "master_catalog_checksum": "64060313b1939dbb9a51446473701929fc18e1e7a15abb47a48671e75a801528",
+        "provenance_checksum": "64060313b1939dbb9a51446473701929fc18e1e7a15abb47a48671e75a801528",
+        "checksums_consistent": true,
         "has_source_url": true,
         "has_license": true
       },
-      "verdict": "FAIL",
-      "errors": [
-        "checksum_mismatch: disk=64060313b1939dbb9a51446473701929fc18e1e7a15abb47a48671e75a801528, master=893ecf1c25c7c23b5b2a65c1b9812144fbd4b42a87a838b11b93f538c8e98568, provenance=893ecf1c25c7c23b5b2a65c1b9812144fbd4b42a87a838b11b93f538c8e98568"
-      ]
+      "verdict": "PASS"
     },
     {
       "id": "third-party/openclaw-openclaw",

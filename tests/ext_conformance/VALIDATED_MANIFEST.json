@@ -5453,21 +5453,15 @@
     },
     {
       "id": "npm/qualisero-pi-agent-scip",
-      "entry_path": "npm/qualisero-pi-agent-scip/dist/index.js",
+      "entry_path": "npm/qualisero-pi-agent-scip/dist/index.d.ts",
       "source_tier": "npm-registry",
       "capabilities": {
-        "registers_tools": true,
+        "registers_tools": false,
         "registers_commands": false,
         "registers_flags": false,
         "registers_providers": false,
-        "subscribes_events": [
-          "before_agent_start",
-          "close",
-          "data",
-          "error",
-          "session_start"
-        ],
-        "uses_exec": true,
+        "subscribes_events": [],
+        "uses_exec": false,
         "uses_http": false,
         "uses_ui": false,
         "uses_session": false,
@@ -5475,27 +5469,12 @@
         "has_npm_deps": true
       },
       "conformance_tier": 3,
-      "mock_requirements": [
-        "exec"
-      ],
+      "mock_requirements": [],
       "registrations": {
-        "tools": [
-          "scip_find_definition",
-          "scip_find_references",
-          "scip_list_symbols",
-          "scip_project_tree",
-          "scip_reindex",
-          "scip_search_symbols"
-        ],
+        "tools": [],
         "commands": [],
         "flags": [],
-        "event_handlers": [
-          "before_agent_start",
-          "close",
-          "data",
-          "error",
-          "session_start"
-        ]
+        "event_handlers": []
       }
     },
     {

@@ -1,11 +1,11 @@
 {
   "schema": "pi.ext.risk_review.v1",
-  "generated_at": "2026-03-12T02:18:59.858720668+00:00",
+  "generated_at": "2026-05-01T17:08:33.363747839+00:00",
   "summary": {
     "total_artifacts": 208,
-    "license_clear": 179,
+    "license_clear": 184,
     "license_copyleft": 0,
-    "license_unknown": 29,
+    "license_unknown": 24,
     "security_clean": 105,
     "security_info_only": 97,
     "security_warnings": 6,
@@ -16,8 +16,8 @@
   },
   "license_distribution": {
     "Apache-2.0": 1,
-    "MIT": 178,
-    "UNKNOWN": 29
+    "MIT": 183,
+    "UNKNOWN": 24
   },
   "artifacts": [
     {
@@ -2211,9 +2211,9 @@
     {
       "id": "third-party/aliou-pi-extensions",
       "directory": "third-party/aliou-pi-extensions",
-      "license": "UNKNOWN",
-      "license_source": "none",
-      "redistributable": "unknown",
+      "license": "MIT",
+      "license_source": "provenance_manifest",
+      "redistributable": "yes",
       "security_severity": "warning",
       "security_findings": [
         "[Warning] eval(: Dynamic code evaluation via eval()",
@@ -2228,16 +2228,16 @@
     {
       "id": "third-party/ben-vargas-pi-packages",
       "directory": "third-party/ben-vargas-pi-packages",
-      "license": "UNKNOWN",
-      "license_source": "none",
-      "redistributable": "unknown",
+      "license": "MIT",
+      "license_source": "provenance_manifest",
+      "redistributable": "yes",
       "security_severity": "info",
       "security_findings": [
         "[Info] .env: References .env files",
         "[Info] Buffer.from(: Binary buffer operations"
       ],
       "has_npm_deps": false,
-      "risk_level": "low"
+      "risk_level": "minimal"
     },
     {
       "id": "third-party/charles-cooper-pi-extensions",
@@ -2306,9 +2306,9 @@
     {
       "id": "third-party/kcosr-pi-extensions",
       "directory": "third-party/kcosr-pi-extensions",
-      "license": "UNKNOWN",
-      "license_source": "none",
-      "redistributable": "unknown",
+      "license": "MIT",
+      "license_source": "provenance_manifest",
+      "redistributable": "yes",
       "security_severity": "warning",
       "security_findings": [
         "[Info] child_process: Uses child_process module (common in extensions)",
@@ -2349,9 +2349,9 @@
     {
       "id": "third-party/marckrenn-pi-sub",
       "directory": "third-party/marckrenn-pi-sub",
-      "license": "UNKNOWN",
-      "license_source": "none",
-      "redistributable": "unknown",
+      "license": "MIT",
+      "license_source": "provenance_manifest",
+      "redistributable": "yes",
       "security_severity": "info",
       "security_findings": [
         "[Info] child_process: Uses child_process module (common in extensions)",
@@ -2359,7 +2359,7 @@
         "[Info] Buffer.from(: Binary buffer operations"
       ],
       "has_npm_deps": false,
-      "risk_level": "low"
+      "risk_level": "minimal"
     },
     {
       "id": "third-party/michalvavra-agents",
@@ -2492,16 +2492,16 @@
     {
       "id": "third-party/w-winter-dot314",
       "directory": "third-party/w-winter-dot314",
-      "license": "UNKNOWN",
-      "license_source": "none",
-      "redistributable": "unknown",
+      "license": "MIT",
+      "license_source": "provenance_manifest",
+      "redistributable": "yes",
       "security_severity": "info",
       "security_findings": [
         "[Info] child_process: Uses child_process module (common in extensions)",
         "[Info] .env: References .env files"
       ],
       "has_npm_deps": false,
-      "risk_level": "low"
+      "risk_level": "minimal"
     },
     {
       "id": "third-party/zenobi-us-pi-dcp",

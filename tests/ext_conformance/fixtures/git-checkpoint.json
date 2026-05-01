@@ -198,8 +198,20 @@
       "id": "scn-git-checkpoint-neg-001",
       "kind": "event",
       "summary": "Negative: checkpoint restore fails when git stash returns error",
+      "event_name": "session_before_fork",
+      "tool_name": null,
+      "command_name": null,
+      "provider_id": null,
+      "input": null,
+      "setup": null,
+      "steps": [],
       "expect": {
         "is_error": true
+      },
+      "outputs": {
+        "stdout_normalized_jsonl": [],
+        "meta_normalized": {},
+        "capture_log_normalized_jsonl": []
       }
     }
   ]

@@ -1,8 +1,8 @@
 # Unified CI Evidence Bundle
 
-> Generated: 2026-05-01T06:39:15Z
-> Git ref: 5f5f9a639
-> CI run: local-20260501T063915Z
+> Generated: 2026-05-01T17:02:07Z
+> Git ref: 41c5a2fce
+> CI run: local-20260501T170207Z
 > Verdict: **COMPLETE**
 
 ## Summary
@@ -13,8 +13,8 @@
 | Present | 28 |
 | Missing | 0 |
 | Invalid | 0 |
-| Total artifacts | 2002 |
-| Total size | 181030.8 KB |
+| Total artifacts | 2003 |
+| Total size | 181029.6 KB |
 | Required present | 11/11 |
 
 ## Conformance (6)
@@ -23,8 +23,8 @@
 |---------|--------|-------|------|------|
 | Extension conformance summary | PASS | 1 | 1058 B | `tests/ext_conformance/reports/conformance_summary.json` |
 | Conformance baseline | PASS | 1 | 28710 B | `tests/ext_conformance/reports/conformance_baseline.json` |
-| Conformance event log | PASS | 1 | 223766 B | `tests/ext_conformance/reports/conformance_events.jsonl` |
-| Conformance report (Markdown) | PASS | 1 | 48166 B | `tests/ext_conformance/reports/CONFORMANCE_REPORT.md` |
+| Conformance event log | PASS | 1 | 223530 B | `tests/ext_conformance/reports/conformance_events.jsonl` |
+| Conformance report (Markdown) | PASS | 1 | 48168 B | `tests/ext_conformance/reports/CONFORMANCE_REPORT.md` |
 | Regression gate verdict | PASS | 1 | 1658 B | `tests/ext_conformance/reports/regression_verdict.json` |
 | Conformance trend data | PASS | 1 | 3075 B | `tests/ext_conformance/reports/conformance_trend.jsonl` |
 
@@ -39,7 +39,7 @@
 | Provider compatibility matrix | PASS | 753 | 375207 B | `tests/ext_conformance/reports/provider_compat` |
 | Sharded extension matrix reports | PASS | 12 | 280518 B | `tests/ext_conformance/reports/sharded` |
 | Extension journey report | PASS | 1 | 14742 B | `tests/ext_conformance/reports/journeys/journey_report.json` |
-| Auto-repair summary | PASS | 1 | 52598 B | `tests/ext_conformance/reports/auto_repair_summary.json` |
+| Auto-repair summary | PASS | 1 | 52577 B | `tests/ext_conformance/reports/auto_repair_summary.json` |
 
 ## E2e (1)
 
@@ -69,8 +69,8 @@
 
 | Section | Status | Files | Size | Path |
 |---------|--------|-------|------|------|
-| Security and licensing risk review | PASS | 1 | 86651 B | `tests/ext_conformance/artifacts/RISK_REVIEW.json` |
-| Extension provenance verification | PASS | 1 | 145350 B | `tests/ext_conformance/artifacts/PROVENANCE_VERIFICATION.json` |
+| Security and licensing risk review | PASS | 1 | 86698 B | `tests/ext_conformance/artifacts/RISK_REVIEW.json` |
+| Extension provenance verification | PASS | 1 | 143396 B | `tests/ext_conformance/artifacts/PROVENANCE_VERIFICATION.json` |
 
 ## Traceability (1)
 
@@ -83,5 +83,5 @@
 | Section | Status | Files | Size | Path |
 |---------|--------|-------|------|------|
 | Extension inventory | PASS | 1 | 89349 B | `tests/ext_conformance/reports/inventory.json` |
-| Extension inclusion manifest | PASS | 3 | 404398 B | `tests/ext_conformance/reports/inclusion_manifest` |
+| Extension inclusion manifest | PASS | 4 | 405318 B | `tests/ext_conformance/reports/inclusion_manifest` |
 
