@@ -185,6 +185,18 @@ jobs:
           set -euxo pipefail
           bash scripts/check_cargo_bin_parity.sh
 
+      - name: Docs purpose/header lint
+        run: |
+          set -euxo pipefail
+          if command -v python3 >/dev/null 2>&1; then
+            python3 scripts/check_docs_purpose_headers.py
+          elif command -v python >/dev/null 2>&1; then
+            python scripts/check_docs_purpose_headers.py
+          else
+            echo "python interpreter not found"
+            exit 1
+          fi
+
       - name: No-mock code guard
         run: |
           set -euxo pipefail
