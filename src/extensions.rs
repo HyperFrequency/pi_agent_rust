@@ -29166,7 +29166,7 @@ pub const fn is_coalescable_event(event: &ExtensionEventName) -> bool {
 }
 
 /// Returns `true` for agent lifecycle events that are dispatched directly by
-/// the agent loop via [`AgentSession::dispatch_extension_lifecycle_event`].
+/// the agent loop via `AgentSession::dispatch_extension_lifecycle_event`.
 ///
 /// These events must be **excluded** from the event-callback path to avoid
 /// double dispatch — the agent loop already sends them individually.

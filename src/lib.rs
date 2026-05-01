@@ -53,83 +53,156 @@ extern crate self as pi;
 #[global_allocator]
 static GLOBAL_ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+#[doc(hidden)]
 pub mod acp;
+#[doc(hidden)]
 pub mod agent;
+#[doc(hidden)]
 pub mod agent_cx;
+#[doc(hidden)]
 pub mod app;
+#[doc(hidden)]
 pub mod auth;
+#[doc(hidden)]
 pub mod autocomplete;
+#[doc(hidden)]
 pub mod buffer_shim;
+#[doc(hidden)]
 pub mod cli;
+#[doc(hidden)]
 pub mod compaction;
+#[doc(hidden)]
 pub mod compaction_worker;
+#[doc(hidden)]
 pub mod config;
+#[doc(hidden)]
 pub mod conformance;
+#[doc(hidden)]
 pub mod conformance_shapes;
+#[doc(hidden)]
 pub mod connectors;
+#[doc(hidden)]
 pub mod crypto_shim;
+#[doc(hidden)]
 pub mod doctor;
+#[doc(hidden)]
 pub mod error;
+#[doc(hidden)]
 pub mod error_hints;
+#[doc(hidden)]
 pub mod extension_conformance_matrix;
+#[doc(hidden)]
 pub mod extension_dispatcher;
+#[doc(hidden)]
 pub mod extension_events;
+#[doc(hidden)]
 pub mod extension_inclusion;
+#[doc(hidden)]
 pub mod extension_index;
+#[doc(hidden)]
 pub mod extension_license;
+#[doc(hidden)]
 pub mod extension_popularity;
+#[doc(hidden)]
 pub mod extension_preflight;
+#[doc(hidden)]
 pub mod extension_replay;
+#[doc(hidden)]
 pub mod extension_scoring;
+#[doc(hidden)]
 pub mod extension_tools;
+#[doc(hidden)]
 pub mod extension_validation;
+#[doc(hidden)]
 pub mod extensions;
+#[doc(hidden)]
 pub mod extensions_js;
+#[doc(hidden)]
 pub mod flake_classifier;
+#[doc(hidden)]
 pub mod hostcall_amac;
+#[doc(hidden)]
 pub mod hostcall_io_uring_lane;
+#[doc(hidden)]
 pub mod hostcall_queue;
+#[doc(hidden)]
 pub mod hostcall_rewrite;
+#[doc(hidden)]
 pub mod hostcall_s3_fifo;
+#[doc(hidden)]
 pub mod hostcall_superinstructions;
+#[doc(hidden)]
 pub mod hostcall_trace_jit;
+#[doc(hidden)]
 pub mod http;
+#[doc(hidden)]
 pub mod http_shim;
+#[doc(hidden)]
 pub mod interactive;
+#[doc(hidden)]
 pub mod keybindings;
+#[doc(hidden)]
 pub mod migrations;
+#[doc(hidden)]
 pub mod model;
+#[doc(hidden)]
 pub mod model_selector;
+#[doc(hidden)]
 pub mod models;
+#[doc(hidden)]
 pub mod package_manager;
+#[doc(hidden)]
 pub mod perf_build;
+#[doc(hidden)]
 pub mod permissions;
 #[cfg(feature = "wasm-host")]
+#[doc(hidden)]
 pub mod pi_wasm;
+#[doc(hidden)]
 pub mod platform;
+#[doc(hidden)]
 pub mod provider;
+#[doc(hidden)]
 pub mod provider_metadata;
+#[doc(hidden)]
 pub mod providers;
+#[doc(hidden)]
 pub mod resources;
+#[doc(hidden)]
 pub mod rpc;
+#[doc(hidden)]
 pub mod scheduler;
 pub mod sdk;
+#[doc(hidden)]
 pub mod session;
+#[doc(hidden)]
 pub mod session_index;
+#[doc(hidden)]
 pub mod session_metrics;
+#[doc(hidden)]
 pub mod session_picker;
 #[cfg(feature = "sqlite-sessions")]
+#[doc(hidden)]
 pub mod session_sqlite;
+#[doc(hidden)]
 pub mod session_store_v2;
+#[doc(hidden)]
 pub mod sse;
+#[doc(hidden)]
 pub mod terminal_images;
+#[doc(hidden)]
 pub mod theme;
+#[doc(hidden)]
 pub mod tools;
+#[doc(hidden)]
 pub mod tui;
+#[doc(hidden)]
 pub mod vcr;
+#[doc(hidden)]
 pub mod version_check;
 
 pub use error::{Error, Result as PiResult};
+#[doc(hidden)]
 pub use extension_dispatcher::ExtensionDispatcher;
 
 // Conditional re-exports for fuzz harnesses.
@@ -137,6 +210,7 @@ pub use extension_dispatcher::ExtensionDispatcher;
 // gated behind the `fuzzing` feature so they do not appear in the
 // public API during normal builds.
 #[cfg(feature = "fuzzing")]
+#[doc(hidden)]
 pub mod fuzz_exports {
     //! Re-exports of internal parsing/deserialization functions for
     //! `cargo-fuzz` / `libFuzzer` harnesses.

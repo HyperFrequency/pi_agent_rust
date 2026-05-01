@@ -12,6 +12,13 @@ pi = { path = "." }
 futures = "0.3"
 ```
 
+## SemVer Surface
+
+The supported library surface is the crate root aliases `pi::Error`,
+`pi::PiResult`, and the `pi::sdk` module. Other root modules are implementation
+details for the CLI, examples, and in-repository tests; they are hidden from the
+published API documentation and may change without SemVer guarantees.
+
 ## Migration Map (TypeScript -> Rust)
 
 | TypeScript surface | Rust SDK surface |
@@ -98,8 +105,7 @@ fn main() -> pi::sdk::Result<()> {
 
 ```rust
 use futures::executor::block_on;
-use pi::model::ThinkingLevel;
-use pi::sdk::{SessionOptions, create_agent_session};
+use pi::sdk::{SessionOptions, ThinkingLevel, create_agent_session};
 
 fn main() -> pi::sdk::Result<()> {
     let mut session = block_on(create_agent_session(SessionOptions::default()))?;

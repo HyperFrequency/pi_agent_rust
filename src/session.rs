@@ -852,7 +852,7 @@ pub struct Session {
 
     // -- Incremental append state --
     /// Number of entries already persisted to disk (high-water mark).
-    /// Uses Arc<AtomicUsize> to allow atomic updates from detached background threads,
+    /// Uses `Arc<AtomicUsize>` to allow atomic updates from detached background threads,
     /// ensuring state consistency even if the save future is dropped/cancelled.
     persisted_entry_count: Arc<AtomicUsize>,
     /// True when header was modified since last save (forces full rewrite).
