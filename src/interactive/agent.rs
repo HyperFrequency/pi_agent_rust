@@ -1804,9 +1804,32 @@ After approving access in the browser, press Enter in Pi to complete login."
             }
         }
 
-        if let Err(message) = self.sync_runtime_selection_from_session_header() {
-            self.status_message = Some(message);
+        if message.starts_with('/') && !message.starts_with("/skill:") {
+            let command = message.split_whitespace().next().unwrap_or(message);
+            let error = format!("Unknown command: {command}");
+            self.status_message = Some(error.clone());
+            self.messages.push(ConversationMessage {
+                role: MessageRole::System,
+                content: error,
+                thinking: None,
+                collapsed: false,
+            });
+            self.scroll_to_bottom();
+            self.input.reset();
+            self.input.focus();
             return None;
+        }
+
+        if let Err(message) = self.sync_runtime_selection_from_session_header() {
+            if message.starts_with("Agent busy;") || message.starts_with("Session busy;") {
+                tracing::debug!(
+                    message,
+                    "skipping runtime selection sync while submitting input"
+                );
+            } else {
+                self.status_message = Some(message);
+                return None;
+            }
         }
 
         let message_owned = message.to_string();
