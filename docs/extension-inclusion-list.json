@@ -1,9 +1,9 @@
 {
   "schema": "pi.ext.inclusion_list.v1",
-  "generated_at": "2026-02-10T03:57:23.948756405+00:00",
+  "generated_at": "2026-05-01T16:07:00.073820267+00:00",
   "summary": {
-    "tier1_count": 179,
-    "tier1_review_count": 29,
+    "tier1_count": 184,
+    "tier1_review_count": 24,
     "tier2_count": 9,
     "total_must_pass": 208,
     "total_stretch": 9,
@@ -638,7 +638,7 @@
       "source_tier": "community",
       "license": "MIT",
       "provenance": {
-        "checksum_sha256": "aa2baf20eddb875e8b923063384b3d86a8856cba835395f63eccc4c01db7c30a",
+        "checksum_sha256": "7390445b8024d0218c49da095dd72bcaf3c5390bfc5c63260df960898a0c1b05",
         "source_type": "git",
         "source_repo": "https://github.com/badlogic/pi-mono",
         "source_path": "packages/coding-agent/community/mitsuhiko/uv.ts"
@@ -961,7 +961,7 @@
       "source_tier": "community",
       "license": "MIT",
       "provenance": {
-        "checksum_sha256": "c9ad30c099446cd31a5ae46ef1b96e12ff0cec1739af0c49cc0cb5ce990bb84b",
+        "checksum_sha256": "55e911e7742c67d26cfdd81f3a3451a98af02a328300607fdf0f3b31c1391c1c",
         "source_type": "git",
         "source_repo": "https://github.com/badlogic/pi-mono",
         "source_path": "packages/coding-agent/community/qualisero/index.ts"
@@ -1023,7 +1023,7 @@
       "source_tier": "community",
       "license": "MIT",
       "provenance": {
-        "checksum_sha256": "011a8bcaa77ccddcccc8dfba59cf9593242e5718401fc88592677d6623b64f26",
+        "checksum_sha256": "8591ad4674b466e4d09a4ff538151295c8a4a2151b3513d8c6bb767a7c9f20ad",
         "source_type": "git",
         "source_repo": "https://github.com/badlogic/pi-mono",
         "source_path": "packages/coding-agent/community/qualisero/index.ts"
@@ -1521,7 +1521,7 @@
       "license": "MIT",
       "score": 60.0,
       "provenance": {
-        "checksum_sha256": "5c269a38b71e7e18003daaf3cf752a99e42eb6afa017e295c47fc9f8cd0ad51a",
+        "checksum_sha256": "f30bbefe1cafe5c97dc3811b42fd6ea3463c7c9cba72ea6d2a7291e453561389",
         "source_type": "git",
         "source_repo": "https://github.com/badlogic/pi-mono",
         "source_path": "packages/coding-agent/examples/extensions/doom-component.ts"
@@ -2050,7 +2050,7 @@
       "license": "MIT",
       "score": 27.0,
       "provenance": {
-        "checksum_sha256": "4c8d489332cd87e504ce064a2cfe32dfe3e9dec4cca1e8b1452a3533b4aeab6c",
+        "checksum_sha256": "684b860fbc30ff6493bc665e41720b116d7e3f86b28bb7e84b7bb9ce63e85379",
         "source_type": "npm",
         "npm_package": "marckrenn-pi-sub-bar",
         "npm_version": "1.0.4"
@@ -2100,7 +2100,7 @@
       "source_tier": "npm-registry",
       "license": "MIT",
       "provenance": {
-        "checksum_sha256": "604fdc741ab17d3f482737615532e86d39a0d95a0e4254135139a9b645f2c803",
+        "checksum_sha256": "101dc9871cb4edb92a70a150a448dbc9a9b725e1a3e71fcdabc8ff7353c04258",
         "source_type": "npm",
         "npm_package": "ogulcancelik-pi-sketch",
         "npm_version": "0.1.1"
@@ -3622,6 +3622,57 @@
       "inclusion_rationale": "Official pi-mono extension (MIT license, score=60); canonical reference for conformance"
     },
     {
+      "id": "third-party/aliou-pi-extensions",
+      "name": "aliou-pi-extensions",
+      "directory": "third-party/aliou-pi-extensions",
+      "source_tier": "third-party-github",
+      "license": "MIT",
+      "score": 38.0,
+      "provenance": {
+        "checksum_sha256": "60a1caf25626d1442662f3d1f7fbdc570727e26b049868798d49ec9c023f3863",
+        "source_type": "url"
+      },
+      "capabilities": [
+        "ExtensionAPI_import",
+        "event_hook",
+        "events_api",
+        "exec_api",
+        "export_default",
+        "registerTool",
+        "session_api",
+        "ui_header",
+        "ui_overlay"
+      ],
+      "category": "tool",
+      "risk_level": "medium",
+      "inclusion_rationale": "Third-party GitHub extension (MIT license, score=38); exercises diverse coding patterns"
+    },
+    {
+      "id": "third-party/ben-vargas-pi-packages",
+      "name": "ben-vargas-pi-packages",
+      "directory": "third-party/ben-vargas-pi-packages",
+      "source_tier": "third-party-github",
+      "license": "MIT",
+      "score": 38.0,
+      "provenance": {
+        "checksum_sha256": "cfcde6f2e0ad8e86c94a3235ddcfee996a19b690b3d3293e42d46a1e3ea5ceda",
+        "source_type": "url"
+      },
+      "capabilities": [
+        "ExtensionAPI_import",
+        "event_hook",
+        "export_default",
+        "registerFlag",
+        "registerProvider",
+        "registerShortcut",
+        "registerTool",
+        "ui_header"
+      ],
+      "category": "provider",
+      "risk_level": "minimal",
+      "inclusion_rationale": "Third-party GitHub extension (MIT license, score=38); exercises diverse coding patterns"
+    },
+    {
       "id": "third-party/jyaunches-pi-canvas",
       "directory": "third-party/jyaunches-pi-canvas",
       "source_tier": "third-party-github",
@@ -3640,6 +3691,84 @@
       "category": "tool",
       "risk_level": "minimal",
       "inclusion_rationale": "Third-party GitHub extension (MIT license); exercises diverse coding patterns"
+    },
+    {
+      "id": "third-party/kcosr-pi-extensions",
+      "name": "kcosr-pi-extensions",
+      "directory": "third-party/kcosr-pi-extensions",
+      "source_tier": "third-party-github",
+      "license": "MIT",
+      "score": 38.0,
+      "provenance": {
+        "checksum_sha256": "3ae6c9a2c50ec4cfa38ee50a8cecde77ea40683b90cdb8b741bbca7c19093857",
+        "source_type": "url"
+      },
+      "capabilities": [
+        "ExtensionAPI_import",
+        "event_hook",
+        "export_default",
+        "registerTool",
+        "session_api",
+        "ui_header",
+        "ui_overlay"
+      ],
+      "category": "tool",
+      "risk_level": "medium",
+      "inclusion_rationale": "Third-party GitHub extension (MIT license, score=38); exercises diverse coding patterns"
+    },
+    {
+      "id": "third-party/marckrenn-pi-sub",
+      "name": "marckrenn-pi-sub",
+      "directory": "third-party/marckrenn-pi-sub",
+      "source_tier": "third-party-github",
+      "license": "MIT",
+      "score": 38.0,
+      "provenance": {
+        "checksum_sha256": "33ba799ac71a1086058ad47fec013f18d08fcf5021cfa5f4729538a3ab90fe36",
+        "source_type": "url"
+      },
+      "capabilities": [
+        "ExtensionAPI_import",
+        "event_hook",
+        "events_api",
+        "exec_api",
+        "export_default",
+        "registerShortcut",
+        "registerTool",
+        "session_api",
+        "ui_header"
+      ],
+      "category": "tool",
+      "risk_level": "minimal",
+      "inclusion_rationale": "Third-party GitHub extension (MIT license, score=38); exercises diverse coding patterns"
+    },
+    {
+      "id": "third-party/w-winter-dot314",
+      "name": "w-winter-dot314",
+      "directory": "third-party/w-winter-dot314",
+      "source_tier": "third-party-github",
+      "license": "MIT",
+      "score": 23.0,
+      "provenance": {
+        "checksum_sha256": "8deb3029e326eb4eccc713c4de1214876125edf834eef5da2bb9135f1b6bb17e",
+        "source_type": "url"
+      },
+      "capabilities": [
+        "ExtensionAPI_import",
+        "event_hook",
+        "events_api",
+        "exec_api",
+        "export_default",
+        "registerFlag",
+        "registerShortcut",
+        "registerTool",
+        "session_api",
+        "ui_header",
+        "ui_overlay"
+      ],
+      "category": "tool",
+      "risk_level": "minimal",
+      "inclusion_rationale": "Third-party GitHub extension (MIT license, score=23); exercises diverse coding patterns"
     },
     {
       "id": "timed-confirm",
@@ -3991,57 +4120,6 @@
       "inclusion_rationale": "npm-published extension (UNKNOWN license, score=42); validates npm packaging and dependency resolution"
     },
     {
-      "id": "third-party/aliou-pi-extensions",
-      "name": "aliou-pi-extensions",
-      "directory": "third-party/aliou-pi-extensions",
-      "source_tier": "third-party-github",
-      "license": "UNKNOWN",
-      "score": 38.0,
-      "provenance": {
-        "checksum_sha256": "60a1caf25626d1442662f3d1f7fbdc570727e26b049868798d49ec9c023f3863",
-        "source_type": "url"
-      },
-      "capabilities": [
-        "ExtensionAPI_import",
-        "event_hook",
-        "events_api",
-        "exec_api",
-        "export_default",
-        "registerTool",
-        "session_api",
-        "ui_header",
-        "ui_overlay"
-      ],
-      "category": "tool",
-      "risk_level": "medium",
-      "inclusion_rationale": "Third-party GitHub extension (UNKNOWN license, score=38); exercises diverse coding patterns"
-    },
-    {
-      "id": "third-party/ben-vargas-pi-packages",
-      "name": "ben-vargas-pi-packages",
-      "directory": "third-party/ben-vargas-pi-packages",
-      "source_tier": "third-party-github",
-      "license": "UNKNOWN",
-      "score": 38.0,
-      "provenance": {
-        "checksum_sha256": "cfcde6f2e0ad8e86c94a3235ddcfee996a19b690b3d3293e42d46a1e3ea5ceda",
-        "source_type": "url"
-      },
-      "capabilities": [
-        "ExtensionAPI_import",
-        "event_hook",
-        "export_default",
-        "registerFlag",
-        "registerProvider",
-        "registerShortcut",
-        "registerTool",
-        "ui_header"
-      ],
-      "category": "provider",
-      "risk_level": "low",
-      "inclusion_rationale": "Third-party GitHub extension (UNKNOWN license, score=38); exercises diverse coding patterns"
-    },
-    {
       "id": "third-party/charles-cooper-pi-extensions",
       "name": "charles-cooper-pi-extensions",
       "directory": "third-party/charles-cooper-pi-extensions",
@@ -4130,30 +4208,6 @@
       "inclusion_rationale": "Third-party GitHub extension (UNKNOWN license, score=38); exercises diverse coding patterns"
     },
     {
-      "id": "third-party/kcosr-pi-extensions",
-      "name": "kcosr-pi-extensions",
-      "directory": "third-party/kcosr-pi-extensions",
-      "source_tier": "third-party-github",
-      "license": "UNKNOWN",
-      "score": 38.0,
-      "provenance": {
-        "checksum_sha256": "3ae6c9a2c50ec4cfa38ee50a8cecde77ea40683b90cdb8b741bbca7c19093857",
-        "source_type": "url"
-      },
-      "capabilities": [
-        "ExtensionAPI_import",
-        "event_hook",
-        "export_default",
-        "registerTool",
-        "session_api",
-        "ui_header",
-        "ui_overlay"
-      ],
-      "category": "tool",
-      "risk_level": "medium",
-      "inclusion_rationale": "Third-party GitHub extension (UNKNOWN license, score=38); exercises diverse coding patterns"
-    },
-    {
       "id": "third-party/limouren-agent-things",
       "name": "limouren-agent-things",
       "directory": "third-party/limouren-agent-things",
@@ -4199,32 +4253,6 @@
       "inclusion_rationale": "Third-party GitHub extension (UNKNOWN license, score=38); exercises diverse coding patterns"
     },
     {
-      "id": "third-party/marckrenn-pi-sub",
-      "name": "marckrenn-pi-sub",
-      "directory": "third-party/marckrenn-pi-sub",
-      "source_tier": "third-party-github",
-      "license": "UNKNOWN",
-      "score": 38.0,
-      "provenance": {
-        "checksum_sha256": "33ba799ac71a1086058ad47fec013f18d08fcf5021cfa5f4729538a3ab90fe36",
-        "source_type": "url"
-      },
-      "capabilities": [
-        "ExtensionAPI_import",
-        "event_hook",
-        "events_api",
-        "exec_api",
-        "export_default",
-        "registerShortcut",
-        "registerTool",
-        "session_api",
-        "ui_header"
-      ],
-      "category": "tool",
-      "risk_level": "low",
-      "inclusion_rationale": "Third-party GitHub extension (UNKNOWN license, score=38); exercises diverse coding patterns"
-    },
-    {
       "id": "third-party/michalvavra-agents",
       "name": "michalvavra-agents",
       "directory": "third-party/michalvavra-agents",
@@ -4252,7 +4280,7 @@
       "license": "UNKNOWN",
       "score": 38.0,
       "provenance": {
-        "checksum_sha256": "893ecf1c25c7c23b5b2a65c1b9812144fbd4b42a87a838b11b93f538c8e98568",
+        "checksum_sha256": "64060313b1939dbb9a51446473701929fc18e1e7a15abb47a48671e75a801528",
         "source_type": "url"
       },
       "capabilities": [
@@ -4426,34 +4454,6 @@
       "category": "ui",
       "risk_level": "low",
       "inclusion_rationale": "Third-party GitHub extension (UNKNOWN license, score=35); exercises diverse coding patterns"
-    },
-    {
-      "id": "third-party/w-winter-dot314",
-      "name": "w-winter-dot314",
-      "directory": "third-party/w-winter-dot314",
-      "source_tier": "third-party-github",
-      "license": "UNKNOWN",
-      "score": 23.0,
-      "provenance": {
-        "checksum_sha256": "8deb3029e326eb4eccc713c4de1214876125edf834eef5da2bb9135f1b6bb17e",
-        "source_type": "url"
-      },
-      "capabilities": [
-        "ExtensionAPI_import",
-        "event_hook",
-        "events_api",
-        "exec_api",
-        "export_default",
-        "registerFlag",
-        "registerShortcut",
-        "registerTool",
-        "session_api",
-        "ui_header",
-        "ui_overlay"
-      ],
-      "category": "tool",
-      "risk_level": "low",
-      "inclusion_rationale": "Third-party GitHub extension (UNKNOWN license, score=23); exercises diverse coding patterns"
     },
     {
       "id": "third-party/zenobi-us-pi-dcp",
