@@ -12,6 +12,39 @@ Repository: <https://github.com/Dicklesworthstone/pi_agent_rust>
 
 ---
 
+## [v0.1.15] — 2026-05-02 — Release
+
+### Bug Fixes
+
+- **Default OpenAI Codex model now prefers GPT-5.5 with xhigh reasoning** —
+  startup, setup, and model-candidate resolution prefer `openai-codex/gpt-5.5`
+  over older GPT-5.4 defaults, with fuzzy aliases covering GPT-5.5 model names.
+- **RPC startup paths no longer accidentally behave like interactive TUI
+  sessions** — the `--rpc` shortcut is parsed as an explicit RPC mode, avoids
+  incompatible `--print` combinations, and skips interactive-only session-index
+  maintenance.
+- **Non-interactive exits are deterministic** — the CLI process exits after the
+  selected mode returns, avoiding runtime-drop hangs after terminal shutdown.
+- **Streaming and tool-call edge cases are fail-closed** — SSE EOF flushing is
+  terminal across repeated polls, SIGPIPE trampoline exec failures propagate as
+  tool errors, and Bun/Node extension helpers avoid invalid native argument
+  shapes.
+- **Filesystem and extension tests are confinement-aware** — grep output remains
+  relative from symlinked working directories, Bun file-write coverage avoids
+  escaping the extension root, and validation tolerates unvendored candidate-pool
+  hits without weakening hard gates.
+- **Release evidence writers honor off-repo target directories** — performance,
+  lifecycle, provider-registry, and scenario harnesses now write artifacts under
+  `CARGO_TARGET_DIR` when set, preventing release gates from failing on unwritable
+  or missing repository `target/` paths.
+
+### Internal
+
+- Stabilize HTTP, model-registry, model-selector, provider backward-lock,
+  non-mock compliance, and perf regression fixtures so the release compile,
+  clippy, format, workspace test, and release-build gates run cleanly in the
+  high-capacity release workspace.
+
 ## [v0.1.14] — 2026-04-28 — Release
 
 ### Bug Fixes
