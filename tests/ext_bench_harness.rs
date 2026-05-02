@@ -322,7 +322,19 @@ fn artifacts_dir() -> PathBuf {
 }
 
 fn output_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("target/perf")
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let target_dir = std::env::var("CARGO_TARGET_DIR").ok().map_or_else(
+        || root.join("target"),
+        |raw| {
+            let target_dir = PathBuf::from(raw);
+            if target_dir.is_absolute() {
+                target_dir
+            } else {
+                root.join(target_dir)
+            }
+        },
+    );
+    target_dir.join("perf")
 }
 
 fn load_manifest() -> &'static Manifest {
@@ -1225,7 +1237,7 @@ fn ext_bench_harness() {
     // ── JSONL output ──
 
     let out_dir = output_dir();
-    let _ = std::fs::create_dir_all(&out_dir);
+    std::fs::create_dir_all(&out_dir).expect("create extension benchmark output dir");
 
     let jsonl_path = out_dir.join("ext_bench_harness.jsonl");
     let jsonl: String = all_results

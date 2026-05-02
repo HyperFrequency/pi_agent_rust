@@ -72,16 +72,24 @@ fn project_root() -> PathBuf {
 }
 
 fn target_dir() -> PathBuf {
-    std::env::var("CARGO_TARGET_DIR")
-        .ok()
-        .map_or_else(|| project_root().join("target"), PathBuf::from)
+    std::env::var("CARGO_TARGET_DIR").ok().map_or_else(
+        || project_root().join("target"),
+        |dir| {
+            let target_dir = PathBuf::from(dir);
+            if target_dir.is_absolute() {
+                target_dir
+            } else {
+                project_root().join(target_dir)
+            }
+        },
+    )
 }
 
 fn output_dir() -> PathBuf {
     let base = std::env::var("PERF_REGRESSION_OUTPUT")
         .ok()
-        .map_or_else(|| project_root().join("target/perf"), PathBuf::from);
-    let _ = std::fs::create_dir_all(&base);
+        .map_or_else(|| target_dir().join("perf"), PathBuf::from);
+    std::fs::create_dir_all(&base).expect("create perf regression output dir");
     base
 }
 
@@ -1290,7 +1298,8 @@ fn update_baseline() {
 
 fn append_jsonl(path: &Path, line: &str) {
     use std::io::Write;
-    let _ = std::fs::create_dir_all(path.parent().unwrap_or_else(|| Path::new(".")));
+    std::fs::create_dir_all(path.parent().unwrap_or_else(|| Path::new(".")))
+        .expect("create JSONL parent directory");
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)

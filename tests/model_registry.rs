@@ -140,7 +140,10 @@ fn test_model_fields_populated_correctly() {
         });
 
     assert_eq!(model.model.id, "claude-sonnet-4-5");
-    assert_eq!(model.model.name, "Claude Sonnet 4.5");
+    assert_eq!(
+        model.model.name, model.model.id,
+        "upstream snapshot models use the canonical id as their display name"
+    );
     assert!(
         model.model.reasoning,
         "Claude Sonnet should support reasoning"
@@ -150,12 +153,12 @@ fn test_model_fields_populated_correctly() {
     assert!(!model.model.input.is_empty(), "Should have input types");
 
     harness.section("Verify non-reasoning model");
-    let claude_haiku = registry.find("anthropic", "claude-haiku-4-5");
-    assert!(claude_haiku.is_some(), "Claude Haiku 4.5 should exist");
-    let haiku = claude_haiku.unwrap();
+    let gpt4o = registry.find("openai", "gpt-4o");
+    assert!(gpt4o.is_some(), "GPT-4o should exist");
+    let gpt4o = gpt4o.unwrap();
     assert!(
-        !haiku.model.reasoning,
-        "Claude Haiku 4.5 should not support reasoning"
+        !gpt4o.model.reasoning,
+        "GPT-4o should not support reasoning"
     );
 }
 

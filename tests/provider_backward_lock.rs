@@ -371,9 +371,19 @@ fn openai_responses_request_shape_minimal() {
         v["input"].is_array(),
         "Responses API uses 'input' not 'messages'"
     );
-    // System prompt as first input item
-    assert_eq!(v["input"][0]["role"], "system");
-    assert_eq!(v["input"][0]["content"], "You are helpful.");
+    // System prompt is a top-level Responses `instructions` field, not an input item.
+    assert_eq!(v["instructions"], "You are helpful.");
+    assert_eq!(v["input"][0]["role"], "user");
+    assert_eq!(v["input"][0]["content"][0]["type"], "input_text");
+    assert_eq!(v["input"][0]["content"][0]["text"], "Hello");
+    assert!(
+        !v["input"]
+            .as_array()
+            .expect("input array")
+            .iter()
+            .any(|item| item["role"] == "system"),
+        "Responses API keeps system prompt out of input items"
+    );
 }
 
 #[test]

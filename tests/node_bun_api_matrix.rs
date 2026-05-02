@@ -312,7 +312,7 @@ fn bun_file_write_roundtrip_supports_await_usage() {
     let result = eval_ext_async(
         "",
         r#"(async () => {
-            const p = "/tmp/pi-bun-roundtrip.txt";
+            const p = "pi-bun-roundtrip.txt";
             const written = await Bun.write(p, "bun-roundtrip");
             const file = Bun.file(p);
             const exists = await file.exists();

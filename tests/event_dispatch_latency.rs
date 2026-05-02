@@ -59,7 +59,18 @@ fn project_root() -> PathBuf {
 }
 
 fn report_dir() -> PathBuf {
-    project_root().join("target/perf")
+    let dir = std::env::var("CARGO_TARGET_DIR").ok().map_or_else(
+        || project_root().join("target"),
+        |raw| {
+            let target_dir = PathBuf::from(raw);
+            if target_dir.is_absolute() {
+                target_dir
+            } else {
+                project_root().join(target_dir)
+            }
+        },
+    );
+    dir.join("perf")
 }
 
 fn percentile_index(len: usize, numerator: usize, denominator: usize) -> usize {
@@ -317,13 +328,14 @@ fn event_type_latency_single_extension() {
 
     // Write JSONL report
     let report_dir = report_dir();
-    let _ = std::fs::create_dir_all(&report_dir);
+    std::fs::create_dir_all(&report_dir).expect("create event dispatch report dir");
     let report_path = report_dir.join("event_dispatch_latency.jsonl");
     let lines: Vec<String> = results
         .iter()
         .map(|r| serde_json::to_string(&result_to_jsonl(r)).unwrap_or_default())
         .collect();
-    let _ = std::fs::write(&report_path, lines.join("\n") + "\n");
+    std::fs::write(&report_path, lines.join("\n") + "\n")
+        .expect("write event dispatch latency report");
     eprintln!("  Report: {}", report_path.display());
 
     assert!(
@@ -401,13 +413,14 @@ fn event_dispatch_scaling() {
 
     // Write scaling report
     let report_dir = report_dir();
-    let _ = std::fs::create_dir_all(&report_dir);
+    std::fs::create_dir_all(&report_dir).expect("create event dispatch scaling report dir");
     let report_path = report_dir.join("event_dispatch_scaling.jsonl");
     let lines: Vec<String> = all_results
         .iter()
         .map(|r| serde_json::to_string(&result_to_jsonl(r)).unwrap_or_default())
         .collect();
-    let _ = std::fs::write(&report_path, lines.join("\n") + "\n");
+    std::fs::write(&report_path, lines.join("\n") + "\n")
+        .expect("write event dispatch scaling report");
     eprintln!("  Report: {}", report_path.display());
 
     // All scale levels should meet the budget
@@ -450,7 +463,7 @@ fn hostcall_roundtrip_latency() {
 
     // Write report
     let report_dir = report_dir();
-    let _ = std::fs::create_dir_all(&report_dir);
+    std::fs::create_dir_all(&report_dir).expect("create event dispatch real report dir");
     let report_path = report_dir.join("event_dispatch_hostcall.jsonl");
     let entry = result_to_jsonl(&result);
     let _ = std::fs::write(
@@ -638,7 +651,8 @@ fn real_extension_dispatch_latency() {
         .iter()
         .map(|r| serde_json::to_string(&result_to_jsonl(r)).unwrap_or_default())
         .collect();
-    let _ = std::fs::write(&report_path, lines.join("\n") + "\n");
+    std::fs::write(&report_path, lines.join("\n") + "\n")
+        .expect("write event dispatch real report");
     eprintln!("  Report: {}", report_path.display());
 
     // Cleanup
@@ -655,7 +669,7 @@ fn real_extension_dispatch_latency() {
 #[ignore = "report generator: run manually after other tests"]
 fn generate_latency_report() {
     let report_dir = report_dir();
-    let _ = std::fs::create_dir_all(&report_dir);
+    std::fs::create_dir_all(&report_dir).expect("create event dispatch consolidated report dir");
 
     // Collect all event dispatch JSONL files
     let jsonl_files = [

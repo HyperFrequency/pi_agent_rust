@@ -85,6 +85,21 @@ fn project_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+fn perf_output_path(name: &str) -> PathBuf {
+    let target_dir = std::env::var("CARGO_TARGET_DIR").ok().map_or_else(
+        || project_root().join("target"),
+        |raw| {
+            let target_dir = PathBuf::from(raw);
+            if target_dir.is_absolute() {
+                target_dir
+            } else {
+                project_root().join(target_dir)
+            }
+        },
+    );
+    target_dir.join("perf").join(name)
+}
+
 fn artifact_entry(name: &str) -> PathBuf {
     project_root()
         .join("tests/ext_conformance/artifacts")
@@ -102,10 +117,9 @@ fn write_jsonl(records: &[Value], path: &Path) {
             serde_json::to_string(record).unwrap_or_default()
         );
     }
-    let _ = fs::create_dir_all(path.parent().unwrap_or_else(|| Path::new(".")));
-    fs::write(path, &content).unwrap_or_else(|e| {
-        eprintln!("[error] failed to write {}: {e}", path.display());
-    });
+    fs::create_dir_all(path.parent().unwrap_or_else(|| Path::new(".")))
+        .expect("create lifecycle perf output dir");
+    fs::write(path, &content).expect("write lifecycle perf JSONL");
 }
 
 /// Create an `ExtensionManager` with a JS runtime, load the given spec, return manager.
@@ -495,7 +509,7 @@ fn e2e_full_lifecycle_all_extensions() {
     }
 
     // Write JSONL output
-    let output_path = project_root().join("target/perf/e2e_lifecycle.jsonl");
+    let output_path = perf_output_path("e2e_lifecycle.jsonl");
     write_jsonl(&all_records, &output_path);
     eprintln!(
         "\n[output] {} records written to {}",
@@ -1060,7 +1074,7 @@ fn interference_single_vs_composed() {
     }));
 
     // Write interference JSONL
-    let output_path = project_root().join("target/perf/e2e_interference.jsonl");
+    let output_path = perf_output_path("e2e_interference.jsonl");
     write_jsonl(&records, &output_path);
     eprintln!(
         "\n[output] {} interference records written to {}",
@@ -1288,7 +1302,7 @@ fn per_extension_tool_isolation() {
     }
 
     // Write isolation JSONL
-    let output_path = project_root().join("target/perf/e2e_isolation.jsonl");
+    let output_path = perf_output_path("e2e_isolation.jsonl");
     write_jsonl(&records, &output_path);
     eprintln!(
         "\n[output] {} isolation records written to {}",
@@ -1361,7 +1375,7 @@ fn interference_scaling_by_count() {
     }
 
     // Write scaling JSONL
-    let output_path = project_root().join("target/perf/e2e_scaling.jsonl");
+    let output_path = perf_output_path("e2e_scaling.jsonl");
     write_jsonl(&records, &output_path);
     eprintln!(
         "\n[output] {} scaling records written to {}",
@@ -1702,7 +1716,7 @@ fn stage_decomposition_composed_vs_isolated() {
         eprintln!("[decomp] worst phase: {worst_phase} at {worst_ratio:.2}x");
     }
 
-    let output_path = project_root().join("target/perf/e2e_decomposition.jsonl");
+    let output_path = perf_output_path("e2e_decomposition.jsonl");
     write_jsonl(&records, &output_path);
     eprintln!(
         "\n[output] {} decomposition records written to {}",
@@ -1848,7 +1862,7 @@ fn pairwise_extension_contention_matrix() {
         eprintln!("[contention] hottest pair: {ext_a}+{ext_b} at {ratio:.2}x p50, {tail:.2}x p95");
     }
 
-    let output_path = project_root().join("target/perf/e2e_contention.jsonl");
+    let output_path = perf_output_path("e2e_contention.jsonl");
     write_jsonl(&records, &output_path);
     eprintln!(
         "\n[output] {} contention records written to {}",
@@ -2095,7 +2109,7 @@ fn regression_gate_structured_report() {
 
     records.push(report);
 
-    let output_path = project_root().join("target/perf/e2e_regression_gate.jsonl");
+    let output_path = perf_output_path("e2e_regression_gate.jsonl");
     write_jsonl(&records, &output_path);
     eprintln!(
         "\n[reggate] verdict: {} ({} gate failures) -> {}",

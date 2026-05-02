@@ -77,8 +77,19 @@ fn project_root() -> PathBuf {
 }
 
 fn output_dir() -> PathBuf {
-    let out = project_root().join("target/perf");
-    let _ = std::fs::create_dir_all(&out);
+    let target_dir = std::env::var("CARGO_TARGET_DIR").ok().map_or_else(
+        || project_root().join("target"),
+        |raw| {
+            let target_dir = PathBuf::from(raw);
+            if target_dir.is_absolute() {
+                target_dir
+            } else {
+                project_root().join(target_dir)
+            }
+        },
+    );
+    let out = target_dir.join("perf");
+    std::fs::create_dir_all(&out).expect("create provider registry guardrail output dir");
     out
 }
 
@@ -92,6 +103,8 @@ fn artifact_latest() -> PathBuf {
 
 fn append_jsonl(path: &Path, line: &str) {
     use std::io::Write;
+    std::fs::create_dir_all(path.parent().unwrap_or_else(|| Path::new(".")))
+        .expect("create provider registry guardrail artifact dir");
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)

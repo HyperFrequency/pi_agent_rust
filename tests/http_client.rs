@@ -142,7 +142,7 @@ fn request_builder_sends_headers_and_json_body() {
 fn response_parses_status_headers_and_body_content_length() {
     let harness = TestHarness::new("http_client_response_parses_status_headers_and_body");
 
-    let server = OneShotServer::start(|mut stream, _request| {
+    let server = OneShotServer::start(move |mut stream, _request| {
         let response = concat!(
             "HTTP/1.1 200 OK\r\n",
             "Content-Length: 11\r\n",
@@ -177,7 +177,7 @@ fn response_parses_status_headers_and_body_content_length() {
 fn response_streams_chunked_body() {
     let harness = TestHarness::new("http_client_response_streams_chunked_body");
 
-    let server = OneShotServer::start(|mut stream, _request| {
+    let server = OneShotServer::start(move |mut stream, _request| {
         let head = concat!(
             "HTTP/1.1 200 OK\r\n",
             "Transfer-Encoding: chunked\r\n",
@@ -273,8 +273,9 @@ fn malformed_header_line_is_error() {
 #[test]
 fn invalid_content_length_is_error() {
     let harness = TestHarness::new("http_client_invalid_content_length_is_error");
+    let (release_tx, release_rx) = mpsc::channel();
 
-    let server = OneShotServer::start(|mut stream, _request| {
+    let server = OneShotServer::start(move |mut stream, _request| {
         let response = concat!(
             "HTTP/1.1 200 OK\r\n",
             "Content-Length: nope\r\n",
@@ -285,20 +286,21 @@ fn invalid_content_length_is_error() {
             .write_all(response.as_bytes())
             .expect("write response");
         stream.flush().expect("flush response");
-        thread::sleep(Duration::from_secs(1));
+        let _ = release_rx.recv_timeout(Duration::from_secs(5));
     });
 
     let url = server.url("/invalid-content-length");
     let err = common::run_async(async move {
         Client::new()
             .get(&url)
-            .timeout(Duration::from_millis(500))
+            .timeout(Duration::from_secs(3))
             .send()
             .await
             .err()
             .expect("expected invalid content-length error")
     });
 
+    let _ = release_tx.send(());
     server.join();
     let message = err.to_string();
     assert!(

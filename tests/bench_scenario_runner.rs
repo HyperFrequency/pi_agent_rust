@@ -143,6 +143,21 @@ fn project_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+fn perf_output_path(name: &str) -> PathBuf {
+    let target_dir = std::env::var("CARGO_TARGET_DIR").ok().map_or_else(
+        || project_root().join("target"),
+        |raw| {
+            let target_dir = PathBuf::from(raw);
+            if target_dir.is_absolute() {
+                target_dir
+            } else {
+                project_root().join(target_dir)
+            }
+        },
+    );
+    target_dir.join("perf").join(name)
+}
+
 fn artifact_entry(name: &str) -> PathBuf {
     project_root()
         .join("tests/ext_conformance/artifacts")
@@ -787,10 +802,9 @@ fn write_jsonl(records: &[Value], path: &Path) {
             serde_json::to_string(record).unwrap_or_default()
         );
     }
-    let _ = fs::create_dir_all(path.parent().unwrap_or_else(|| Path::new(".")));
-    fs::write(path, &content).unwrap_or_else(|e| {
-        eprintln!("[error] failed to write {}: {e}", path.display());
-    });
+    fs::create_dir_all(path.parent().unwrap_or_else(|| Path::new(".")))
+        .expect("create benchmark scenario output dir");
+    fs::write(path, &content).expect("write benchmark scenario JSONL");
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -972,7 +986,7 @@ fn run_scenario_suite_and_emit_jsonl() {
     assert_records_have_schema(&records);
 
     // Write JSONL output
-    let output_path = project_root().join("target/perf/scenario_runner.jsonl");
+    let output_path = perf_output_path("scenario_runner.jsonl");
     write_jsonl(&records, &output_path);
     eprintln!(
         "\n[output] {} records written to {}",

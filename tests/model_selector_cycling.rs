@@ -95,7 +95,7 @@ fn make_model_entry(provider: &str, model_id: &str) -> ModelEntry {
 
     ModelEntry {
         model,
-        api_key: None,
+        api_key: Some(format!("{provider}-test-key")),
         headers: HashMap::new(),
         auth_header: false,
         compat: None,
