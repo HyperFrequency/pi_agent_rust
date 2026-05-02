@@ -19,14 +19,8 @@ from typing import Any
 
 SCHEMA = "pi.operations.maintenance_dashboard.v1"
 DEFAULT_OUTPUT = Path("docs/evidence/maintenance-dashboard.json")
-LEDGER_CANDIDATES = (
-    Path("docs/evidence/dropin-parity-gap-ledger.json"),
-    Path("docs/dropin-parity-gap-ledger.json"),
-)
-VERDICT_CANDIDATES = (
-    Path("docs/evidence/dropin-certification-verdict.json"),
-    Path("docs/dropin-certification-verdict.json"),
-)
+LEDGER_PATH = Path("docs/evidence/dropin-parity-gap-ledger.json")
+VERDICT_PATH = Path("docs/evidence/dropin-certification-verdict.json")
 JSON_DECODER = json.JSONDecoder()
 
 
@@ -58,14 +52,6 @@ def utc_now() -> str:
         .isoformat()
         .replace("+00:00", "Z")
     )
-
-
-def resolve_existing(repo_root: Path, candidates: tuple[Path, ...]) -> Path:
-    for candidate in candidates:
-        path = repo_root / candidate
-        if path.exists():
-            return path
-    return repo_root / candidates[0]
 
 
 def parse_json_value(payload: str, context: str) -> Any:
@@ -267,8 +253,8 @@ def main() -> int:
     output_path = args.output if args.output.is_absolute() else repo_root / args.output
     generated_at = args.generated_at or os.environ.get("GENERATED_AT_UTC") or utc_now()
 
-    ledger_path = resolve_existing(repo_root, LEDGER_CANDIDATES)
-    verdict_path = resolve_existing(repo_root, VERDICT_CANDIDATES)
+    ledger_path = repo_root / LEDGER_PATH
+    verdict_path = repo_root / VERDICT_PATH
     issues_path = repo_root / ".beads" / "issues.jsonl"
 
     ledger = read_json(ledger_path, {"entries": []})

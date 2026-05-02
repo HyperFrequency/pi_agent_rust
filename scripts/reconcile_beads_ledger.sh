@@ -17,18 +17,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# File paths. Keep the historical location as a fallback for older checkouts.
-LEDGER_CANDIDATES=(
-    "$PROJECT_ROOT/docs/evidence/dropin-parity-gap-ledger.json"
-    "$PROJECT_ROOT/docs/dropin-parity-gap-ledger.json"
-)
-LEDGER_FILE="${LEDGER_CANDIDATES[0]}"
-for candidate in "${LEDGER_CANDIDATES[@]}"; do
-    if [[ -f "$candidate" ]]; then
-        LEDGER_FILE="$candidate"
-        break
-    fi
-done
+# File paths.
+LEDGER_FILE="$PROJECT_ROOT/docs/evidence/dropin-parity-gap-ledger.json"
 
 # Colors for output
 RED='\033[0;31m'

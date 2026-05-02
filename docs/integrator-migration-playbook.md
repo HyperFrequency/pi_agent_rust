@@ -16,13 +16,13 @@ Use this when you need to:
 Before migration, pin these artifacts as your source of truth:
 
 - Baseline snapshot: `docs/dropin-upstream-baseline.json`
-- Surface inventory: `docs/dropin-feature-inventory-matrix.json`
-- Gap ledger: `docs/dropin-parity-gap-ledger.json`
+- Surface inventory: `docs/evidence/dropin-feature-inventory-matrix.json`
+- Gap ledger: `docs/evidence/dropin-parity-gap-ledger.json`
 - Certification gates: `docs/contracts/dropin-certification-contract.json`
 - Certification verdict artifact (strict claim gate): `docs/evidence/dropin-certification-verdict.json`
 - Current parity status snapshot (informational): `docs/parity-certification.json`
 
-If your required workflow maps to an open `critical`/`high` gap in `docs/dropin-parity-gap-ledger.json`, treat migration as blocked until that gap is closed or explicitly waived for your environment.
+If your required workflow maps to an open `critical`/`high` gap in `docs/evidence/dropin-parity-gap-ledger.json`, treat migration as blocked until that gap is closed or explicitly waived for your environment.
 If `docs/evidence/dropin-certification-verdict.json` is missing or not `overall_verdict = CERTIFIED`, treat strict drop-in replacement messaging as blocked.
 
 ## Migration Outcomes
@@ -236,8 +236,8 @@ If compatibility fails in canary or production:
 ## Related References
 
 - `docs/dropin-upstream-baseline.json`
-- `docs/dropin-feature-inventory-matrix.json`
-- `docs/dropin-parity-gap-ledger.json`
+- `docs/evidence/dropin-feature-inventory-matrix.json`
+- `docs/evidence/dropin-parity-gap-ledger.json`
 - `docs/contracts/dropin-certification-contract.json`
 - `docs/evidence/dropin-certification-verdict.json`
 - `docs/parity-certification.json`

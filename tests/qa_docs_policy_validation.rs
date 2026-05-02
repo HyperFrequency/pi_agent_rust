@@ -35,6 +35,11 @@ const FLAKE_TRIAGE_PATH: &str = "docs/flake-triage-policy.md";
 const SCENARIO_MATRIX_PATH: &str = "docs/e2e_scenario_matrix.json";
 const PERF_SLI_MATRIX_PATH: &str = "docs/perf_sli_matrix.json";
 const FRANKEN_NODE_MISSION_CONTRACT_PATH: &str = "docs/franken-node-mission-contract.json";
+const DROPIN_CERTIFICATION_CONTRACT_PATH: &str =
+    "docs/contracts/dropin-certification-contract.json";
+const INTEGRATOR_MIGRATION_PLAYBOOK_PATH: &str = "docs/integrator-migration-playbook.md";
+const MAINTENANCE_DASHBOARD_SCRIPT_PATH: &str = "scripts/generate_maintenance_dashboard.py";
+const RECONCILE_BEADS_LEDGER_SCRIPT_PATH: &str = "scripts/reconcile_beads_ledger.sh";
 const CI_WORKFLOW_PATH: &str = ".github/workflows/ci.yml";
 const WEEKLY_CERTIFICATION_VERDICT_WORKFLOW_PATH: &str =
     ".github/workflows/weekly-certification-verdict.yml";
@@ -1931,6 +1936,40 @@ fn weekly_certification_verdict_workflow_regenerates_verdict_and_opens_pr() {
         cron_idx < verdict_idx && verdict_idx < pr_idx,
         "weekly certification verdict workflow must schedule, regenerate the verdict, then open a PR"
     );
+}
+
+#[test]
+fn dropin_evidence_policy_uses_current_docs_evidence_paths() {
+    for path in [
+        "AGENTS.md",
+        DROPIN_CERTIFICATION_CONTRACT_PATH,
+        INTEGRATOR_MIGRATION_PLAYBOOK_PATH,
+        MAINTENANCE_DASHBOARD_SCRIPT_PATH,
+        RECONCILE_BEADS_LEDGER_SCRIPT_PATH,
+    ] {
+        let content = load_text(path);
+        for stale_path in [
+            "docs/dropin-certification-verdict.json",
+            "docs/dropin-feature-inventory-matrix.json",
+            "docs/dropin-parity-gap-ledger.json",
+        ] {
+            assert!(
+                !content.contains(stale_path),
+                "{path} must not reference stale root-level drop-in evidence path {stale_path}"
+            );
+        }
+    }
+
+    let dashboard_script = load_text(MAINTENANCE_DASHBOARD_SCRIPT_PATH);
+    for current_path in [
+        "docs/evidence/dropin-certification-verdict.json",
+        "docs/evidence/dropin-parity-gap-ledger.json",
+    ] {
+        assert!(
+            dashboard_script.contains(current_path),
+            "maintenance dashboard must read current evidence path {current_path}"
+        );
+    }
 }
 
 #[test]

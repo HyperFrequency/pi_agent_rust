@@ -20071,7 +20071,7 @@ if (typeof globalThis.Bun === 'undefined') {
             globalThis.process && typeof globalThis.process.cwd === 'function'
                 ? globalThis.process.cwd()
                 : '/';
-        const raw = __pi_exec_sync_native('which', JSON.stringify([name]), cwd, 2000, undefined);
+        const raw = __pi_exec_sync_native('which', JSON.stringify([name]), cwd, 2000, 1024 * 1024);
         try {
             const parsed = JSON.parse(raw || '{}');
             if (Number(parsed && parsed.code) !== 0) return null;

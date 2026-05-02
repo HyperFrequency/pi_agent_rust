@@ -583,7 +583,7 @@ Parse: `file:line:col` → location | 💡 → how to fix | Exit 0/1 → pass/fa
 
 The script cross-references:
 - **Active beads** (from `br list --json`, statuses `open` and `in_progress`)
-- **Open critical/high gaps** (from `docs/dropin-parity-gap-ledger.json`)
+- **Open critical/high gaps** (from `docs/evidence/dropin-parity-gap-ledger.json`)
 - **Gap-tracking external refs** (`external_ref=<gap-id>`)
 
 If any critical or high-severity gap lacks a corresponding active owner bead or active bead with `external_ref=<gap-id>`, the script fails and lists the orphan gap. If any active bead references a `gap-*` external ref that is not an active critical/high ledger gap, the script also fails so stale tracker work cannot outlive the ledger truth.

@@ -49,7 +49,7 @@
         "bd-w9i9o"
       ],
       "required_artifacts": [
-        "docs/dropin-feature-inventory-matrix.json",
+        "docs/evidence/dropin-feature-inventory-matrix.json",
         "docs/dropin-112-feature-inventory-matrix.md"
       ],
       "required_evidence": [
@@ -73,7 +73,7 @@
         "bd-13pqz"
       ],
       "required_artifacts": [
-        "docs/dropin-parity-gap-ledger.json",
+        "docs/evidence/dropin-parity-gap-ledger.json",
         "docs/dropin-error-crosswalk.json"
       ],
       "required_evidence": [
@@ -98,7 +98,7 @@
         "bd-3meug"
       ],
       "required_artifacts": [
-        "docs/dropin-parity-gap-ledger.json"
+        "docs/evidence/dropin-parity-gap-ledger.json"
       ],
       "required_evidence": [
         "CLI command/flag/subcommand parity matrix results.",
@@ -127,7 +127,7 @@
         "bd-2ez14"
       ],
       "required_artifacts": [
-        "docs/dropin-parity-gap-ledger.json"
+        "docs/evidence/dropin-parity-gap-ledger.json"
       ],
       "required_evidence": [
         "JSON event schema and ordering conformance outputs.",
@@ -157,7 +157,7 @@
         "bd-28zrk"
       ],
       "required_artifacts": [
-        "docs/dropin-parity-gap-ledger.json",
+        "docs/evidence/dropin-parity-gap-ledger.json",
         "docs/dropin-sdk-contract.json"
       ],
       "required_evidence": [
@@ -184,7 +184,7 @@
         "bd-uuf2z"
       ],
       "required_artifacts": [
-        "docs/dropin-parity-gap-ledger.json"
+        "docs/evidence/dropin-parity-gap-ledger.json"
       ],
       "required_evidence": [
         "Config precedence/default parity tests.",
@@ -209,7 +209,7 @@
         "bd-3kz49"
       ],
       "required_artifacts": [
-        "docs/dropin-parity-gap-ledger.json"
+        "docs/evidence/dropin-parity-gap-ledger.json"
       ],
       "required_evidence": [
         "Session branching/compaction parity tests.",
@@ -233,7 +233,7 @@
         "bd-2xalc"
       ],
       "required_artifacts": [
-        "docs/dropin-parity-gap-ledger.json"
+        "docs/evidence/dropin-parity-gap-ledger.json"
       ],
       "required_evidence": [
         "stdio framing and non-interactive semantics parity checks.",
@@ -259,7 +259,7 @@
         "bd-1nq53"
       ],
       "required_artifacts": [
-        "docs/dropin-parity-gap-ledger.json"
+        "docs/evidence/dropin-parity-gap-ledger.json"
       ],
       "required_evidence": [
         "Differential runner outputs for mirrored scenarios.",
@@ -317,7 +317,7 @@
       ],
       "required_artifacts": [
         "README.md",
-        "docs/dropin-parity-gap-ledger.json"
+        "docs/evidence/dropin-parity-gap-ledger.json"
       ],
       "required_evidence": [
         "Public parity claims align with actual gate status.",
@@ -339,8 +339,8 @@
         "description": "Refresh baseline and parity artifacts to current commit.",
         "required_outputs": [
           "docs/dropin-upstream-baseline.json",
-          "docs/dropin-feature-inventory-matrix.json",
-          "docs/dropin-parity-gap-ledger.json"
+          "docs/evidence/dropin-feature-inventory-matrix.json",
+          "docs/evidence/dropin-parity-gap-ledger.json"
         ]
       },
       {
