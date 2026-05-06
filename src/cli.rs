@@ -346,6 +346,20 @@ pub struct Cli {
     #[arg(long)]
     pub no_migrations: bool,
 
+    /// Disable terminal mouse capture in the interactive TUI.
+    ///
+    /// Pi normally captures all mouse motion to enable in-app wheel scrolling.
+    /// On Windows / CMD.exe / Windows Terminal that capture blocks the
+    /// terminal-native click-to-select / right-click-paste / Shift-Insert
+    /// behaviour, making it effectively impossible to copy out the OAuth
+    /// authorization URL (which is ~600 characters). Setting this flag (or
+    /// `disable_mouse_capture: true` in settings, or `PI_NO_MOUSE_CAPTURE=1`)
+    /// turns the capture off so terminal-native copy/paste keeps working.
+    /// In-app mouse wheel scrolling is sacrificed; users can still scroll
+    /// with Page Up/Down or arrow keys.
+    #[arg(long, env = "PI_NO_MOUSE_CAPTURE")]
+    pub no_mouse_capture: bool,
+
     // === Mode & Output ===
     /// Output mode for print mode (text, json, rpc)
     #[arg(long, value_parser = ["text", "json", "rpc"])]

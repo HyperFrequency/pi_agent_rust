@@ -963,6 +963,11 @@ async fn run(
         // Theme already validated above
         config.theme = Some(theme_spec.to_string());
     }
+    if cli.no_mouse_capture {
+        // CLI flag (and PI_NO_MOUSE_CAPTURE env var, which clap reads via #[arg(env)])
+        // takes precedence over the persisted setting. Workaround for #78.
+        config.disable_mouse_capture = Some(true);
+    }
 
     let startup_mode = cli.mode.clone().unwrap_or_else(|| {
         if !cli.print && cli.export.is_none() {

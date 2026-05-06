@@ -1094,8 +1094,7 @@ fn extract_prompt_text(blocks: &[Value]) -> std::result::Result<String, String> 
             "text" => {
                 let Some(text) = block.get("text").and_then(Value::as_str) else {
                     return Err(
-                        "Prompt block of type \"text\" missing required field \"text\""
-                            .to_string(),
+                        "Prompt block of type \"text\" missing required field \"text\"".to_string(),
                     );
                 };
                 if !out.is_empty() {
@@ -1119,7 +1118,7 @@ fn extract_prompt_text(blocks: &[Value]) -> std::result::Result<String, String> 
             }
             "" => {
                 return Err(
-                    "Prompt block missing required discriminator field \"type\"".to_string(),
+                    "Prompt block missing required discriminator field \"type\"".to_string()
                 );
             }
             other => {
@@ -1244,7 +1243,10 @@ fn classify_tool_kind(tool_name: &str) -> &'static str {
         "search" | "grep" | "ripgrep" | "rg" | "find" | "glob"
     ) {
         "search"
-    } else if matches!(lower.as_str(), "execute" | "bash" | "shell" | "run" | "exec") {
+    } else if matches!(
+        lower.as_str(),
+        "execute" | "bash" | "shell" | "run" | "exec"
+    ) {
         "execute"
     } else if matches!(lower.as_str(), "fetch" | "http" | "curl" | "web_fetch") {
         "fetch"
@@ -1348,10 +1350,19 @@ mod tests {
         // Sessions are in-process only — we never advertise loadSession.
         assert_eq!(result["agentCapabilities"]["loadSession"], false);
         // promptCapabilities advertise text/resource_link baseline only.
-        assert_eq!(result["agentCapabilities"]["promptCapabilities"]["audio"], false);
-        assert_eq!(result["agentCapabilities"]["promptCapabilities"]["image"], false);
+        assert_eq!(
+            result["agentCapabilities"]["promptCapabilities"]["audio"],
+            false
+        );
+        assert_eq!(
+            result["agentCapabilities"]["promptCapabilities"]["image"],
+            false
+        );
         // mcpCapabilities advertised explicitly so the client knows transports.
-        assert_eq!(result["agentCapabilities"]["mcpCapabilities"]["http"], false);
+        assert_eq!(
+            result["agentCapabilities"]["mcpCapabilities"]["http"],
+            false
+        );
         assert_eq!(result["agentCapabilities"]["mcpCapabilities"]["sse"], false);
         // authMethods is required even when empty.
         assert!(result["authMethods"].is_array());

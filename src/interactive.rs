@@ -1667,6 +1667,17 @@ pub async fn run_interactive(
             .ok()
             .is_some_and(|val| val == "1")
     });
+    // Mouse capture defaults ON (preserves existing in-app wheel-scroll
+    // behaviour). Users on Windows/CMD/Windows Terminal can opt out via
+    // `--no-mouse-capture`, `disable_mouse_capture: true` in settings, or
+    // `PI_NO_MOUSE_CAPTURE=1` env var to restore terminal-native click-to-
+    // select / right-click-paste / Shift-Insert. See pi_agent_rust#78 for
+    // the OAuth-flow copy-out problem this solves.
+    let disable_mouse_capture = config.disable_mouse_capture.unwrap_or_else(|| {
+        std::env::var("PI_NO_MOUSE_CAPTURE")
+            .ok()
+            .is_some_and(|val| val == "1")
+    });
     let mut stdout = std::io::stdout();
     if show_hardware_cursor {
         let _ = crossterm::execute!(stdout, cursor::Show);
@@ -1727,7 +1738,13 @@ pub async fn run_interactive(
         conversation_from_session(&guard)
     };
 
-    Program::new(PiApp::new(
+    // Build the bubbletea program. Mouse capture is conditional: ON by
+    // default (so in-app mouse-wheel scrolling routes to the TUI), but
+    // disabled when the user opts out via --no-mouse-capture / settings /
+    // PI_NO_MOUSE_CAPTURE so terminal-native copy/paste keeps working
+    // (Windows-specific UX win — see pi_agent_rust#78). When disabled,
+    // users scroll with Page Up/Down or arrow keys instead.
+    let mut program = Program::new(PiApp::new(
         agent,
         session,
         config,
@@ -1748,9 +1765,11 @@ pub async fn run_interactive(
         usage,
     ))
     .with_alt_screen()
-    .with_mouse_all_motion()
-    .with_input_receiver(ui_rx)
-    .run()?;
+    .with_input_receiver(ui_rx);
+    if !disable_mouse_capture {
+        program = program.with_mouse_all_motion();
+    }
+    program.run()?;
 
     // Tell the async bridge to exit promptly even if some background task still
     // holds an event sender clone after the TUI has already shut down.

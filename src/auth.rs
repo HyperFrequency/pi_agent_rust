@@ -1637,6 +1637,28 @@ where
     Some((credentials_path, config_path))
 }
 
+/// Like [`aws_credentials_paths_from_env`] but only resolves the config-file
+/// path. Used by SSO discovery, which needs to read `[profile X]` and
+/// `[sso-session Y]` blocks from `~/.aws/config` but does NOT need the
+/// `~/.aws/credentials` file (SSO doesn't write static IAM keys there).
+///
+/// Falls back: `AWS_CONFIG_FILE` env var → `<HOME>/.aws/config`. Returns
+/// None only when no env var is set AND no home directory can be resolved.
+fn aws_config_path_from_env<F>(env: &mut F) -> Option<PathBuf>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    if let Some(path) = env("AWS_CONFIG_FILE")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+    {
+        return Some(path);
+    }
+    let home = aws_home_dir_from_env(env)?;
+    Some(home.join(".aws").join("config"))
+}
+
 fn parse_aws_ini(contents: &str) -> HashMap<String, HashMap<String, String>> {
     let mut sections: HashMap<String, HashMap<String, String>> = HashMap::new();
     let mut current: Option<String> = None;
@@ -1678,8 +1700,11 @@ where
     F: FnMut(&str) -> Option<String>,
 {
     let (credentials_path, config_path) = aws_credentials_paths_from_env(env)?;
-    let credentials_text = std::fs::read_to_string(&credentials_path).ok()?;
-    let credentials = parse_aws_ini(&credentials_text);
+    let credentials = std::fs::read_to_string(&credentials_path)
+        .ok()
+        .as_deref()
+        .map(parse_aws_ini)
+        .unwrap_or_default();
     let profile_key = profile.trim().to_ascii_lowercase();
     let section = credentials.get(&profile_key)?;
 
@@ -1710,15 +1735,7 @@ where
     if allow_config_region {
         if let Ok(config_text) = std::fs::read_to_string(&config_path) {
             let config = parse_aws_ini(&config_text);
-            let mut candidates = Vec::new();
-            if profile_key == "default" {
-                candidates.push("default".to_string());
-                candidates.push("profile default".to_string());
-            } else {
-                candidates.push(format!("profile {profile_key}"));
-                candidates.push(profile_key.clone());
-            }
-            for name in candidates {
+            for name in profile_section_candidates(&profile_key) {
                 if let Some(section) = config.get(&name) {
                     if let Some(value) = section.get("region") {
                         let trimmed = value.trim();
@@ -1738,6 +1755,546 @@ where
         session_token,
         region,
     })
+}
+
+/// Candidate `[profile X]` / `[X]` section names for `~/.aws/config`.
+///
+/// The AWS shared config format names the default profile literally `[default]`
+/// (or sometimes `[profile default]` when written by tooling), while named
+/// profiles are written as `[profile NAME]`. SSO sessions live in
+/// `[sso-session NAME]` and use just the session name (no `profile` prefix).
+fn profile_section_candidates(profile_key: &str) -> Vec<String> {
+    if profile_key == "default" {
+        vec!["default".to_string(), "profile default".to_string()]
+    } else {
+        vec![format!("profile {profile_key}"), profile_key.to_string()]
+    }
+}
+
+// ── AWS SSO (Single Sign-On) Resolution ─────────────────────────
+//
+// Modern AWS profiles increasingly use SSO instead of static IAM credentials.
+// An SSO profile in `~/.aws/config` looks like one of:
+//
+//   ; sso-session form (preferred, SDKv2+):
+//   [profile dev]
+//   sso_session = my-sso
+//   sso_account_id = 123456789012
+//   sso_role_name = MyRole
+//   region = us-west-2
+//
+//   [sso-session my-sso]
+//   sso_start_url = https://example.awsapps.com/start
+//   sso_region = us-east-1
+//
+//   ; legacy form (sso_start_url on the profile itself):
+//   [profile dev]
+//   sso_start_url = https://example.awsapps.com/start
+//   sso_region = us-east-1
+//   sso_account_id = 123456789012
+//   sso_role_name = MyRole
+//
+// `aws sso login` writes a cached OIDC access token to
+// `~/.aws/sso/cache/<sha1>.json`. The cache key is SHA1 of the
+// `sso_session` name (sso-session form) or the `sso_start_url`
+// (legacy form). The JSON file contains `accessToken`, `expiresAt`,
+// and `region` fields.
+//
+// Pi exchanges the cached access token for short-lived IAM credentials
+// via the SSO Portal `GetRoleCredentials` API. Pi never refreshes the
+// SSO access token itself — that requires the interactive browser flow
+// driven by `aws sso login`.
+
+/// Information needed to perform an SSO `GetRoleCredentials` call.
+///
+/// Produced synchronously from `~/.aws/config` + `~/.aws/sso/cache/`.
+/// Consumed by the async [`exchange_aws_sso_credentials`] helper.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AwsSsoTokenLocator {
+    /// SSO Portal access token (`accessToken` from the cache file).
+    pub access_token: String,
+    /// SSO region (where the SSO Portal lives), e.g. `us-east-1`.
+    pub sso_region: String,
+    /// AWS account ID the role belongs to.
+    pub account_id: String,
+    /// IAM role name to assume.
+    pub role_name: String,
+    /// Region the resolved IAM credentials should target (the profile's
+    /// `region`, NOT the SSO region — these are usually different).
+    pub target_region: String,
+}
+
+/// Detect an AWS SSO profile in `~/.aws/config` and resolve the cached
+/// access token from `~/.aws/sso/cache/<sha1>.json`.
+///
+/// Returns:
+/// - `Ok(Some(_))` when the profile is a fully-configured SSO profile
+///   with a non-expired cached token.
+/// - `Ok(None)` when the profile is not an SSO profile (caller should
+///   fall back to other credential sources).
+/// - `Err(_)` when the profile *is* an SSO profile but cannot be used —
+///   e.g. token cache missing/expired/malformed, or required fields
+///   absent. The error message tells the user how to recover (typically
+///   "run `aws sso login --profile <name>`").
+#[allow(clippy::too_many_lines)] // SSO config parsing has irreducible branching for sso-session vs legacy form + cache lookup + diagnostics
+fn detect_aws_sso_profile_with_env<F>(
+    profile: &str,
+    region_override: Option<&str>,
+    region_default: &str,
+    env: &mut F,
+) -> Result<Option<AwsSsoTokenLocator>>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    // SSO discovery only needs `~/.aws/config` (the [profile X] / [sso-session Y]
+    // blocks). It does NOT need `~/.aws/credentials` (SSO never writes IAM keys
+    // there), so we use the config-only resolver — otherwise tests / users with
+    // AWS_CONFIG_FILE set but no AWS_SHARED_CREDENTIALS_FILE / no HOME silently
+    // get a None result and the SSO path looks broken when it isn't.
+    let Some(config_path) = aws_config_path_from_env(env) else {
+        return Ok(None);
+    };
+    let Ok(config_text) = std::fs::read_to_string(&config_path) else {
+        return Ok(None);
+    };
+    let config = parse_aws_ini(&config_text);
+    let profile_key = profile.trim().to_ascii_lowercase();
+
+    // Locate the [profile X] (or [default]) section.
+    let mut profile_section: Option<&HashMap<String, String>> = None;
+    for name in profile_section_candidates(&profile_key) {
+        if let Some(section) = config.get(&name) {
+            profile_section = Some(section);
+            break;
+        }
+    }
+    let Some(profile_section) = profile_section else {
+        return Ok(None);
+    };
+
+    // Determine if this is an SSO profile, and if so which form (sso-session
+    // form vs legacy). At minimum we need account_id + role_name + a way to
+    // find the cached token.
+    let sso_session_name = profile_section
+        .get("sso_session")
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    let profile_sso_start_url = profile_section
+        .get("sso_start_url")
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+
+    let is_sso_profile = sso_session_name.is_some() || profile_sso_start_url.is_some();
+    if !is_sso_profile {
+        return Ok(None);
+    }
+
+    let account_id = profile_section
+        .get("sso_account_id")
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| {
+            Error::auth(format!(
+                "AWS profile '{profile}' looks like an SSO profile but is missing sso_account_id; \
+                 add it to ~/.aws/config under [profile {profile}]",
+            ))
+        })?;
+    let role_name = profile_section
+        .get("sso_role_name")
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| {
+            Error::auth(format!(
+                "AWS profile '{profile}' looks like an SSO profile but is missing sso_role_name; \
+                 add it to ~/.aws/config under [profile {profile}]",
+            ))
+        })?;
+
+    // Resolve the SSO region + start URL by either reading the [sso-session]
+    // block (preferred) or the legacy fields on the profile itself.
+    let (sso_region, _sso_start_url, cache_key) = if let Some(session_name) = &sso_session_name {
+        let session_section_key = format!("sso-session {session_name}");
+        let session_section = config.get(&session_section_key).ok_or_else(|| {
+            Error::auth(format!(
+                "AWS profile '{profile}' references sso_session = {session_name}, but no \
+                 [sso-session {session_name}] block was found in ~/.aws/config",
+            ))
+        })?;
+        let sso_region = session_section
+            .get("sso_region")
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| {
+                Error::auth(format!(
+                    "AWS [sso-session {session_name}] is missing sso_region",
+                ))
+            })?;
+        let sso_start_url = session_section
+            .get("sso_start_url")
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| {
+                Error::auth(format!(
+                    "AWS [sso-session {session_name}] is missing sso_start_url",
+                ))
+            })?;
+        // sso-session form: cache key is the session name.
+        (sso_region, sso_start_url, session_name.clone())
+    } else {
+        // Legacy form: sso_start_url is on the profile.
+        let sso_start_url = profile_sso_start_url.expect(
+            "is_sso_profile guarantees one of sso_session/sso_start_url is set; \
+             sso_session was None so sso_start_url must be Some",
+        );
+        let sso_region = profile_section
+            .get("sso_region")
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| {
+                Error::auth(format!("AWS profile '{profile}' is missing sso_region"))
+            })?;
+        // Legacy form: cache key is the start URL.
+        (sso_region, sso_start_url.clone(), sso_start_url)
+    };
+
+    // Resolve the target region: env override wins, then profile.region,
+    // then default. (Same precedence as the static IAM path.)
+    let target_region = region_override.map_or_else(
+        || {
+            profile_section
+                .get("region")
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| region_default.to_string())
+        },
+        str::to_string,
+    );
+
+    // Read and validate the cached SSO access token.
+    let cache_dir = aws_sso_cache_dir_from_env(env).ok_or_else(|| {
+        Error::auth(
+            "Could not locate AWS SSO cache directory (HOME unset?); \
+             expected ~/.aws/sso/cache/"
+                .to_string(),
+        )
+    })?;
+    let token = load_aws_sso_token_cache(&cache_dir, &cache_key, profile)?;
+
+    Ok(Some(AwsSsoTokenLocator {
+        access_token: token,
+        sso_region,
+        account_id,
+        role_name,
+        target_region,
+    }))
+}
+
+fn aws_sso_cache_dir_from_env<F>(env: &mut F) -> Option<PathBuf>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    // AWS SDKs honor AWS_SDK_LOAD_NONDEFAULT_CONFIG and similar tweaks for
+    // the cache dir, but the only path the official tooling actually uses
+    // is `<HOME>/.aws/sso/cache`. We additionally allow PI_AWS_SSO_CACHE_DIR
+    // for tests + advanced users.
+    if let Some(custom) = env("PI_AWS_SSO_CACHE_DIR")
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+    {
+        return Some(PathBuf::from(custom));
+    }
+    let home = aws_home_dir_from_env(env)?;
+    Some(home.join(".aws").join("sso").join("cache"))
+}
+
+/// Compute the SHA1-based cache filename used by `aws sso login`.
+///
+/// Per the AWS CLI/SDK convention, the file is `<sha1(key)>.json` where
+/// `key` is the sso-session name (sso-session form) or the start URL
+/// (legacy form). The hash is lowercase hex.
+fn aws_sso_cache_filename(cache_key: &str) -> String {
+    use sha1::{Digest as _, Sha1};
+    let mut hasher = Sha1::new();
+    hasher.update(cache_key.as_bytes());
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(40 + 5);
+    for byte in digest {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex.push_str(".json");
+    hex
+}
+
+#[derive(Debug, Deserialize)]
+struct SsoCachedToken {
+    #[serde(rename = "accessToken")]
+    access_token: Option<String>,
+    #[serde(rename = "expiresAt")]
+    expires_at: Option<String>,
+}
+
+fn load_aws_sso_token_cache(cache_dir: &Path, cache_key: &str, profile: &str) -> Result<String> {
+    let path = cache_dir.join(aws_sso_cache_filename(cache_key));
+    let text = std::fs::read_to_string(&path).map_err(|err| {
+        Error::auth(format!(
+            "AWS SSO token cache not found ({}: {err}); run: aws sso login --profile {profile}",
+            path.display()
+        ))
+    })?;
+    let cached: SsoCachedToken = serde_json::from_str(&text).map_err(|err| {
+        Error::auth(format!(
+            "AWS SSO token cache at {} is malformed ({err}); run: aws sso login --profile {profile}",
+            path.display()
+        ))
+    })?;
+    let access_token = cached
+        .access_token
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| {
+            Error::auth(format!(
+                "AWS SSO token cache at {} has no accessToken; run: aws sso login --profile {profile}",
+                path.display()
+            ))
+        })?;
+
+    // expiresAt is an ISO-8601 / RFC-3339 timestamp. If absent we trust the
+    // file (some SDK versions omit it), but if present we enforce it strictly.
+    if let Some(expires_at) = cached.expires_at {
+        let expires_at = expires_at.trim();
+        if !expires_at.is_empty() {
+            let parsed: std::result::Result<chrono::DateTime<chrono::Utc>, chrono::ParseError> =
+                chrono::DateTime::parse_from_rfc3339(expires_at)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .or_else(|_| {
+                        // Some SDK versions write `2026-05-06T20:12:34UTC` (no
+                        // RFC-3339 offset). Treat as UTC.
+                        chrono::NaiveDateTime::parse_from_str(expires_at, "%Y-%m-%dT%H:%M:%SUTC")
+                            .map(|naive| naive.and_utc())
+                    });
+            match parsed {
+                Ok(expiry) => {
+                    let now = chrono::Utc::now();
+                    if expiry <= now {
+                        return Err(Error::auth(format!(
+                            "AWS SSO token expired at {expires_at}; run: aws sso login --profile {profile}",
+                        )));
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        event = "pi.auth.aws_sso_expires_at_unparseable",
+                        expires_at = %expires_at,
+                        error = %err,
+                        "Could not parse SSO expiresAt; trusting cache"
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(access_token)
+}
+
+/// Response shape from the SSO Portal `GetRoleCredentials` endpoint.
+#[derive(Debug, Deserialize)]
+struct SsoRoleCredentialsResponse {
+    #[serde(rename = "roleCredentials")]
+    role_credentials: SsoRoleCredentials,
+}
+
+#[derive(Debug, Deserialize)]
+struct SsoRoleCredentials {
+    #[serde(rename = "accessKeyId")]
+    access_key_id: String,
+    #[serde(rename = "secretAccessKey")]
+    secret_access_key: String,
+    #[serde(rename = "sessionToken")]
+    session_token: String,
+    // expiration in milliseconds since epoch — informational only; Pi
+    // re-resolves credentials on every Bedrock call so we don't cache.
+    #[allow(dead_code)]
+    expiration: Option<i64>,
+}
+
+/// Test-only override for the SSO Portal base URL.
+///
+/// We use an interior-mutable static rather than reading `PI_AWS_SSO_PORTAL_URL`
+/// directly because Rust 2024 made `std::env::set_var`/`remove_var` `unsafe`,
+/// and the crate forbids `unsafe_code`. Tests set the override via
+/// `set_sso_portal_base_url_override`; production code paths always see `None`
+/// because both helpers are cfg-gated.
+#[cfg(test)]
+static SSO_PORTAL_BASE_URL_OVERRIDE: std::sync::OnceLock<std::sync::Mutex<Option<String>>> =
+    std::sync::OnceLock::new();
+
+/// Override for the SSO Portal base URL (test-only; production uses the
+/// canonical `https://portal.sso.<region>.amazonaws.com`).
+#[cfg(test)]
+fn sso_portal_base_url_override() -> Option<String> {
+    SSO_PORTAL_BASE_URL_OVERRIDE
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+}
+
+/// Test-only setter for `sso_portal_base_url_override`.
+///
+/// Pass `Some(url)` to install an override (typically a localhost URL pointing
+/// at a test HTTP server) and `None` to clear the override at end of test.
+/// Tests that share state across the same process should be `#[serial]`-annotated
+/// or explicitly clear the override on tear-down to avoid cross-test pollution.
+#[cfg(test)]
+fn set_sso_portal_base_url_override(value: Option<String>) {
+    if let Ok(mut guard) = SSO_PORTAL_BASE_URL_OVERRIDE
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+    {
+        *guard = value;
+    }
+}
+
+#[cfg(not(test))]
+const fn sso_portal_base_url_override() -> Option<String> {
+    None
+}
+
+fn sso_portal_base_url(sso_region: &str) -> String {
+    if let Some(override_url) = sso_portal_base_url_override() {
+        let trimmed = override_url.trim().trim_end_matches('/').to_string();
+        if !trimmed.is_empty() {
+            return trimmed;
+        }
+    }
+    format!("https://portal.sso.{sso_region}.amazonaws.com")
+}
+
+/// Exchange a cached SSO access token for short-lived IAM credentials via
+/// the SSO Portal `GetRoleCredentials` endpoint.
+async fn exchange_aws_sso_credentials_with_client(
+    client: &crate::http::client::Client,
+    locator: &AwsSsoTokenLocator,
+) -> Result<AwsResolvedCredentials> {
+    let base = sso_portal_base_url(&locator.sso_region);
+    let url = format!(
+        "{base}/federation/credentials?account_id={}&role_name={}",
+        percent_encode_component(&locator.account_id),
+        percent_encode_component(&locator.role_name),
+    );
+
+    let request = client
+        .get(&url)
+        .header("Accept", "application/json")
+        .header("x-amz-sso_bearer_token", locator.access_token.as_str());
+
+    let response = Box::pin(request.send())
+        .await
+        .map_err(|err| Error::auth(format!("AWS SSO GetRoleCredentials request failed: {err}")))?;
+
+    let status = response.status();
+    let text = response
+        .text()
+        .await
+        .unwrap_or_else(|_| "<failed to read body>".to_string());
+    let redacted = redact_known_secrets(&text, &[locator.access_token.as_str()]);
+
+    if status == 401 || status == 403 {
+        return Err(Error::auth(format!(
+            "AWS SSO GetRoleCredentials returned HTTP {status}: token may be expired or the role \
+             is not assigned to your user. Run: aws sso login (response: {redacted})",
+        )));
+    }
+    if !(200..300).contains(&status) {
+        return Err(Error::auth(format!(
+            "AWS SSO GetRoleCredentials failed (HTTP {status}): {redacted}",
+        )));
+    }
+
+    let parsed: SsoRoleCredentialsResponse = serde_json::from_str(&text).map_err(|err| {
+        Error::auth(format!(
+            "AWS SSO GetRoleCredentials returned malformed JSON: {err}",
+        ))
+    })?;
+    let access_key_id = parsed.role_credentials.access_key_id.trim().to_string();
+    let secret_access_key = parsed.role_credentials.secret_access_key.trim().to_string();
+    let session_token = parsed.role_credentials.session_token.trim().to_string();
+    if access_key_id.is_empty() || secret_access_key.is_empty() || session_token.is_empty() {
+        return Err(Error::auth(
+            "AWS SSO GetRoleCredentials returned an empty credential field".to_string(),
+        ));
+    }
+
+    Ok(AwsResolvedCredentials::Sigv4 {
+        access_key_id,
+        secret_access_key,
+        session_token: Some(session_token),
+        region: locator.target_region.clone(),
+    })
+}
+
+/// Async resolver that handles AWS SSO in addition to the static
+/// credential chain.
+///
+/// Precedence is identical to [`resolve_aws_credentials`], with the
+/// added behavior that profile resolution prefers static IAM keys but
+/// falls through to SSO when the profile is configured for it. SSO
+/// requires an HTTP call to the AWS SSO Portal; the bedrock provider
+/// invokes this from its async `stream()` path.
+pub async fn resolve_aws_credentials_async(
+    auth: &AuthStorage,
+    client: &crate::http::client::Client,
+) -> Result<Option<AwsResolvedCredentials>> {
+    resolve_aws_credentials_async_with_env(auth, client, |var| std::env::var(var).ok()).await
+}
+
+async fn resolve_aws_credentials_async_with_env<F>(
+    auth: &AuthStorage,
+    client: &crate::http::client::Client,
+    mut env: F,
+) -> Result<Option<AwsResolvedCredentials>>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    // Phase 1: synchronous chain (env vars, static profile credentials,
+    // stored auth.json) covers the existing fast paths without HTTP.
+    if let Some(resolved) = resolve_aws_credentials_with_env(auth, &mut env) {
+        return Ok(Some(resolved));
+    }
+
+    // Phase 2: SSO-only profile fallback. The synchronous resolver returns
+    // None when AWS_PROFILE points at a profile that has no static IAM
+    // credentials in `~/.aws/credentials`. SSO profiles routinely look that
+    // way, so we re-read the config here and try the SSO path.
+    let env_region = env("AWS_REGION")
+        .or_else(|| env("AWS_DEFAULT_REGION"))
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let region_default = env_region
+        .clone()
+        .unwrap_or_else(|| "us-east-1".to_string());
+    let profile = env("AWS_PROFILE")
+        .or_else(|| env("AWS_DEFAULT_PROFILE"))
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    if let Some(profile) = profile {
+        match detect_aws_sso_profile_with_env(
+            &profile,
+            env_region.as_deref(),
+            &region_default,
+            &mut env,
+        ) {
+            Ok(Some(locator)) => {
+                let resolved = exchange_aws_sso_credentials_with_client(client, &locator).await?;
+                return Ok(Some(resolved));
+            }
+            Ok(None) => {}
+            Err(err) => return Err(err),
+        }
+    }
+
+    Ok(None)
 }
 
 // ── SAP AI Core Service Key Resolution ──────────────────────────
@@ -7497,6 +8054,27 @@ mod tests {
         }
     }
 
+    /// Acquire the serialisation lock for tests that read/write the
+    /// `SSO_PORTAL_BASE_URL_OVERRIDE` static. Without this, parallel test
+    /// execution races on the override and produces sporadic 401 responses
+    /// from the wrong test's mock portal. Tests that touch the override
+    /// must hold this guard for their entire duration — including across
+    /// `.await` points, which is intentional. Each test runs on its own
+    /// `current_thread` runtime so cross-thread runtime-state poisoning isn't
+    /// possible; the only concern is two `#[test]` functions reading the same
+    /// override concurrently from different OS threads, which this guard
+    /// prevents. The `clippy::await_holding_lock` lint is silenced at each
+    /// call site because the alternative (an async-aware mutex) would buy us
+    /// nothing here — the lock contention is bounded by the test count, the
+    /// tests are short, and the guard is the entire point.
+    fn sso_portal_override_lock() -> std::sync::MutexGuard<'static, ()> {
+        use std::sync::{Mutex, OnceLock};
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     #[test]
     fn test_aws_bearer_token_env_wins() {
         let auth = empty_auth();
@@ -7818,6 +8396,567 @@ mod tests {
             _ => None,
         });
         assert!(result.is_none());
+    }
+
+    // ── AWS SSO ──────────────────────────────────────────────────────
+
+    /// Helper: build a fully-configured SSO sandbox (config + cache file)
+    /// in a fresh temp dir and return env-var overrides for the resolver.
+    fn write_sso_sandbox(
+        dir: &Path,
+        cache_key: &str,
+        access_token: &str,
+        expires_at: Option<&str>,
+        config_text: &str,
+    ) -> (PathBuf, PathBuf, PathBuf) {
+        let aws_dir = dir.join(".aws");
+        std::fs::create_dir_all(&aws_dir).expect("mkdir .aws");
+        let credentials_path = aws_dir.join("credentials");
+        // SSO profiles often have NO credentials file at all, but we write
+        // an empty one so the env-var override works in the resolver.
+        std::fs::write(&credentials_path, "").expect("write credentials");
+        let config_path = aws_dir.join("config");
+        std::fs::write(&config_path, config_text).expect("write config");
+        let cache_dir = aws_dir.join("sso").join("cache");
+        std::fs::create_dir_all(&cache_dir).expect("mkdir cache");
+        let cache_filename = aws_sso_cache_filename(cache_key);
+        let mut payload = serde_json::json!({
+            "accessToken": access_token,
+            "region": "us-east-1",
+        });
+        if let Some(expires_at) = expires_at {
+            payload["expiresAt"] = serde_json::Value::String(expires_at.to_string());
+        }
+        std::fs::write(cache_dir.join(&cache_filename), payload.to_string())
+            .expect("write cache file");
+        (credentials_path, config_path, cache_dir)
+    }
+
+    fn far_future_iso() -> String {
+        let dt = chrono::Utc::now() + chrono::Duration::hours(8);
+        dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    }
+
+    fn far_past_iso() -> String {
+        let dt = chrono::Utc::now() - chrono::Duration::hours(8);
+        dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    }
+
+    #[test]
+    fn test_aws_sso_cache_filename_matches_aws_cli() {
+        // AWS CLI hashes the literal start-URL (or sso-session name) with SHA1
+        // and uses the lowercase hex digest as the cache filename. Reference
+        // vector verified against `printf '%s' "https://example.awsapps.com/start" | sha1sum`:
+        //   e8be5486177c5b5392bd9aa76563515b29358e6e
+        let filename = aws_sso_cache_filename("https://example.awsapps.com/start");
+        assert_eq!(filename, "e8be5486177c5b5392bd9aa76563515b29358e6e.json");
+    }
+
+    #[test]
+    fn test_aws_sso_detect_session_form() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let config_text = "\
+[profile dev]
+sso_session = my-sso
+sso_account_id = 123456789012
+sso_role_name = MyRole
+region = us-west-2
+
+[sso-session my-sso]
+sso_start_url = https://example.awsapps.com/start
+sso_region = us-east-1
+";
+        let expires = far_future_iso();
+        let (_cred, config_path, cache_dir) = write_sso_sandbox(
+            dir.path(),
+            "my-sso",
+            "sso-access-token-123",
+            Some(&expires),
+            config_text,
+        );
+
+        let mut env = |var: &str| match var {
+            "AWS_PROFILE" => Some("dev".to_string()),
+            "AWS_CONFIG_FILE" => Some(config_path.to_string_lossy().to_string()),
+            "PI_AWS_SSO_CACHE_DIR" => Some(cache_dir.to_string_lossy().to_string()),
+            "HOME" => Some(dir.path().to_string_lossy().to_string()),
+            _ => None,
+        };
+        let detected = detect_aws_sso_profile_with_env("dev", None, "us-east-1", &mut env)
+            .expect("detect")
+            .expect("present");
+        assert_eq!(detected.access_token, "sso-access-token-123");
+        assert_eq!(detected.account_id, "123456789012");
+        assert_eq!(detected.role_name, "MyRole");
+        assert_eq!(detected.sso_region, "us-east-1");
+        assert_eq!(detected.target_region, "us-west-2");
+    }
+
+    #[test]
+    fn test_aws_sso_detect_legacy_form() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let config_text = "\
+[profile legacy]
+sso_start_url = https://legacy.awsapps.com/start
+sso_region = us-east-2
+sso_account_id = 999999999999
+sso_role_name = LegacyRole
+region = eu-west-1
+";
+        let expires = far_future_iso();
+        let (_cred, config_path, cache_dir) = write_sso_sandbox(
+            dir.path(),
+            "https://legacy.awsapps.com/start",
+            "legacy-token",
+            Some(&expires),
+            config_text,
+        );
+
+        let mut env = |var: &str| match var {
+            "AWS_PROFILE" => Some("legacy".to_string()),
+            "AWS_CONFIG_FILE" => Some(config_path.to_string_lossy().to_string()),
+            "PI_AWS_SSO_CACHE_DIR" => Some(cache_dir.to_string_lossy().to_string()),
+            _ => None,
+        };
+        let detected = detect_aws_sso_profile_with_env("legacy", None, "us-east-1", &mut env)
+            .expect("detect")
+            .expect("present");
+        assert_eq!(detected.access_token, "legacy-token");
+        assert_eq!(detected.account_id, "999999999999");
+        assert_eq!(detected.role_name, "LegacyRole");
+        assert_eq!(detected.sso_region, "us-east-2");
+        assert_eq!(detected.target_region, "eu-west-1");
+    }
+
+    #[test]
+    fn test_aws_sso_non_sso_profile_returns_none() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let aws_dir = dir.path().join(".aws");
+        std::fs::create_dir_all(&aws_dir).expect("mkdir");
+        let config_path = aws_dir.join("config");
+        std::fs::write(&config_path, "[profile static]\nregion = us-west-2\n")
+            .expect("write config");
+        let credentials_path = aws_dir.join("credentials");
+        std::fs::write(&credentials_path, "").expect("write credentials");
+
+        let mut env = |var: &str| match var {
+            "AWS_CONFIG_FILE" => Some(config_path.to_string_lossy().to_string()),
+            "AWS_SHARED_CREDENTIALS_FILE" => Some(credentials_path.to_string_lossy().to_string()),
+            _ => None,
+        };
+        let detected =
+            detect_aws_sso_profile_with_env("static", None, "us-east-1", &mut env).expect("detect");
+        assert!(detected.is_none());
+    }
+
+    #[test]
+    fn test_aws_sso_expired_token_returns_error_with_login_command() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let config_text = "\
+[profile dev]
+sso_session = my-sso
+sso_account_id = 123456789012
+sso_role_name = MyRole
+
+[sso-session my-sso]
+sso_start_url = https://example.awsapps.com/start
+sso_region = us-east-1
+";
+        let expires = far_past_iso();
+        let (_cred, config_path, cache_dir) = write_sso_sandbox(
+            dir.path(),
+            "my-sso",
+            "expired-token",
+            Some(&expires),
+            config_text,
+        );
+
+        let mut env = |var: &str| match var {
+            "AWS_PROFILE" => Some("dev".to_string()),
+            "AWS_CONFIG_FILE" => Some(config_path.to_string_lossy().to_string()),
+            "PI_AWS_SSO_CACHE_DIR" => Some(cache_dir.to_string_lossy().to_string()),
+            _ => None,
+        };
+        let err = detect_aws_sso_profile_with_env("dev", None, "us-east-1", &mut env)
+            .expect_err("expired token must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("expired"),
+            "expected 'expired' in error: {msg}"
+        );
+        assert!(
+            msg.contains("aws sso login --profile dev"),
+            "expected login hint in error: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_aws_sso_missing_cache_returns_error_with_login_command() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let aws_dir = dir.path().join(".aws");
+        std::fs::create_dir_all(&aws_dir).expect("mkdir");
+        let config_path = aws_dir.join("config");
+        std::fs::write(
+            &config_path,
+            "\
+[profile dev]
+sso_session = my-sso
+sso_account_id = 123456789012
+sso_role_name = MyRole
+
+[sso-session my-sso]
+sso_start_url = https://example.awsapps.com/start
+sso_region = us-east-1
+",
+        )
+        .expect("write config");
+        let cache_dir = aws_dir.join("sso").join("cache");
+        std::fs::create_dir_all(&cache_dir).expect("mkdir cache");
+        // No cache file written.
+
+        let mut env = |var: &str| match var {
+            "AWS_PROFILE" => Some("dev".to_string()),
+            "AWS_CONFIG_FILE" => Some(config_path.to_string_lossy().to_string()),
+            "PI_AWS_SSO_CACHE_DIR" => Some(cache_dir.to_string_lossy().to_string()),
+            _ => None,
+        };
+        let err = detect_aws_sso_profile_with_env("dev", None, "us-east-1", &mut env)
+            .expect_err("missing cache must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("aws sso login --profile dev"),
+            "expected login hint in error: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_aws_sso_sso_session_block_missing_errors() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let aws_dir = dir.path().join(".aws");
+        std::fs::create_dir_all(&aws_dir).expect("mkdir");
+        let config_path = aws_dir.join("config");
+        std::fs::write(
+            &config_path,
+            "\
+[profile dev]
+sso_session = my-sso
+sso_account_id = 123456789012
+sso_role_name = MyRole
+",
+        )
+        .expect("write config");
+
+        let mut env = |var: &str| match var {
+            "AWS_PROFILE" => Some("dev".to_string()),
+            "AWS_CONFIG_FILE" => Some(config_path.to_string_lossy().to_string()),
+            _ => None,
+        };
+        let err = detect_aws_sso_profile_with_env("dev", None, "us-east-1", &mut env)
+            .expect_err("missing sso-session block must error");
+        assert!(
+            err.to_string().contains("[sso-session my-sso]"),
+            "expected sso-session hint: {err}"
+        );
+    }
+
+    #[test]
+    fn test_aws_sso_missing_role_or_account_errors() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let aws_dir = dir.path().join(".aws");
+        std::fs::create_dir_all(&aws_dir).expect("mkdir");
+        let config_path = aws_dir.join("config");
+        // sso_session set but role_name missing.
+        std::fs::write(
+            &config_path,
+            "\
+[profile dev]
+sso_session = my-sso
+sso_account_id = 123456789012
+
+[sso-session my-sso]
+sso_start_url = https://example.awsapps.com/start
+sso_region = us-east-1
+",
+        )
+        .expect("write config");
+
+        let mut env = |var: &str| match var {
+            "AWS_PROFILE" => Some("dev".to_string()),
+            "AWS_CONFIG_FILE" => Some(config_path.to_string_lossy().to_string()),
+            _ => None,
+        };
+        let err = detect_aws_sso_profile_with_env("dev", None, "us-east-1", &mut env)
+            .expect_err("missing role_name must error");
+        assert!(
+            err.to_string().contains("sso_role_name"),
+            "expected sso_role_name hint: {err}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::await_holding_lock)] // intentional — see sso_portal_override_lock docs
+    fn test_aws_sso_async_resolver_succeeds_via_mock_portal() {
+        let rt = asupersync::runtime::RuntimeBuilder::current_thread().build();
+        rt.expect("runtime").block_on(async {
+            let dir = tempfile::tempdir().expect("tmpdir");
+            let config_text = "\
+[profile dev]
+sso_session = my-sso
+sso_account_id = 123456789012
+sso_role_name = MyRole
+region = us-west-2
+
+[sso-session my-sso]
+sso_start_url = https://example.awsapps.com/start
+sso_region = us-east-1
+";
+            let expires = far_future_iso();
+            let (_cred, config_path, cache_dir) = write_sso_sandbox(
+                dir.path(),
+                "my-sso",
+                "sso-access-token-abcdef",
+                Some(&expires),
+                config_text,
+            );
+
+            // Mock SSO Portal: returns short-lived IAM credentials.
+            let body = r#"{"roleCredentials":{"accessKeyId":"AKIASTSTOKEN","secretAccessKey":"sts-secret","sessionToken":"sts-session","expiration":1700000000000}}"#;
+            let portal_url = spawn_json_server(200, body);
+            // spawn_json_server appends "/token" to the path; strip it so the
+            // resolver appends "/federation/credentials" itself.
+            let portal_base = portal_url.trim_end_matches("/token").to_string();
+
+            // Acquire the override-mutex BEFORE setting the override and hold
+            // it through the assert. This serialises tests that share the
+            // SSO_PORTAL_BASE_URL_OVERRIDE static; without it parallel test
+            // execution sporadically reads another test's override and routes
+            // GetRoleCredentials at the wrong mock server (401 → spurious fail).
+            let _override_guard = sso_portal_override_lock();
+            // Install the test-only SSO Portal base URL override. We can't use
+            // `std::env::set_var` here because Rust 2024 made it `unsafe` and
+            // the crate forbids unsafe_code; the static-Mutex helper above
+            // gives the same isolation without touching global env state.
+            set_sso_portal_base_url_override(Some(portal_base.clone()));
+            let mut env_map = std::collections::HashMap::new();
+            env_map.insert("AWS_PROFILE", "dev".to_string());
+            env_map.insert(
+                "AWS_CONFIG_FILE",
+                config_path.to_string_lossy().to_string(),
+            );
+            env_map.insert(
+                "PI_AWS_SSO_CACHE_DIR",
+                cache_dir.to_string_lossy().to_string(),
+            );
+
+            let auth = empty_auth();
+            let client = crate::http::client::Client::new();
+            let result = resolve_aws_credentials_async_with_env(&auth, &client, |var| {
+                env_map.get(var).cloned()
+            })
+            .await
+            .expect("resolve");
+
+            set_sso_portal_base_url_override(None);
+
+            let resolved = result.expect("present");
+            match resolved {
+                AwsResolvedCredentials::Sigv4 {
+                    access_key_id,
+                    secret_access_key,
+                    session_token,
+                    region,
+                } => {
+                    assert_eq!(access_key_id, "AKIASTSTOKEN");
+                    assert_eq!(secret_access_key, "sts-secret");
+                    assert_eq!(session_token.as_deref(), Some("sts-session"));
+                    assert_eq!(region, "us-west-2");
+                }
+                other @ AwsResolvedCredentials::Bearer { .. } => {
+                    panic!("expected Sigv4, got {other:?}")
+                }
+            }
+        });
+    }
+
+    #[test]
+    #[allow(clippy::await_holding_lock)] // intentional — see sso_portal_override_lock docs
+    fn test_aws_sso_async_resolver_propagates_portal_error() {
+        let rt = asupersync::runtime::RuntimeBuilder::current_thread().build();
+        rt.expect("runtime").block_on(async {
+            let dir = tempfile::tempdir().expect("tmpdir");
+            let config_text = "\
+[profile dev]
+sso_session = my-sso
+sso_account_id = 123456789012
+sso_role_name = MyRole
+
+[sso-session my-sso]
+sso_start_url = https://example.awsapps.com/start
+sso_region = us-east-1
+";
+            let expires = far_future_iso();
+            let (_cred, config_path, cache_dir) = write_sso_sandbox(
+                dir.path(),
+                "my-sso",
+                "sso-access-token",
+                Some(&expires),
+                config_text,
+            );
+            let portal_url = spawn_json_server(403, r#"{"message":"forbidden"}"#);
+            let portal_base = portal_url.trim_end_matches("/token").to_string();
+
+            // See sso_portal_override_lock above for why this guard is needed.
+            let _override_guard = sso_portal_override_lock();
+            set_sso_portal_base_url_override(Some(portal_base.clone()));
+            let mut env_map = std::collections::HashMap::new();
+            env_map.insert("AWS_PROFILE", "dev".to_string());
+            env_map.insert("AWS_CONFIG_FILE", config_path.to_string_lossy().to_string());
+            env_map.insert(
+                "PI_AWS_SSO_CACHE_DIR",
+                cache_dir.to_string_lossy().to_string(),
+            );
+
+            let auth = empty_auth();
+            let client = crate::http::client::Client::new();
+            let err = resolve_aws_credentials_async_with_env(&auth, &client, |var| {
+                env_map.get(var).cloned()
+            })
+            .await
+            .expect_err("403 must surface as auth error");
+
+            set_sso_portal_base_url_override(None);
+
+            let msg = err.to_string();
+            assert!(msg.contains("HTTP 403"), "expected 403 in error: {msg}");
+            assert!(
+                msg.contains("aws sso login"),
+                "expected login hint in 403 error: {msg}"
+            );
+        });
+    }
+
+    #[test]
+    #[allow(clippy::await_holding_lock)] // intentional — see sso_portal_override_lock docs
+    fn test_aws_sso_async_resolver_redacts_access_token_in_errors() {
+        let rt = asupersync::runtime::RuntimeBuilder::current_thread().build();
+        rt.expect("runtime").block_on(async {
+            let dir = tempfile::tempdir().expect("tmpdir");
+            let config_text = "\
+[profile dev]
+sso_session = my-sso
+sso_account_id = 123456789012
+sso_role_name = MyRole
+
+[sso-session my-sso]
+sso_start_url = https://example.awsapps.com/start
+sso_region = us-east-1
+";
+            let expires = far_future_iso();
+            let secret_token = "VERY-SECRET-SSO-TOKEN-DO-NOT-LEAK";
+            let (_cred, config_path, cache_dir) = write_sso_sandbox(
+                dir.path(),
+                "my-sso",
+                secret_token,
+                Some(&expires),
+                config_text,
+            );
+            // Body echoes the access token to verify redaction.
+            let body = format!(r#"{{"echoed":"{secret_token}"}}"#);
+            let portal_url = spawn_json_server(401, &body);
+            let portal_base = portal_url.trim_end_matches("/token").to_string();
+
+            // See sso_portal_override_lock above for why this guard is needed.
+            let _override_guard = sso_portal_override_lock();
+            set_sso_portal_base_url_override(Some(portal_base.clone()));
+            let mut env_map = std::collections::HashMap::new();
+            env_map.insert("AWS_PROFILE", "dev".to_string());
+            env_map.insert("AWS_CONFIG_FILE", config_path.to_string_lossy().to_string());
+            env_map.insert(
+                "PI_AWS_SSO_CACHE_DIR",
+                cache_dir.to_string_lossy().to_string(),
+            );
+
+            let auth = empty_auth();
+            let client = crate::http::client::Client::new();
+            let err = resolve_aws_credentials_async_with_env(&auth, &client, |var| {
+                env_map.get(var).cloned()
+            })
+            .await
+            .expect_err("401 must surface as auth error");
+
+            set_sso_portal_base_url_override(None);
+
+            let msg = err.to_string();
+            assert!(
+                !msg.contains(secret_token),
+                "access token must be redacted in errors: {msg}"
+            );
+            assert!(
+                msg.contains("[REDACTED]"),
+                "expected redaction marker: {msg}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_aws_sso_async_resolver_falls_through_when_static_creds_present() {
+        // Static IAM credentials in env vars must short-circuit the SSO
+        // path: no HTTP, no cache lookups.
+        let rt = asupersync::runtime::RuntimeBuilder::current_thread().build();
+        rt.expect("runtime").block_on(async {
+            let auth = empty_auth();
+            let client = crate::http::client::Client::new();
+            let mut env_map = std::collections::HashMap::new();
+            env_map.insert("AWS_ACCESS_KEY_ID", "AKIASTATIC".to_string());
+            env_map.insert("AWS_SECRET_ACCESS_KEY", "static-secret".to_string());
+            env_map.insert("AWS_REGION", "us-west-2".to_string());
+
+            let result = resolve_aws_credentials_async_with_env(&auth, &client, |var| {
+                env_map.get(var).cloned()
+            })
+            .await
+            .expect("resolve");
+            match result {
+                Some(AwsResolvedCredentials::Sigv4 { access_key_id, .. }) => {
+                    assert_eq!(access_key_id, "AKIASTATIC");
+                }
+                other => panic!("expected static Sigv4, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn test_aws_sso_target_region_overridden_by_env() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let config_text = "\
+[profile dev]
+sso_session = my-sso
+sso_account_id = 123456789012
+sso_role_name = MyRole
+region = us-west-2
+
+[sso-session my-sso]
+sso_start_url = https://example.awsapps.com/start
+sso_region = us-east-1
+";
+        let expires = far_future_iso();
+        let (_cred, config_path, cache_dir) =
+            write_sso_sandbox(dir.path(), "my-sso", "tok", Some(&expires), config_text);
+
+        let mut env = |var: &str| match var {
+            "AWS_PROFILE" => Some("dev".to_string()),
+            "AWS_CONFIG_FILE" => Some(config_path.to_string_lossy().to_string()),
+            "PI_AWS_SSO_CACHE_DIR" => Some(cache_dir.to_string_lossy().to_string()),
+            _ => None,
+        };
+        let detected =
+            detect_aws_sso_profile_with_env("dev", Some("eu-north-1"), "us-east-1", &mut env)
+                .expect("detect")
+                .expect("present");
+        // env_region beats profile.region (matches static-IAM semantics).
+        assert_eq!(detected.target_region, "eu-north-1");
+        // sso_region is independent and should still come from sso-session block.
+        assert_eq!(detected.sso_region, "us-east-1");
     }
 
     // ── SAP AI Core Credential Chain ─────────────────────────────────

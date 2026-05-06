@@ -3,7 +3,7 @@
 //! This provider targets the Bedrock Converse API and maps its non-streaming
 //! JSON response into Pi stream events.
 
-use crate::auth::{AuthStorage, AwsResolvedCredentials, resolve_aws_credentials};
+use crate::auth::{AuthStorage, AwsResolvedCredentials, resolve_aws_credentials_async};
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::http::client::Client;
@@ -135,9 +135,9 @@ impl BedrockProvider {
             .map_err(|err| Error::auth(format!("Failed to load Bedrock credentials: {err}")))
     }
 
-    fn resolve_auth_context(&self, options: &StreamOptions) -> Result<BedrockAuthContext> {
+    async fn resolve_auth_context(&self, options: &StreamOptions) -> Result<BedrockAuthContext> {
         let auth_storage = self.load_auth_storage()?;
-        if let Some(resolved) = resolve_aws_credentials(&auth_storage) {
+        if let Some(resolved) = resolve_aws_credentials_async(&auth_storage, &self.client).await? {
             return Ok(match resolved {
                 AwsResolvedCredentials::Sigv4 {
                     access_key_id,
@@ -177,7 +177,8 @@ impl BedrockProvider {
         }
 
         Err(Error::auth(
-            "Amazon Bedrock requires AWS credentials. Set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, AWS_BEARER_TOKEN_BEDROCK, or store amazon-bedrock credentials in auth.json.",
+            "Amazon Bedrock requires AWS credentials. Set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, AWS_BEARER_TOKEN_BEDROCK, AWS_PROFILE (static or SSO), or store amazon-bedrock credentials in auth.json. \
+             For SSO profiles, run: aws sso login --profile <name>",
         ))
     }
 
@@ -382,7 +383,7 @@ impl Provider for BedrockProvider {
             )
         })?;
 
-        let auth_context = self.resolve_auth_context(options)?;
+        let auth_context = self.resolve_auth_context(options).await?;
         let url = self.converse_url(&auth_context.region)?;
 
         let mut request = self
@@ -1176,12 +1177,18 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let provider =
             BedrockProvider::new("model").with_auth_path(temp_dir.path().join("auth.json"));
-        let auth = provider
-            .resolve_auth_context(&StreamOptions {
-                api_key: Some("bedrock-bearer".to_string()),
-                ..StreamOptions::default()
-            })
-            .expect("resolve auth context");
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        let auth = runtime.block_on(async {
+            provider
+                .resolve_auth_context(&StreamOptions {
+                    api_key: Some("bedrock-bearer".to_string()),
+                    ..StreamOptions::default()
+                })
+                .await
+                .expect("resolve auth context")
+        });
         assert!(matches!(auth.auth, BedrockAuth::Bearer { .. }));
     }
 
