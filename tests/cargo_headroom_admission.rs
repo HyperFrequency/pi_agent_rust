@@ -8,7 +8,7 @@ fn repo_root() -> PathBuf {
 }
 
 fn case_dir(case_name: &str) -> PathBuf {
-    std::env::temp_dir()
+    PathBuf::from("/tmp")
         .join("pi_agent_rust_cargo_headroom_admission")
         .join(format!("{}-{}", case_name, std::process::id()))
 }
