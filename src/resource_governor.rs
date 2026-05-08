@@ -566,7 +566,7 @@ impl SwarmCapacityPlannerConfig {
     }
 
     /// Build a plan from an already-validated evidence summary.
-    #[allow(clippy::cast_precision_loss)]
+    #[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
     pub fn plan_from_summary(
         self,
         evidence: SwarmCapacityEvidenceSummary,
