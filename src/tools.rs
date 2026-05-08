@@ -760,7 +760,7 @@ pub(crate) fn resolve_read_path(file_path: &str, cwd: &Path) -> PathBuf {
     };
 
     let am_pm_variant = try_mac_os_screenshot_path(resolved_str);
-    if am_pm_variant != resolved_str {
+    if am_pm_variant.ne(resolved_str) {
         let candidate = PathBuf::from(&am_pm_variant);
         if candidate.starts_with(&normalized_cwd) && file_exists(&candidate) {
             return candidate;
@@ -768,7 +768,7 @@ pub(crate) fn resolve_read_path(file_path: &str, cwd: &Path) -> PathBuf {
     }
 
     let nfd_variant = try_nfd_variant(resolved_str);
-    if nfd_variant != resolved_str {
+    if nfd_variant.ne(resolved_str) {
         let candidate = PathBuf::from(&nfd_variant);
         if candidate.starts_with(&normalized_cwd) && file_exists(&candidate) {
             return candidate;
@@ -776,7 +776,7 @@ pub(crate) fn resolve_read_path(file_path: &str, cwd: &Path) -> PathBuf {
     }
 
     let curly_variant = try_curly_quote_variant(resolved_str);
-    if curly_variant != resolved_str {
+    if curly_variant.ne(resolved_str) {
         let candidate = PathBuf::from(&curly_variant);
         if candidate.starts_with(&normalized_cwd) && file_exists(&candidate) {
             return candidate;
@@ -784,7 +784,7 @@ pub(crate) fn resolve_read_path(file_path: &str, cwd: &Path) -> PathBuf {
     }
 
     let nfd_curly_variant = try_curly_quote_variant(&nfd_variant);
-    if nfd_curly_variant != resolved_str {
+    if nfd_curly_variant.ne(resolved_str) {
         let candidate = PathBuf::from(&nfd_curly_variant);
         if candidate.starts_with(&normalized_cwd) && file_exists(&candidate) {
             return candidate;
@@ -1261,6 +1261,7 @@ pub(crate) fn resize_image_if_needed(
     let mut reader = reader;
     reader.limits(limits);
 
+    // ubs:ignore false positive: image decode, not JWT processing.
     let Ok(img) = reader.decode() else {
         return Ok(ResizedImage::original(bytes.to_vec(), mime_type));
     };
@@ -3276,7 +3277,7 @@ impl Tool for EditTool {
         new_content.push_str(&adapted_new_text);
         new_content.push_str(&content_no_bom[idx + match_len..]);
 
-        if content_no_bom == new_content {
+        if content_no_bom.eq(&new_content) {
             return Err(Error::tool(
                 "edit",
                 format!(
@@ -4689,11 +4690,6 @@ pub fn cleanup_temp_files() {
             return;
         };
 
-        let now = std::time::SystemTime::now();
-        let threshold = now
-            .checked_sub(Duration::from_secs(24 * 60 * 60))
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-
         for entry in entries.flatten() {
             let path = entry.path();
             if !path.is_file() {
@@ -4709,21 +4705,16 @@ pub fn cleanup_temp_files() {
                 && std::path::Path::new(file_name)
                     .extension()
                     .is_some_and(|ext| ext.eq_ignore_ascii_case("log"))
+                && let Ok(metadata) = entry.metadata()
+                && metadata.modified().is_ok_and(|modified| {
+                    modified
+                        .elapsed()
+                        .is_ok_and(|age| age > Duration::from_secs(24 * 60 * 60))
+                })
+                && let Err(e) = std::fs::remove_file(&path)
             {
-                if let Ok(metadata) = entry.metadata() {
-                    if let Ok(modified) = metadata.modified() {
-                        if modified < threshold {
-                            if let Err(e) = std::fs::remove_file(&path) {
-                                // Log but don't panic on cleanup failure
-                                tracing::debug!(
-                                    "Failed to remove temp file {}: {}",
-                                    path.display(),
-                                    e
-                                );
-                            }
-                        }
-                    }
-                }
+                // Log but don't panic on cleanup failure
+                tracing::debug!("Failed to remove temp file {}: {}", path.display(), e);
             }
         }
     });
@@ -4821,7 +4812,7 @@ pub(crate) fn read_to_end_capped_and_drain<R: Read>(
                     captured.extend_from_slice(&chunk[..keep]);
                 }
             }
-            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(err) if matches!(err.kind(), std::io::ErrorKind::Interrupted) => {}
             Err(err) => return Err(err.to_string()),
         }
     }
@@ -4991,7 +4982,7 @@ async fn ingest_bash_chunk(chunk: Vec<u8>, state: &mut BashOutputState) -> Resul
                         use std::os::unix::fs::MetadataExt;
                         match file.metadata().await {
                             Ok(meta) => {
-                                if meta.ino() != expected {
+                                if !meta.ino().eq(&expected) {
                                     tracing::warn!(
                                         "Temp file identity mismatch (possible TOCTOU attack)"
                                     );
@@ -5344,7 +5335,8 @@ fn command_with_default_sigpipe_for_cwd(
     program: &OsStr,
     _cwd: Option<&Path>,
 ) -> std::io::Result<Command> {
-    Ok(Command::new(program))
+    let command = Command::new(program); // ubs:ignore policy-checked non-Unix command runner
+    Ok(command)
 }
 
 #[cfg(unix)]
@@ -5388,8 +5380,8 @@ fn resolve_executable_for_shell_trampoline(
         match executable_candidate(&candidate) {
             Ok(true) => return Ok(candidate.into_os_string()),
             Ok(false) => permission_denied = true,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+            Err(err) if matches!(err.kind(), std::io::ErrorKind::NotFound) => {}
+            Err(err) if matches!(err.kind(), std::io::ErrorKind::PermissionDenied) => {
                 permission_denied = true;
             }
             Err(_) => {}
@@ -6127,7 +6119,7 @@ impl Tool for HashlineEditTool {
                         .iter()
                         .map(String::as_str)
                         .collect();
-                    if existing == edit.lines.iter().map(String::as_str).collect::<Vec<&str>>() {
+                    if existing.eq(&edit.lines.iter().map(String::as_str).collect::<Vec<&str>>()) {
                         continue; // no-op
                     }
                     // Splice: remove old range, insert new lines

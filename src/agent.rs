@@ -3552,7 +3552,10 @@ mod extensions_integration_tests {
                             if custom_type == "note"
                                 && content == "hello"
                                 && *display
-                                && details.as_ref().and_then(|v| v.get("from").and_then(Value::as_str)) == Some("test")
+                                && details
+                                    .as_ref()
+                                    .and_then(|v| v.get("from").and_then(Value::as_str))
+                                    .is_some_and(|from| from.eq("test"))
                     )
                 }),
                 "expected custom message to be persisted, got {messages:?}"
@@ -3633,7 +3636,10 @@ mod extensions_integration_tests {
                             if custom_type == "note"
                                 && content == "hello-after-await"
                                 && *display
-                                && details.as_ref().and_then(|v| v.get("from").and_then(Value::as_str)) == Some("test")
+                                && details
+                                    .as_ref()
+                                    .and_then(|v| v.get("from").and_then(Value::as_str))
+                                    .is_some_and(|from| from.eq("test"))
                     )
                 }),
                 "expected custom message to be persisted, got {messages:?}"
@@ -3774,7 +3780,7 @@ mod extensions_integration_tests {
                             if assistant.content.iter().any(|block| matches!(
                                 block,
                                 ContentBlock::Text(TextContent { text, .. })
-                                    if text == "resumed-response-0"
+                                    if text.as_str().eq("resumed-response-0")
                             ))
                     )
                 }),
@@ -4006,7 +4012,7 @@ mod extensions_integration_tests {
                             if assistant.content.iter().any(|block| matches!(
                                 block,
                                 ContentBlock::Text(TextContent { text, .. })
-                                    if text == "resumed-response-0"
+                                    if text.as_str().eq("resumed-response-0")
                             ))
                     )
                 }),
@@ -4031,7 +4037,7 @@ mod extensions_integration_tests {
                   let sent = false;
                   pi.on("tool_call", async (event) => {
                     if (sent) return {};
-                    if (event && event.toolName === "count_tool") {
+                    if (Object.is(event && event.toolName, "count_tool")) {
                       sent = true;
                       await pi.events("sendUserMessage", {
                         text: "steer-now",
@@ -4086,7 +4092,7 @@ mod extensions_integration_tests {
                   let sent = false;
                   pi.on("tool_call", async (event) => {
                     if (sent) return {};
-                    if (event && event.toolName === "count_tool") {
+                    if (Object.is(event && event.toolName, "count_tool")) {
                       sent = true;
                       await pi.events("sendUserMessage", {
                         text: "follow-up",
@@ -4138,7 +4144,7 @@ mod extensions_integration_tests {
                 r#"
                 export default function init(pi) {
                   pi.on("tool_call", async (event) => {
-                    if (event && event.toolName === "count_tool") {
+                    if (Object.is(event && event.toolName, "count_tool")) {
                       return { block: true, reason: "blocked in test" };
                     }
                     return {};
@@ -4484,7 +4490,7 @@ mod extensions_integration_tests {
                 r#"
                 export default function init(pi) {
                   pi.on("tool_result", async (event) => {
-                    if (event && event.toolName === "count_tool") {
+                    if (Object.is(event && event.toolName, "count_tool")) {
                       return {
                         content: [{ type: "text", text: "modified" }],
                         details: { from: "tool_result" }
@@ -4552,7 +4558,7 @@ mod extensions_integration_tests {
                 r#"
                 export default function init(pi) {
                   pi.on("tool_result", async (event) => {
-                    if (event && event.toolName === "missing_tool" && event.isError) {
+                    if (Object.is(event && event.toolName, "missing_tool") && event.isError) {
                       return {
                         content: [{ type: "text", text: "overridden" }],
                         details: { handled: true }
@@ -4678,14 +4684,14 @@ mod extensions_integration_tests {
                 r#"
                 export default function init(pi) {
                   pi.on("tool_call", async (event) => {
-                    if (event && event.toolName === "count_tool") {
+                    if (Object.is(event && event.toolName, "count_tool")) {
                       return { block: true, reason: "blocked in test" };
                     }
                     return {};
                   });
 
                   pi.on("tool_result", async (event) => {
-                    if (event && event.toolName === "count_tool" && event.isError) {
+                    if (Object.is(event && event.toolName, "count_tool") && event.isError) {
                       return { content: [{ type: "text", text: "override" }] };
                     }
                     return {};
@@ -5065,17 +5071,19 @@ mod abort_tests {
         assert!(
             timeline
                 .iter()
-                .any(|event| event == "run0:agent_end_aborted"),
+                .any(|event| event.as_str().eq("run0:agent_end_aborted")),
             "missing aborted boundary for first run: {timeline:?}"
         );
         assert!(
             timeline
                 .iter()
-                .any(|event| event == "run1:agent_end_aborted"),
+                .any(|event| event.as_str().eq("run1:agent_end_aborted")),
             "missing aborted boundary for second run: {timeline:?}"
         );
         assert!(
-            timeline.iter().any(|event| event == "run2:agent_end"),
+            timeline
+                .iter()
+                .any(|event| event.as_str().eq("run2:agent_end")),
             "missing successful boundary for resumed run: {timeline:?}"
         );
     }
@@ -5279,13 +5287,15 @@ mod abort_tests {
             assert!(matches!(persisted.first(), Some(Message::User(_))));
             assert!(matches!(
                 persisted.get(1),
-                Some(Message::Assistant(assistant)) if assistant.stop_reason == StopReason::Aborted
+                Some(Message::Assistant(assistant))
+                    if matches!(assistant.stop_reason, StopReason::Aborted)
             ));
             assert!(matches!(persisted.get(2), Some(Message::User(_))));
             assert!(matches!(
                 persisted.get(3),
                 Some(Message::Assistant(assistant))
-                    if assistant.stop_reason == StopReason::Stop && assistant.error_message.is_none()
+                    if matches!(assistant.stop_reason, StopReason::Stop)
+                        && assistant.error_message.is_none()
             ));
         });
     }
@@ -5938,7 +5948,7 @@ mod turn_event_tests {
                     turn_index,
                     tool_results,
                     ..
-                } if *turn_index == 0 => Some(tool_results),
+                } if turn_index.eq(&0) => Some(tool_results),
                 _ => None,
             });
 
@@ -6252,7 +6262,7 @@ impl AgentSession {
     pub async fn set_provider_model(&mut self, provider_id: &str, model_id: &str) -> Result<()> {
         let already_active = {
             let provider = self.agent.provider();
-            provider.name() == provider_id && provider.model_id() == model_id
+            provider.name().eq(provider_id) && provider.model_id().eq(model_id)
         };
         let current_thinking = self
             .agent
@@ -6312,7 +6322,7 @@ impl AgentSession {
                 Some(model_id.to_string()),
                 Some(next_thinking.to_string()),
             );
-            if previous_thinking != Some(next_thinking) {
+            if !previous_thinking.is_some_and(|previous| previous.eq(&next_thinking)) {
                 session.append_thinking_level_change(next_thinking.to_string());
             }
         }
@@ -6390,9 +6400,9 @@ impl AgentSession {
 
         self.agent.stream_options_mut().thinking_level = Some(effective);
 
-        let thinking_changed = effective != current_thinking;
+        let thinking_changed = !effective.eq(&current_thinking);
         let persist_needed = if session_thinking.is_some() {
-            parsed_session_thinking != Some(effective)
+            !parsed_session_thinking.is_some_and(|parsed| parsed.eq(&effective))
         } else {
             thinking_changed
         };
@@ -6413,7 +6423,9 @@ impl AgentSession {
                 .as_deref()
                 .and_then(|value| value.parse::<crate::model::ThinkingLevel>().ok());
             session.set_model_header(None, None, Some(effective.to_string()));
-            if thinking_changed && previous_thinking != Some(effective) {
+            if thinking_changed
+                && !previous_thinking.is_some_and(|previous| previous.eq(&effective))
+            {
                 session.append_thinking_level_change(effective.to_string());
             }
         }
@@ -6422,8 +6434,8 @@ impl AgentSession {
     }
 
     fn apply_session_model_selection(&mut self, provider_id: &str, model_id: &str) -> Result<()> {
-        if self.agent.provider().name() == provider_id
-            && self.agent.provider().model_id() == model_id
+        if self.agent.provider().name().eq(provider_id)
+            && self.agent.provider().model_id().eq(model_id)
         {
             return Ok(());
         }
@@ -7820,7 +7832,7 @@ fn is_synthetic_empty_error_assistant(message: &Message) -> bool {
         message,
         Message::Assistant(assistant)
             if assistant.content.is_empty()
-                && assistant.stop_reason == StopReason::Error
+                && matches!(assistant.stop_reason, StopReason::Error)
                 && assistant.error_message.is_some()
     )
 }
@@ -7936,7 +7948,7 @@ fn filter_image_blocks(blocks: &mut Vec<ContentBlock>) -> usize {
                 let previous_is_placeholder =
                     filtered
                         .last()
-                        .is_some_and(|prev| matches!(prev, ContentBlock::Text(TextContent { text, .. }) if text == BLOCK_IMAGES_PLACEHOLDER));
+                        .is_some_and(|prev| matches!(prev, ContentBlock::Text(TextContent { text, .. }) if text.as_str().eq(BLOCK_IMAGES_PLACEHOLDER)));
                 if !previous_is_placeholder {
                     filtered.push(ContentBlock::Text(TextContent::new(
                         BLOCK_IMAGES_PLACEHOLDER,
@@ -8416,15 +8428,17 @@ mod tests {
         );
         assert!(matches!(
             blocks.first(),
-            Some(ContentBlock::Text(TextContent { text, .. })) if text == BLOCK_IMAGES_PLACEHOLDER
+            Some(ContentBlock::Text(TextContent { text, .. }))
+                if text.as_str().eq(BLOCK_IMAGES_PLACEHOLDER)
         ));
         assert!(matches!(
             blocks.get(1),
-            Some(ContentBlock::Text(TextContent { text, .. })) if text == "tail"
+            Some(ContentBlock::Text(TextContent { text, .. })) if text.as_str().eq("tail")
         ));
         assert!(matches!(
             blocks.get(2),
-            Some(ContentBlock::Text(TextContent { text, .. })) if text == BLOCK_IMAGES_PLACEHOLDER
+            Some(ContentBlock::Text(TextContent { text, .. }))
+                if text.as_str().eq(BLOCK_IMAGES_PLACEHOLDER)
         ));
     }
 
@@ -8500,7 +8514,7 @@ mod tests {
                 ..
             }) if blocks
                 .iter()
-                .any(|block| matches!(block, ContentBlock::Text(TextContent { text, .. }) if text == BLOCK_IMAGES_PLACEHOLDER))
+                .any(|block| matches!(block, ContentBlock::Text(TextContent { text, .. }) if text.as_str().eq(BLOCK_IMAGES_PLACEHOLDER)))
         ));
     }
 
