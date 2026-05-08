@@ -1950,9 +1950,7 @@ where
             .get("sso_region")
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty())
-            .ok_or_else(|| {
-                Error::auth(format!("AWS profile '{profile}' is missing sso_region"))
-            })?;
+            .ok_or_else(|| Error::auth(format!("AWS profile '{profile}' is missing sso_region")))?;
         // Legacy form: cache key is the start URL.
         (sso_region, sso_start_url.clone(), sso_start_url)
     };

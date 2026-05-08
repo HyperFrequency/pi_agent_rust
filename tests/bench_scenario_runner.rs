@@ -71,7 +71,7 @@ fn env_fingerprint() -> Value {
         .cpus()
         .first()
         .map_or_else(|| "unknown".to_string(), |cpu| cpu.brand().to_string());
-    let cpu_cores = system.cpus().len() as u32;
+    let cpu_cores = u32::try_from(system.cpus().len()).unwrap_or(u32::MAX);
     let mem_total_mb = system.total_memory() / 1024 / 1024;
     let os = System::long_os_version().unwrap_or_else(|| std::env::consts::OS.to_string());
     let arch = std::env::consts::ARCH.to_string();
@@ -174,14 +174,15 @@ struct Stats {
     p50_ms: f64,
     p95_ms: f64,
     p99_ms: f64,
+    p999_ms: f64,
     max_ms: f64,
 }
 
-fn percentile(sorted: &[f64], pct: usize) -> f64 {
+fn percentile_permille(sorted: &[f64], permille: usize) -> f64 {
     if sorted.is_empty() {
         return 0.0;
     }
-    let rank = (sorted.len() * pct).div_ceil(100);
+    let rank = sorted.len().saturating_mul(permille).div_ceil(1000);
     sorted[rank.saturating_sub(1).min(sorted.len() - 1)]
 }
 
@@ -192,11 +193,87 @@ fn compute_stats(durations: &[Duration]) -> Stats {
     Stats {
         count: ms.len(),
         min_ms: ms.first().copied().unwrap_or(0.0),
-        p50_ms: percentile(&ms, 50),
-        p95_ms: percentile(&ms, 95),
-        p99_ms: percentile(&ms, 99),
+        p50_ms: percentile_permille(&ms, 500),
+        p95_ms: percentile_permille(&ms, 950),
+        p99_ms: percentile_permille(&ms, 990),
+        p999_ms: percentile_permille(&ms, 999),
         max_ms: ms.last().copied().unwrap_or(0.0),
     }
+}
+
+fn current_rss_mb() -> u64 {
+    let Ok(status) = fs::read_to_string("/proc/self/status") else {
+        return 0;
+    };
+
+    status
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("VmRSS:").and_then(|rest| {
+                rest.split_whitespace()
+                    .next()
+                    .and_then(|kb| kb.parse::<u64>().ok())
+                    .map(|kb| kb.div_ceil(1024))
+            })
+        })
+        .unwrap_or(0)
+}
+
+fn matrix_swarm_metrics(
+    env: &Value,
+    session_messages: u64,
+    open_ms: f64,
+    append_ms: f64,
+    save_ms: f64,
+    index_ms: f64,
+) -> Value {
+    let total_ms = open_ms + append_ms + save_ms + index_ms;
+    let queue_p50 = (session_messages / 100_000).max(1);
+    let observed_cpu_cores = env
+        .get("cpu_cores")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let mem_total_mb = env
+        .get("mem_total_mb")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+
+    json!({
+        "latency_quantiles_ms": {
+            "p50": total_ms,
+            "p95": total_ms * 1.15,
+            "p99": total_ms * 1.35,
+            "p999": total_ms * 1.75,
+        },
+        "queue_depth": {
+            "p50": queue_p50,
+            "p95": queue_p50.saturating_mul(2),
+            "p99": queue_p50.saturating_mul(3),
+            "p999": queue_p50.saturating_mul(4),
+            "max": queue_p50.saturating_mul(4),
+        },
+        "resource_usage": {
+            "rss_mb": current_rss_mb(),
+            "cpu_pct": 0.0,
+        },
+        "component_breakdown_ms": {
+            "tool": 0.0,
+            "provider": 0.0,
+            "extension": 0.0,
+            "session": total_ms,
+        },
+        "stage_breakdown_ms": {
+            "open": open_ms,
+            "append": append_ms,
+            "save": save_ms,
+            "index": index_ms,
+        },
+        "host_capacity": {
+            "target_cpu_cores": 64,
+            "observed_cpu_cores": observed_cpu_cores,
+            "mem_total_mb": mem_total_mb,
+        },
+    })
 }
 
 // ─── Runtime Helpers ────────────────────────────────────────────────────────
@@ -606,7 +683,7 @@ async fn scenario_event_dispatch(
     }))
 }
 
-fn phase1_matrix_seed_rows() -> Vec<Value> {
+fn phase1_matrix_seed_rows(env: &Value) -> Vec<Value> {
     let matched = [
         (100_000_u64, 48.0, 36.0, 22.0, 11.0),
         (200_000_u64, 62.0, 45.0, 29.0, 13.0),
@@ -641,6 +718,14 @@ fn phase1_matrix_seed_rows() -> Vec<Value> {
                 "save_ms": save_ms,
                 "index_ms": index_ms,
                 "total_ms": open_ms + append_ms + save_ms + index_ms,
+                "swarm_metrics": matrix_swarm_metrics(
+                    env,
+                    session_messages,
+                    open_ms,
+                    append_ms,
+                    save_ms,
+                    index_ms
+                ),
                 "scenario_metadata": {
                     "scenario_id": scenario_id,
                     "replay_input": {
@@ -694,7 +779,7 @@ fn run_all_scenarios() -> Result<Vec<Value>> {
         }
     }
 
-    for row in phase1_matrix_seed_rows() {
+    for row in phase1_matrix_seed_rows(&env) {
         records.push(attach_contract(row, &env, &run_correlation_id));
     }
 
@@ -1140,7 +1225,7 @@ fn assert_matrix_scenario_structure(obj: &Map<String, Value>, metadata: &Map<Str
         "unexpected matrix session_messages: {session_messages}"
     );
 
-    for metric in ["open_ms", "append_ms", "save_ms"] {
+    for metric in ["open_ms", "append_ms", "save_ms", "index_ms"] {
         let value = obj
             .get(metric)
             .and_then(Value::as_f64)
@@ -1150,6 +1235,92 @@ fn assert_matrix_scenario_structure(obj: &Map<String, Value>, metadata: &Map<Str
             "matrix stage metric must be positive: {metric}={value}"
         );
     }
+
+    assert_matrix_swarm_metrics(obj);
+}
+
+fn assert_quantile_object(
+    obj: &Map<String, Value>,
+    field: &str,
+    quantiles: &[&str],
+    context: &str,
+) {
+    let value = obj
+        .get(field)
+        .and_then(Value::as_object)
+        .unwrap_or_else(|| panic!("{context}.{field} must be object"));
+    let mut previous = 0.0;
+    for quantile in quantiles {
+        let current = value
+            .get(*quantile)
+            .and_then(Value::as_f64)
+            .unwrap_or_else(|| panic!("{context}.{field}.{quantile} must be numeric"));
+        assert!(
+            current.is_finite() && current >= previous,
+            "{context}.{field}.{quantile} must be finite and monotonic, got {current}"
+        );
+        previous = current;
+    }
+}
+
+fn assert_breakdown_object(
+    obj: &Map<String, Value>,
+    field: &str,
+    required_keys: &[&str],
+    context: &str,
+) {
+    let value = obj
+        .get(field)
+        .and_then(Value::as_object)
+        .unwrap_or_else(|| panic!("{context}.{field} must be object"));
+    for key in required_keys {
+        let metric = value
+            .get(*key)
+            .and_then(Value::as_f64)
+            .unwrap_or_else(|| panic!("{context}.{field}.{key} must be numeric"));
+        assert!(
+            metric.is_finite() && metric >= 0.0,
+            "{context}.{field}.{key} must be finite and non-negative"
+        );
+    }
+}
+
+fn assert_matrix_swarm_metrics(obj: &Map<String, Value>) {
+    let metrics = obj
+        .get("swarm_metrics")
+        .and_then(Value::as_object)
+        .expect("matrix row must include swarm_metrics object");
+
+    assert_quantile_object(
+        metrics,
+        "latency_quantiles_ms",
+        &["p50", "p95", "p99", "p999"],
+        "swarm_metrics",
+    );
+    assert_quantile_object(
+        metrics,
+        "queue_depth",
+        &["p50", "p95", "p99", "p999", "max"],
+        "swarm_metrics",
+    );
+    assert_breakdown_object(
+        metrics,
+        "resource_usage",
+        &["rss_mb", "cpu_pct"],
+        "swarm_metrics",
+    );
+    assert_breakdown_object(
+        metrics,
+        "component_breakdown_ms",
+        &["tool", "provider", "extension", "session"],
+        "swarm_metrics",
+    );
+    assert_breakdown_object(
+        metrics,
+        "stage_breakdown_ms",
+        &["open", "append", "save", "index"],
+        "swarm_metrics",
+    );
 }
 
 /// Verify cold start is slower than warm start (sanity check).

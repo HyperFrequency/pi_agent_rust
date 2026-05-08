@@ -798,11 +798,9 @@ where
                 // the stream with ThinkingStart so downstream UIs can render a
                 // placeholder; ThinkingEnd with empty content fires from
                 // `handle_content_block_stop`.
-                self.partial
-                    .content
-                    .push(ContentBlock::RedactedThinking(RedactedThinkingContent {
-                        data,
-                    }));
+                self.partial.content.push(ContentBlock::RedactedThinking(
+                    RedactedThinkingContent { data },
+                ));
                 StreamEvent::ThinkingStart { content_index }
             }
         }

@@ -192,6 +192,14 @@ const USER_PERCEIVED_SLI_IDS: &[&str] = &[
     "tool_roundtrip_p95_ms",
     "tail_stability_p99_over_p50_ratio",
 ];
+const SWARM_LATENCY_QUANTILES: &[&str] = &["p50", "p95", "p99", "p999"];
+const SWARM_QUEUE_DEPTH_QUANTILES: &[&str] = &["p50", "p95", "p99", "p999", "max"];
+const SWARM_RESOURCE_USAGE_KEYS: &[&str] = &["rss_mb", "cpu_pct"];
+const SWARM_COMPONENT_BREAKDOWN_KEYS: &[&str] = &["tool", "provider", "extension", "session"];
+const SWARM_STAGE_BREAKDOWN_KEYS: &[&str] = &["open", "append", "save", "index"];
+const SWARM_HOST_CAPACITY_KEYS: &[&str] =
+    &["target_cpu_cores", "observed_cpu_cores", "mem_total_mb"];
+const SWARM_FAIL_CLOSED_REASON_PREFIX: &str = "missing_swarm_metrics";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -318,6 +326,76 @@ PY
 {"schema":"pi.ext.legacy_bench.v1","scenario":"ext_load_init/load_init_cold","extension":"hello","summary":{"p50_ms":10.0}}
 {"schema":"pi.ext.legacy_bench.v1","scenario":"ext_tool_call/hello","extension":"hello","per_call_us":20.0}
 JSON
+    python3 - "$target_dir/perf/scenario_runner.jsonl" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+rows = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+rewritten = []
+for line in rows:
+    record = json.loads(line)
+    if record.get("scenario") == "session_workload_matrix":
+        session_messages = int(record.get("session_messages") or 0)
+        total_ms = float(record.get("total_ms") or 0.0)
+        queue_p50 = max(1, session_messages // 100000)
+        record["swarm_metrics"] = {
+            "latency_quantiles_ms": {
+                "p50": total_ms,
+                "p95": total_ms * 1.15,
+                "p99": total_ms * 1.35,
+                "p999": total_ms * 1.75,
+            },
+            "queue_depth": {
+                "p50": queue_p50,
+                "p95": queue_p50 * 2,
+                "p99": queue_p50 * 3,
+                "p999": queue_p50 * 4,
+                "max": queue_p50 * 4,
+            },
+            "resource_usage": {
+                "rss_mb": 64,
+                "cpu_pct": 0.0,
+            },
+            "component_breakdown_ms": {
+                "tool": 0.0,
+                "provider": 0.0,
+                "extension": 0.0,
+                "session": total_ms,
+            },
+            "stage_breakdown_ms": {
+                "open": float(record.get("open_ms") or 0.0),
+                "append": float(record.get("append_ms") or 0.0),
+                "save": float(record.get("save_ms") or 0.0),
+                "index": float(record.get("index_ms") or 0.0),
+            },
+            "host_capacity": {
+                "target_cpu_cores": 64,
+                "observed_cpu_cores": 8,
+                "mem_total_mb": 262144,
+            },
+        }
+    rewritten.append(json.dumps(record, separators=(",", ":")))
+path.write_text("\n".join(rewritten) + ("\n" if rewritten else ""), encoding="utf-8")
+PY
+    if [[ "${PI_FAKE_DROP_SWARM_METRICS:-0}" == "1" ]]; then
+      python3 - "$target_dir/perf/scenario_runner.jsonl" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+rows = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+rewritten = []
+for line in rows:
+    record = json.loads(line)
+    if record.get("scenario") == "session_workload_matrix":
+        record.pop("swarm_metrics", None)
+    rewritten.append(json.dumps(record, separators=(",", ":")))
+path.write_text("\n".join(rewritten) + ("\n" if rewritten else ""), encoding="utf-8")
+PY
+    fi
     ;;
   ext_bench_harness)
     cat >"$target_dir/perf/ext_bench_harness.jsonl" <<'JSON'
@@ -504,9 +582,191 @@ fn canonical_protocol_contract() -> Value {
                 PARTITION_REALISTIC: "Use realistic workloads as primary user-impact evidence and release-facing performance narrative.",
             },
         },
+        "swarm_scale_requirements": {
+            "target_cpu_cores": 64,
+            "required_latency_quantiles": SWARM_LATENCY_QUANTILES,
+            "required_queue_depth_quantiles": SWARM_QUEUE_DEPTH_QUANTILES,
+            "required_resource_usage_keys": SWARM_RESOURCE_USAGE_KEYS,
+            "required_component_breakdown_keys": SWARM_COMPONENT_BREAKDOWN_KEYS,
+            "required_stage_breakdown_keys": SWARM_STAGE_BREAKDOWN_KEYS,
+            "fail_closed_on_missing_measurements": true,
+            "documented_run_commands": {
+                "local": "PERF_CARGO_RUNNER=local ./scripts/perf/orchestrate.sh --profile full",
+                "rch_required": "./scripts/perf/orchestrate.sh --require-rch --profile full"
+            }
+        },
         "user_perceived_sli_catalog": user_perceived_sli_catalog,
         "scenario_sli_matrix": scenario_sli_matrix,
     })
+}
+
+fn validate_metric_group(
+    metrics: &serde_json::Map<String, Value>,
+    field: &str,
+    required_keys: &[&str],
+    context: &str,
+    allow_null: bool,
+    require_monotonic: bool,
+) -> Result<bool, String> {
+    let group = metrics
+        .get(field)
+        .and_then(Value::as_object)
+        .ok_or_else(|| format!("{context}.{field} must be an object"))?;
+    let mut complete = true;
+    let mut previous = 0.0_f64;
+
+    for key in required_keys {
+        let raw_value = group
+            .get(*key)
+            .ok_or_else(|| format!("{context}.{field} missing {key}"))?;
+        if raw_value.is_null() {
+            if allow_null {
+                complete = false;
+                continue;
+            }
+            return Err(format!("{context}.{field}.{key} must not be null"));
+        }
+        let value = raw_value
+            .as_f64()
+            .ok_or_else(|| format!("{context}.{field}.{key} must be numeric"))?;
+        if !value.is_finite() || value < 0.0 {
+            return Err(format!(
+                "{context}.{field}.{key} must be finite and non-negative, got: {value}"
+            ));
+        }
+        if require_monotonic && value < previous {
+            return Err(format!(
+                "{context}.{field}.{key} must be monotonic; {value} came after {previous}"
+            ));
+        }
+        previous = value;
+    }
+
+    let unexpected = group
+        .keys()
+        .filter(|key| !required_keys.contains(&key.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unexpected.is_empty() {
+        return Err(format!(
+            "{context}.{field} has unexpected keys: {unexpected:?}"
+        ));
+    }
+
+    Ok(complete)
+}
+
+fn validate_swarm_metrics_value(
+    value: &Value,
+    context: &str,
+    allow_null: bool,
+) -> Result<bool, String> {
+    let metrics = value
+        .as_object()
+        .ok_or_else(|| format!("{context} must be an object"))?;
+    let mut complete = true;
+
+    complete &= validate_metric_group(
+        metrics,
+        "latency_quantiles_ms",
+        SWARM_LATENCY_QUANTILES,
+        context,
+        allow_null,
+        true,
+    )?;
+    complete &= validate_metric_group(
+        metrics,
+        "queue_depth",
+        SWARM_QUEUE_DEPTH_QUANTILES,
+        context,
+        allow_null,
+        true,
+    )?;
+    complete &= validate_metric_group(
+        metrics,
+        "resource_usage",
+        SWARM_RESOURCE_USAGE_KEYS,
+        context,
+        allow_null,
+        false,
+    )?;
+    complete &= validate_metric_group(
+        metrics,
+        "component_breakdown_ms",
+        SWARM_COMPONENT_BREAKDOWN_KEYS,
+        context,
+        allow_null,
+        false,
+    )?;
+    complete &= validate_metric_group(
+        metrics,
+        "stage_breakdown_ms",
+        SWARM_STAGE_BREAKDOWN_KEYS,
+        context,
+        allow_null,
+        false,
+    )?;
+    complete &= validate_metric_group(
+        metrics,
+        "host_capacity",
+        SWARM_HOST_CAPACITY_KEYS,
+        context,
+        allow_null,
+        false,
+    )?;
+
+    Ok(complete)
+}
+
+fn collect_string_set(value: &Value, context: &str) -> Result<BTreeSet<String>, String> {
+    let array = value
+        .as_array()
+        .ok_or_else(|| format!("{context} must be an array"))?;
+    let mut set = BTreeSet::new();
+    for item in array {
+        let item = item
+            .as_str()
+            .ok_or_else(|| format!("{context} entries must be strings"))?;
+        if item.trim().is_empty() {
+            return Err(format!("{context} entries must be non-empty strings"));
+        }
+        if !set.insert(item.to_string()) {
+            return Err(format!(
+                "{context} must not contain duplicate entries: {item}"
+            ));
+        }
+    }
+    Ok(set)
+}
+
+fn require_string_array_eq(
+    obj: &serde_json::Map<String, Value>,
+    field: &str,
+    expected: &[&str],
+    context: &str,
+) -> Result<(), String> {
+    let parsed = obj
+        .get(field)
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{context}.{field} must be an array"))?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(ToString::to_string)
+                .ok_or_else(|| format!("{context}.{field} entries must be strings"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let expected = expected
+        .iter()
+        .map(|value| (*value).to_string())
+        .collect::<Vec<_>>();
+    if parsed != expected {
+        return Err(format!(
+            "{context}.{field} must equal {expected:?}, got {parsed:?}"
+        ));
+    }
+    Ok(())
 }
 
 fn validate_protocol_record(record: &Value) -> Result<(), String> {
@@ -616,6 +876,16 @@ fn validate_protocol_record(record: &Value) -> Result<(), String> {
         .get("scenario")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    if scenario == "session_workload_matrix" {
+        let swarm_metrics = record.get("swarm_metrics").ok_or_else(|| {
+            "session_workload_matrix records must include swarm_metrics".to_string()
+        })?;
+        validate_swarm_metrics_value(
+            swarm_metrics,
+            "session_workload_matrix.swarm_metrics",
+            false,
+        )?;
+    }
 
     if partition == PARTITION_REALISTIC {
         if !scenario_id.starts_with("realistic/session_") {
@@ -844,6 +1114,7 @@ fn validate_phase1_matrix_validation_record(record: &Value) -> Result<(), String
         "matrix_requirements",
         "matrix_cells",
         "stage_summary",
+        "swarm_summary",
         "weighted_bottleneck_attribution",
         "primary_outcomes",
         "regression_guards",
@@ -990,6 +1261,11 @@ fn validate_phase1_matrix_validation_record(record: &Value) -> Result<(), String
     let mut observed_missing_stage_cell_keys: HashSet<(String, u64)> = HashSet::new();
     let mut observed_missing_stage_reasons_by_key: HashMap<(String, u64), BTreeSet<String>> =
         HashMap::new();
+    let mut observed_complete_swarm_metric_cells = 0_u64;
+    let mut observed_missing_swarm_metric_cells = 0_u64;
+    let mut observed_missing_swarm_cell_keys: HashSet<(String, u64)> = HashSet::new();
+    let mut observed_missing_swarm_reasons_by_key: HashMap<(String, u64), BTreeSet<String>> =
+        HashMap::new();
     let mut observed_weighted_valid_cell_count = 0_u64;
     let mut observed_weighted_present_cell_keys: HashSet<(String, u64)> = HashSet::new();
     let mut seen_partition_size_cells = HashSet::new();
@@ -1003,6 +1279,7 @@ fn validate_phase1_matrix_validation_record(record: &Value) -> Result<(), String
             "scenario_id",
             "status",
             "stage_attribution",
+            "swarm_metrics",
             "primary_e2e",
             "lineage",
         ] {
@@ -1122,6 +1399,42 @@ fn validate_phase1_matrix_validation_record(record: &Value) -> Result<(), String
                 ));
             }
             observed_missing_stage_reasons_by_key
+                .insert(partition_size_key.clone(), missing_reason_set);
+        }
+
+        let swarm_complete = validate_swarm_metrics_value(
+            cell_obj
+                .get("swarm_metrics")
+                .ok_or_else(|| "matrix cell missing swarm_metrics".to_string())?,
+            "matrix cell swarm_metrics",
+            true,
+        )?;
+        let missing_reason_set = match cell_obj.get("missing_reasons") {
+            Some(value) => collect_string_set(
+                value,
+                &format!("matrix cell ({workload_partition}, {session_messages}) missing_reasons"),
+            )?,
+            None => BTreeSet::new(),
+        };
+        let has_missing_swarm_reason = missing_reason_set
+            .iter()
+            .any(|reason| reason.starts_with(SWARM_FAIL_CLOSED_REASON_PREFIX));
+        if swarm_complete {
+            observed_complete_swarm_metric_cells += 1;
+            if has_missing_swarm_reason {
+                return Err(format!(
+                    "matrix cell ({workload_partition}, {session_messages}) has complete swarm_metrics but missing_reasons includes {SWARM_FAIL_CLOSED_REASON_PREFIX}"
+                ));
+            }
+        } else {
+            observed_missing_swarm_metric_cells += 1;
+            observed_missing_swarm_cell_keys.insert(partition_size_key.clone());
+            if !has_missing_swarm_reason {
+                return Err(format!(
+                    "matrix cell ({workload_partition}, {session_messages}) incomplete swarm_metrics must include {SWARM_FAIL_CLOSED_REASON_PREFIX} in missing_reasons"
+                ));
+            }
+            observed_missing_swarm_reasons_by_key
                 .insert(partition_size_key.clone(), missing_reason_set);
         }
 
@@ -1333,6 +1646,151 @@ fn validate_phase1_matrix_validation_record(record: &Value) -> Result<(), String
         if &reason_set != observed_reason_set {
             return Err(format!(
                 "stage_summary.missing_cells entry ({workload_partition}, {session_messages}) reasons {reason_set:?} must equal matrix cell missing_reasons {observed_reason_set:?}",
+            ));
+        }
+    }
+
+    let swarm_summary = record
+        .get("swarm_summary")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "swarm_summary must be an object".to_string())?;
+    for field in &[
+        "required_latency_quantiles",
+        "required_queue_depth_quantiles",
+        "required_resource_usage_keys",
+        "required_component_breakdown_keys",
+        "required_stage_breakdown_keys",
+        "cells_with_complete_swarm_metrics",
+        "cells_missing_swarm_metrics",
+        "missing_cells",
+    ] {
+        if !swarm_summary.contains_key(*field) {
+            return Err(format!("swarm_summary missing {field}"));
+        }
+    }
+    require_string_array_eq(
+        swarm_summary,
+        "required_latency_quantiles",
+        SWARM_LATENCY_QUANTILES,
+        "swarm_summary",
+    )?;
+    require_string_array_eq(
+        swarm_summary,
+        "required_queue_depth_quantiles",
+        SWARM_QUEUE_DEPTH_QUANTILES,
+        "swarm_summary",
+    )?;
+    require_string_array_eq(
+        swarm_summary,
+        "required_resource_usage_keys",
+        SWARM_RESOURCE_USAGE_KEYS,
+        "swarm_summary",
+    )?;
+    require_string_array_eq(
+        swarm_summary,
+        "required_component_breakdown_keys",
+        SWARM_COMPONENT_BREAKDOWN_KEYS,
+        "swarm_summary",
+    )?;
+    require_string_array_eq(
+        swarm_summary,
+        "required_stage_breakdown_keys",
+        SWARM_STAGE_BREAKDOWN_KEYS,
+        "swarm_summary",
+    )?;
+
+    let complete_swarm_cells = swarm_summary
+        .get("cells_with_complete_swarm_metrics")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            "swarm_summary.cells_with_complete_swarm_metrics must be an integer".to_string()
+        })?;
+    let missing_swarm_cells_count = swarm_summary
+        .get("cells_missing_swarm_metrics")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            "swarm_summary.cells_missing_swarm_metrics must be an integer".to_string()
+        })?;
+    let swarm_missing_cells = swarm_summary
+        .get("missing_cells")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "swarm_summary.missing_cells must be an array".to_string())?;
+    if complete_swarm_cells + missing_swarm_cells_count != matrix_cells.len() as u64 {
+        return Err(format!(
+            "swarm_summary complete+missing ({complete_swarm_cells}+{missing_swarm_cells_count}) must equal matrix_cells length ({})",
+            matrix_cells.len()
+        ));
+    }
+    if complete_swarm_cells != observed_complete_swarm_metric_cells {
+        return Err(format!(
+            "swarm_summary.cells_with_complete_swarm_metrics ({complete_swarm_cells}) must equal observed complete swarm_metrics cell count ({observed_complete_swarm_metric_cells})"
+        ));
+    }
+    if missing_swarm_cells_count != observed_missing_swarm_metric_cells {
+        return Err(format!(
+            "swarm_summary.cells_missing_swarm_metrics ({missing_swarm_cells_count}) must equal observed missing swarm_metrics cell count ({observed_missing_swarm_metric_cells})"
+        ));
+    }
+    if swarm_missing_cells.len() as u64 != missing_swarm_cells_count {
+        return Err(format!(
+            "swarm_summary.missing_cells length ({}) must equal cells_missing_swarm_metrics ({missing_swarm_cells_count})",
+            swarm_missing_cells.len()
+        ));
+    }
+    let mut reported_missing_swarm_cell_keys = HashSet::new();
+    for missing_cell in swarm_missing_cells {
+        let missing_cell_obj = missing_cell
+            .as_object()
+            .ok_or_else(|| "swarm_summary.missing_cells entries must be objects".to_string())?;
+        let workload_partition = missing_cell_obj
+            .get("workload_partition")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                "swarm_summary.missing_cells entries must include workload_partition string"
+                    .to_string()
+            })?;
+        let session_messages = missing_cell_obj
+            .get("session_messages")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| {
+                "swarm_summary.missing_cells entries must include session_messages integer"
+                    .to_string()
+            })?;
+        let reasons = collect_string_set(
+            missing_cell_obj.get("reasons").ok_or_else(|| {
+                "swarm_summary.missing_cells entries must include reasons".to_string()
+            })?,
+            "swarm_summary.missing_cells.reasons",
+        )?;
+        if !reasons
+            .iter()
+            .any(|reason| reason.starts_with(SWARM_FAIL_CLOSED_REASON_PREFIX))
+        {
+            return Err(format!(
+                "swarm_summary.missing_cells entry ({workload_partition}, {session_messages}) reasons must include {SWARM_FAIL_CLOSED_REASON_PREFIX}"
+            ));
+        }
+        let missing_key = (workload_partition.to_string(), session_messages);
+        if !reported_missing_swarm_cell_keys.insert(missing_key.clone()) {
+            return Err(format!(
+                "swarm_summary.missing_cells must not contain duplicate partition-size entries: ({workload_partition}, {session_messages})"
+            ));
+        }
+        if !observed_missing_swarm_cell_keys.contains(&missing_key) {
+            return Err(format!(
+                "swarm_summary.missing_cells entry ({workload_partition}, {session_messages}) does not match any matrix cell with missing swarm_metrics"
+            ));
+        }
+        let observed_reason_set = observed_missing_swarm_reasons_by_key
+            .get(&missing_key)
+            .ok_or_else(|| {
+                format!(
+                    "swarm_summary.missing_cells entry ({workload_partition}, {session_messages}) is missing observed matrix-cell reason linkage"
+                )
+            })?;
+        if &reasons != observed_reason_set {
+            return Err(format!(
+                "swarm_summary.missing_cells entry ({workload_partition}, {session_messages}) reasons {reasons:?} must equal matrix cell missing_reasons {observed_reason_set:?}",
             ));
         }
     }
@@ -2049,12 +2507,14 @@ fn validate_phase1_matrix_validation_record(record: &Value) -> Result<(), String
     let expected_artifact_ready_for_phase5 = primary_status == "pass"
         && missing_cells_count == 0
         && complete_cells == required_cell_count
+        && missing_swarm_cells_count == 0
+        && complete_swarm_cells == required_cell_count
         && memory_guard_status == "pass"
         && correctness_guard_status == "pass"
         && security_guard_status == "pass";
     if artifact_ready_for_phase5 != expected_artifact_ready_for_phase5 {
         return Err(format!(
-            "consumption_contract.artifact_ready_for_phase5 ({artifact_ready_for_phase5}) must equal expected deterministic value ({expected_artifact_ready_for_phase5}) from primary_outcomes.status={primary_status}, stage_summary(cells_with_complete_stage_breakdown={complete_cells}, cells_missing_stage_breakdown={missing_cells_count}, required_cell_count={required_cell_count}), regression_guards(memory={memory_guard_status}, correctness={correctness_guard_status}, security={security_guard_status})"
+            "consumption_contract.artifact_ready_for_phase5 ({artifact_ready_for_phase5}) must equal expected deterministic value ({expected_artifact_ready_for_phase5}) from primary_outcomes.status={primary_status}, stage_summary(cells_with_complete_stage_breakdown={complete_cells}, cells_missing_stage_breakdown={missing_cells_count}, required_cell_count={required_cell_count}), swarm_summary(cells_with_complete_swarm_metrics={complete_swarm_cells}, cells_missing_swarm_metrics={missing_swarm_cells_count}), regression_guards(memory={memory_guard_status}, correctness={correctness_guard_status}, security={security_guard_status})"
         ));
     }
     let downstream_beads = consumption_contract
@@ -2278,6 +2738,51 @@ fn require_non_empty_string_field(
     Ok(value.to_string())
 }
 
+fn swarm_metrics_fixture(
+    total_ms: f64,
+    open_ms: f64,
+    append_ms: f64,
+    save_ms: f64,
+    index_ms: f64,
+) -> Value {
+    json!({
+        "latency_quantiles_ms": {
+            "p50": total_ms,
+            "p95": total_ms * 1.15,
+            "p99": total_ms * 1.35,
+            "p999": total_ms * 1.75,
+        },
+        "queue_depth": {
+            "p50": 1,
+            "p95": 2,
+            "p99": 3,
+            "p999": 4,
+            "max": 4,
+        },
+        "resource_usage": {
+            "rss_mb": 64,
+            "cpu_pct": 0.0,
+        },
+        "component_breakdown_ms": {
+            "tool": 0.0,
+            "provider": 0.0,
+            "extension": 0.0,
+            "session": total_ms,
+        },
+        "stage_breakdown_ms": {
+            "open": open_ms,
+            "append": append_ms,
+            "save": save_ms,
+            "index": index_ms,
+        },
+        "host_capacity": {
+            "target_cpu_cores": 64,
+            "observed_cpu_cores": 8,
+            "mem_total_mb": 262_144,
+        },
+    })
+}
+
 fn phase1_matrix_validation_golden_fixture() -> Value {
     json!({
         "schema": PHASE1_MATRIX_SCHEMA,
@@ -2302,6 +2807,7 @@ fn phase1_matrix_validation_golden_fixture() -> Value {
                     "index_ms": 11.0,
                     "total_stage_ms": 117.0
                 },
+                "swarm_metrics": swarm_metrics_fixture(117.0, 48.0, 36.0, 22.0, 11.0),
                 "primary_e2e": {
                     "wall_clock_ms": 1200.0,
                     "rust_vs_node_ratio": 2.2,
@@ -2329,6 +2835,7 @@ fn phase1_matrix_validation_golden_fixture() -> Value {
                     "index_ms": 10.0,
                     "total_stage_ms": 105.0
                 },
+                "swarm_metrics": swarm_metrics_fixture(105.0, 44.0, 32.0, 19.0, 10.0),
                 "primary_e2e": {
                     "wall_clock_ms": 1200.0,
                     "rust_vs_node_ratio": 2.2,
@@ -2355,6 +2862,16 @@ fn phase1_matrix_validation_golden_fixture() -> Value {
             "cells_with_complete_stage_breakdown": 2,
             "cells_missing_stage_breakdown": 0,
             "covered_cells": 2,
+            "missing_cells": []
+        },
+        "swarm_summary": {
+            "required_latency_quantiles": SWARM_LATENCY_QUANTILES,
+            "required_queue_depth_quantiles": SWARM_QUEUE_DEPTH_QUANTILES,
+            "required_resource_usage_keys": SWARM_RESOURCE_USAGE_KEYS,
+            "required_component_breakdown_keys": SWARM_COMPONENT_BREAKDOWN_KEYS,
+            "required_stage_breakdown_keys": SWARM_STAGE_BREAKDOWN_KEYS,
+            "cells_with_complete_swarm_metrics": 2,
+            "cells_missing_swarm_metrics": 0,
             "missing_cells": []
         },
         "weighted_bottleneck_attribution": {
@@ -2481,7 +2998,7 @@ fn phase1_matrix_validation_golden_fixture() -> Value {
                 }
             },
             "artifact_ready_for_phase5": true,
-            "fail_closed_conditions": ["missing_stage_metrics"]
+            "fail_closed_conditions": ["missing_stage_metrics", "missing_swarm_metrics"]
         },
         "lineage": {
             "run_id_lineage": ["20260216T010101Z", "abc123def456"],
@@ -2598,6 +3115,56 @@ fn protocol_contract_defines_partition_weighting_and_guardrails() {
     assert!(
         required.contains(PARTITION_MATCHED_STATE) && required.contains(PARTITION_REALISTIC),
         "global claim rules must require both partitions"
+    );
+}
+
+#[test]
+fn protocol_contract_defines_swarm_scale_measurement_requirements() {
+    let contract = canonical_protocol_contract();
+    let requirements = contract["swarm_scale_requirements"]
+        .as_object()
+        .expect("swarm_scale_requirements object");
+
+    assert_eq!(
+        requirements["target_cpu_cores"].as_u64(),
+        Some(64),
+        "swarm harness target must be explicit"
+    );
+    assert_eq!(
+        requirements["fail_closed_on_missing_measurements"].as_bool(),
+        Some(true),
+        "missing swarm measurements must fail closed"
+    );
+    for (field, expected) in [
+        ("required_latency_quantiles", SWARM_LATENCY_QUANTILES),
+        (
+            "required_queue_depth_quantiles",
+            SWARM_QUEUE_DEPTH_QUANTILES,
+        ),
+        ("required_resource_usage_keys", SWARM_RESOURCE_USAGE_KEYS),
+        (
+            "required_component_breakdown_keys",
+            SWARM_COMPONENT_BREAKDOWN_KEYS,
+        ),
+    ] {
+        let observed = requirements[field]
+            .as_array()
+            .expect("requirement array")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(observed, expected, "unexpected swarm requirement {field}");
+    }
+
+    let run_commands = requirements["documented_run_commands"]
+        .as_object()
+        .expect("documented run commands object");
+    assert!(
+        run_commands
+            .get("rch_required")
+            .and_then(Value::as_str)
+            .is_some_and(|command| command.contains("--require-rch")),
+        "swarm harness must document an RCH-required run command"
     );
 }
 
@@ -2786,6 +3353,7 @@ fn protocol_record_validator_accepts_golden_fixture() {
         "evidence_class": EVIDENCE_CLASS_MEASURED,
         "confidence": CONFIDENCE_HIGH,
         "correlation_id": "0123456789abcdef0123456789abcdef",
+        "swarm_metrics": swarm_metrics_fixture(117.0, 48.0, 36.0, 22.0, 11.0),
         "scenario_metadata": {
             "runtime": "pi_agent_rust",
             "build_profile": "release",
@@ -2821,6 +3389,7 @@ fn protocol_record_validator_accepts_matched_state_session_matrix_fixture() {
         "evidence_class": EVIDENCE_CLASS_MEASURED,
         "confidence": CONFIDENCE_HIGH,
         "correlation_id": "0123456789abcdef0123456789abcdef",
+        "swarm_metrics": swarm_metrics_fixture(117.0, 48.0, 36.0, 22.0, 11.0),
         "scenario_metadata": {
             "runtime": "pi_agent_rust",
             "build_profile": "release",
@@ -2836,10 +3405,9 @@ fn protocol_record_validator_accepts_matched_state_session_matrix_fixture() {
             },
         },
     });
-    assert!(
-        validate_protocol_record(&fixture).is_ok(),
-        "matched-state matrix fixture should pass validation"
-    );
+    if let Err(err) = validate_protocol_record(&fixture) {
+        panic!("matched-state matrix fixture should pass validation: {err}");
+    }
 }
 
 #[test]
@@ -3967,6 +4535,9 @@ fn orchestrate_script_emits_phase1_matrix_validation_contract() {
         "required_stage_keys = [\"open_ms\", \"append_ms\", \"save_ms\", \"index_ms\"]",
         "\"required_session_message_sizes\"",
         "\"cells_with_complete_stage_breakdown\"",
+        "\"swarm_summary\"",
+        "\"cells_with_complete_swarm_metrics\"",
+        "\"missing_swarm_metrics\"",
         "\"weighted_bottleneck_attribution\"",
         "\"pi.perf.phase1_weighted_bottleneck_attribution.v1\"",
         "\"global_ranking\"",
@@ -4267,6 +4838,11 @@ fn orchestrate_generates_phase1_matrix_validation_artifact() {
             .is_some_and(|value| value == 0)
         && matrix["stage_summary"]["cells_with_complete_stage_breakdown"].as_u64()
             == matrix["matrix_requirements"]["required_cell_count"].as_u64()
+        && matrix["swarm_summary"]["cells_missing_swarm_metrics"]
+            .as_u64()
+            .is_some_and(|value| value == 0)
+        && matrix["swarm_summary"]["cells_with_complete_swarm_metrics"].as_u64()
+            == matrix["matrix_requirements"]["required_cell_count"].as_u64()
         && ["memory", "correctness", "security"]
             .into_iter()
             .all(|guard_name| {
@@ -4339,6 +4915,11 @@ fn orchestrate_generates_phase1_matrix_validation_artifact() {
         matrix["stage_summary"]["cells_with_complete_stage_breakdown"].as_u64(),
         Some(10),
         "stub matrix should provide complete open/append/save/index attribution for every cell"
+    );
+    assert_eq!(
+        matrix["swarm_summary"]["cells_with_complete_swarm_metrics"].as_u64(),
+        Some(10),
+        "stub matrix should provide complete swarm latency/resource/breakdown metrics for every cell"
     );
 
     let cells = matrix["matrix_cells"]
@@ -4646,6 +5227,63 @@ fn orchestrate_phase1_matrix_treats_missing_index_as_incomplete() {
     assert_eq!(
         summary_missing_index_keys, observed_missing_index_keys,
         "stage_summary.missing_cells must include the same partition-size keys that matrix_cells mark with missing_stage_metrics:index_ms"
+    );
+
+    let _ = fs::remove_dir_all(temp_root);
+}
+
+#[cfg(unix)]
+#[test]
+fn orchestrate_phase1_matrix_treats_missing_swarm_metrics_as_incomplete() {
+    let (output, temp_root) =
+        run_orchestrate_with_fake_toolchain_with_env(&[("PI_FAKE_DROP_SWARM_METRICS", "1")]);
+    assert!(
+        output.status.success(),
+        "orchestrate.sh should succeed with stub toolchain. stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let matrix_path = temp_root
+        .join("run")
+        .join("results")
+        .join("phase1_matrix_validation.json");
+    let matrix: Value =
+        serde_json::from_str(&fs::read_to_string(&matrix_path).expect("read matrix artifact"))
+            .expect("parse matrix artifact");
+
+    if let Err(err) = validate_phase1_matrix_validation_record(&matrix) {
+        panic!("missing-swarm phase1 matrix artifact violates schema contract: {err}");
+    }
+
+    assert_eq!(
+        matrix["swarm_summary"]["cells_with_complete_swarm_metrics"].as_u64(),
+        Some(0),
+        "dropping swarm metrics should leave zero complete swarm metric cells"
+    );
+    assert_eq!(
+        matrix["swarm_summary"]["cells_missing_swarm_metrics"].as_u64(),
+        Some(10),
+        "dropping swarm metrics should mark every required cell as missing"
+    );
+    assert_eq!(
+        matrix["consumption_contract"]["artifact_ready_for_phase5"].as_bool(),
+        Some(false),
+        "phase5 readiness must fail closed when required swarm metrics are missing"
+    );
+    let matrix_cells = matrix["matrix_cells"]
+        .as_array()
+        .expect("matrix_cells array");
+    assert!(
+        matrix_cells.iter().all(|cell| {
+            cell["missing_reasons"].as_array().is_some_and(|reasons| {
+                reasons.iter().any(|reason| {
+                    reason
+                        .as_str()
+                        .is_some_and(|value| value.starts_with(SWARM_FAIL_CLOSED_REASON_PREFIX))
+                })
+            })
+        }),
+        "every cell must carry a missing_swarm_metrics reason when source swarm telemetry is absent"
     );
 
     let _ = fs::remove_dir_all(temp_root);

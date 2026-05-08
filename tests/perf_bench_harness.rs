@@ -113,7 +113,7 @@ fn collect_env_fingerprint() -> EnvFingerprint {
         .cpus()
         .first()
         .map_or_else(|| "unknown".to_string(), |cpu| cpu.brand().to_string());
-    let cpu_cores = system.cpus().len() as u32;
+    let cpu_cores = u32::try_from(system.cpus().len()).unwrap_or(u32::MAX);
     let mem_total_mb = system.total_memory() / (1024 * 1024);
     let os = System::long_os_version().unwrap_or_else(|| std::env::consts::OS.to_string());
     let arch = std::env::consts::ARCH.to_string();
@@ -207,6 +207,7 @@ struct Summary {
     p50_ms: f64,
     p95_ms: f64,
     p99_ms: f64,
+    p999_ms: f64,
     max_ms: f64,
     mean_ms: f64,
 }
@@ -219,6 +220,7 @@ fn compute_summary(samples_us: &[f64]) -> Summary {
             p50_ms: 0.0,
             p95_ms: 0.0,
             p99_ms: 0.0,
+            p999_ms: 0.0,
             max_ms: 0.0,
             mean_ms: 0.0,
         };
@@ -236,6 +238,7 @@ fn compute_summary(samples_us: &[f64]) -> Summary {
         p50_ms: percentile_f64(&sorted, 50.0),
         p95_ms: percentile_f64(&sorted, 95.0),
         p99_ms: percentile_f64(&sorted, 99.0),
+        p999_ms: percentile_f64(&sorted, 99.9),
         max_ms: sorted[count - 1],
         mean_ms: sum / count as f64,
     }
@@ -631,8 +634,8 @@ fn bench_extension_scenarios() {
             let total_elapsed: f64 = samples.iter().sum::<f64>() / 1000.0;
 
             eprintln!(
-                "[cold_start]  {ext_name:30} n={:3}  p50={:.2}ms  p95={:.2}ms  p99={:.2}ms",
-                summary.count, summary.p50_ms, summary.p95_ms, summary.p99_ms,
+                "[cold_start]  {ext_name:30} n={:3}  p50={:.2}ms  p95={:.2}ms  p99={:.2}ms  p999={:.2}ms",
+                summary.count, summary.p50_ms, summary.p95_ms, summary.p99_ms, summary.p999_ms,
             );
 
             records.push(BenchRecord {
@@ -665,8 +668,8 @@ fn bench_extension_scenarios() {
             let total_elapsed: f64 = samples.iter().sum::<f64>() / 1000.0;
 
             eprintln!(
-                "[warm_start]  {ext_name:30} n={:3}  p50={:.2}ms  p95={:.2}ms  p99={:.2}ms",
-                summary.count, summary.p50_ms, summary.p95_ms, summary.p99_ms,
+                "[warm_start]  {ext_name:30} n={:3}  p50={:.2}ms  p95={:.2}ms  p99={:.2}ms  p999={:.2}ms",
+                summary.count, summary.p50_ms, summary.p95_ms, summary.p99_ms, summary.p999_ms,
             );
 
             records.push(BenchRecord {
@@ -699,8 +702,8 @@ fn bench_extension_scenarios() {
             let total_elapsed: f64 = samples.iter().sum::<f64>() / 1000.0;
 
             eprintln!(
-                "[tool_call]   {ext_name:30} n={:3}  p50={:.2}ms  p95={:.2}ms  p99={:.2}ms",
-                summary.count, summary.p50_ms, summary.p95_ms, summary.p99_ms,
+                "[tool_call]   {ext_name:30} n={:3}  p50={:.2}ms  p95={:.2}ms  p99={:.2}ms  p999={:.2}ms",
+                summary.count, summary.p50_ms, summary.p95_ms, summary.p99_ms, summary.p999_ms,
             );
 
             records.push(BenchRecord {
@@ -733,8 +736,8 @@ fn bench_extension_scenarios() {
             let total_elapsed: f64 = samples.iter().sum::<f64>() / 1000.0;
 
             eprintln!(
-                "[event_hook]  {ext_name:30} n={:3}  p50={:.2}ms  p95={:.2}ms  p99={:.2}ms",
-                summary.count, summary.p50_ms, summary.p95_ms, summary.p99_ms,
+                "[event_hook]  {ext_name:30} n={:3}  p50={:.2}ms  p95={:.2}ms  p99={:.2}ms  p999={:.2}ms",
+                summary.count, summary.p50_ms, summary.p95_ms, summary.p99_ms, summary.p999_ms,
             );
 
             records.push(BenchRecord {
@@ -789,19 +792,21 @@ fn bench_extension_scenarios() {
 
     for scenario in &scenarios {
         let _ = writeln!(summary_text, "## {scenario}\n");
-        summary_text
-            .push_str("| Extension | Runs | p50 (ms) | p95 (ms) | p99 (ms) | Mean (ms) |\n");
-        summary_text.push_str("|---|---|---|---|---|---|\n");
+        summary_text.push_str(
+            "| Extension | Runs | p50 (ms) | p95 (ms) | p99 (ms) | p999 (ms) | Mean (ms) |\n",
+        );
+        summary_text.push_str("|---|---|---|---|---|---|---|\n");
 
         for record in records.iter().filter(|r| r.scenario == *scenario) {
             let _ = writeln!(
                 summary_text,
-                "| {} | {} | {:.2} | {:.2} | {:.2} | {:.2} |",
+                "| {} | {} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} |",
                 record.extension,
                 record.summary.count,
                 record.summary.p50_ms,
                 record.summary.p95_ms,
                 record.summary.p99_ms,
+                record.summary.p999_ms,
                 record.summary.mean_ms,
             );
         }
@@ -903,7 +908,9 @@ fn bench_jsonl_schema_valid() {
 
         // Validate summary.
         let summary = record.get("summary").expect("summary field");
-        for stat_field in &["count", "min_ms", "p50_ms", "p95_ms", "p99_ms", "max_ms"] {
+        for stat_field in &[
+            "count", "min_ms", "p50_ms", "p95_ms", "p99_ms", "p999_ms", "max_ms",
+        ] {
             assert!(
                 summary.get(*stat_field).is_some(),
                 "line {i}: summary missing '{stat_field}'"

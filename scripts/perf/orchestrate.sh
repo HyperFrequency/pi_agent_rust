@@ -1926,6 +1926,9 @@ for source_name, records in (
             wall_clock_ms = parse_float(record.get("elapsed_ms"))
         if wall_clock_ms is None:
             wall_clock_ms = parse_float(stage_attribution.get("total_stage_ms"))
+        source_swarm_metrics = record.get("swarm_metrics")
+        if not isinstance(source_swarm_metrics, dict):
+            source_swarm_metrics = None
 
         candidate = {
             "scenario_id": scenario_id
@@ -1936,6 +1939,7 @@ for source_name, records in (
             "save_ms": save_ms,
             "index_ms": index_ms,
             "wall_clock_ms": wall_clock_ms,
+            "swarm_metrics": source_swarm_metrics,
             "source_record_index": index,
             "source_name": source_name,
         }
@@ -1998,6 +2002,12 @@ per_call_us = layer_absolute("per_call_dispatch_micro")
 
 cells = []
 required_stage_keys = ["open_ms", "append_ms", "save_ms", "index_ms"]
+required_latency_quantiles = ["p50", "p95", "p99", "p999"]
+required_queue_depth_quantiles = ["p50", "p95", "p99", "p999", "max"]
+required_resource_usage_keys = ["rss_mb", "cpu_pct"]
+required_component_breakdown_keys = ["tool", "provider", "extension", "session"]
+required_stage_breakdown_keys = ["open", "append", "save", "index"]
+required_host_capacity_keys = ["target_cpu_cores", "observed_cpu_cores", "mem_total_mb"]
 operation_stage_coverage = {
     "open_ms": 0,
     "append_ms": 0,
@@ -2006,6 +2016,47 @@ operation_stage_coverage = {
 }
 covered_cells = 0
 cells_with_complete_stage_breakdown = 0
+cells_with_complete_swarm_metrics = 0
+
+
+def normalize_metric_group(source: dict | None, keys: list[str]) -> tuple[dict, list[str]]:
+    normalized = {}
+    missing = []
+    if not isinstance(source, dict):
+        for key in keys:
+            normalized[key] = None
+            missing.append(key)
+        return normalized, missing
+
+    for key in keys:
+        value = parse_float(source.get(key))
+        if value is None or value < 0:
+            normalized[key] = None
+            missing.append(key)
+        else:
+            normalized[key] = value
+
+    return normalized, missing
+
+
+def normalize_swarm_metrics(source: dict | None) -> tuple[dict, list[str]]:
+    groups = [
+        ("latency_quantiles_ms", required_latency_quantiles),
+        ("queue_depth", required_queue_depth_quantiles),
+        ("resource_usage", required_resource_usage_keys),
+        ("component_breakdown_ms", required_component_breakdown_keys),
+        ("stage_breakdown_ms", required_stage_breakdown_keys),
+        ("host_capacity", required_host_capacity_keys),
+    ]
+    normalized = {}
+    missing = []
+    for group_name, required_keys in groups:
+        group_source = source.get(group_name) if isinstance(source, dict) else None
+        group, group_missing = normalize_metric_group(group_source, required_keys)
+        normalized[group_name] = group
+        missing.extend(f"{group_name}.{key}" for key in group_missing)
+
+    return normalized, missing
 
 for partition in required_partitions:
     for session_messages in required_sizes:
@@ -2053,6 +2104,16 @@ for partition in required_partitions:
         if source:
             covered_cells += 1
 
+        swarm_metrics, missing_swarm_keys = normalize_swarm_metrics(
+            source.get("swarm_metrics") if source else None
+        )
+        if missing_swarm_keys:
+            missing_reasons.append(
+                "missing_swarm_metrics:" + ",".join(sorted(missing_swarm_keys))
+            )
+        else:
+            cells_with_complete_swarm_metrics += 1
+
         cells.append(
             {
                 "workload_partition": partition,
@@ -2065,6 +2126,7 @@ for partition in required_partitions:
                     **stage_attribution,
                     "total_stage_ms": total_stage_ms,
                 },
+                "swarm_metrics": swarm_metrics,
                 "primary_e2e": {
                     "wall_clock_ms": cell_wall_clock,
                     "rust_vs_node_ratio": primary_rust_vs_node_ratio,
@@ -2100,6 +2162,18 @@ missing_cells = [
     for cell in cells
     if any(
         isinstance(reason, str) and reason.startswith("missing_stage_metrics:")
+        for reason in cell.get("missing_reasons", [])
+    )
+]
+swarm_missing_cells = [
+    {
+        "workload_partition": cell["workload_partition"],
+        "session_messages": cell["session_messages"],
+        "reasons": cell["missing_reasons"],
+    }
+    for cell in cells
+    if any(
+        isinstance(reason, str) and reason.startswith("missing_swarm_metrics")
         for reason in cell.get("missing_reasons", [])
     )
 ]
@@ -2865,6 +2939,8 @@ phase5_ready = (
     primary_status == "pass"
     and cells_with_complete_stage_breakdown == required_cell_count
     and len(missing_cells) == 0
+    and cells_with_complete_swarm_metrics == required_cell_count
+    and len(swarm_missing_cells) == 0
     and not any(status != "pass" for status in (memory_status, correctness_status, security_status))
 )
 
@@ -2888,6 +2964,17 @@ payload = {
         - cells_with_complete_stage_breakdown,
         "covered_cells": covered_cells,
         "missing_cells": missing_cells,
+    },
+    "swarm_summary": {
+        "required_latency_quantiles": required_latency_quantiles,
+        "required_queue_depth_quantiles": required_queue_depth_quantiles,
+        "required_resource_usage_keys": required_resource_usage_keys,
+        "required_component_breakdown_keys": required_component_breakdown_keys,
+        "required_stage_breakdown_keys": required_stage_breakdown_keys,
+        "cells_with_complete_swarm_metrics": cells_with_complete_swarm_metrics,
+        "cells_missing_swarm_metrics": required_cell_count
+        - cells_with_complete_swarm_metrics,
+        "missing_cells": swarm_missing_cells,
     },
     "weighted_bottleneck_attribution": weighted_bottleneck_attribution,
     "primary_outcomes": {
@@ -2951,6 +3038,7 @@ payload = {
             "missing_stage_metrics",
             "missing_primary_wall_clock",
             "missing_primary_relative_ratios",
+            "missing_swarm_metrics",
             "memory_regression",
             "correctness_regression",
             "security_regression",
@@ -2999,6 +3087,7 @@ manifest["phase1_matrix_validation"] = {
     "required_cell_count": required_cell_count,
     "covered_cell_count": covered_cells,
     "cells_with_complete_stage_breakdown": cells_with_complete_stage_breakdown,
+    "cells_with_complete_swarm_metrics": cells_with_complete_swarm_metrics,
     "artifact_ready_for_phase5": phase5_ready,
 }
 manifest["parameter_sweeps"] = {
