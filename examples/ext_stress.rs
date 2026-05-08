@@ -50,6 +50,9 @@ struct Args {
     /// Generate this many synthetic `agent_start` handlers that call back into the Rust host.
     #[arg(long, default_value_t = 0)]
     synthetic_hostcall_extensions: usize,
+    /// Override directory for generated synthetic hostcall extension sources.
+    #[arg(long)]
+    synthetic_hostcall_root: Option<PathBuf>,
     /// Override path to `VALIDATED_MANIFEST.json`.
     #[arg(long)]
     manifest_path: Option<PathBuf>,
@@ -95,6 +98,9 @@ struct Args {
     /// Baseline shard count used by `--compare-shard-baseline`.
     #[arg(long, default_value_t = 1)]
     compare_baseline_shards: usize,
+    /// Fail after writing the report unless reactor enqueue and dispatch counters advanced.
+    #[arg(long, default_value_t = false, action = ArgAction::Set)]
+    require_reactor_activity: bool,
 }
 
 fn main() {
@@ -131,6 +137,7 @@ async fn run(args: Args) -> Result<()> {
         .unwrap_or_else(default_event_payloads_path);
     let report_path = args.report_path.clone().unwrap_or_else(default_report_path);
     let events_path = args.events_path.clone().unwrap_or_else(default_events_path);
+    let synthetic_hostcall_root = args.synthetic_hostcall_root.clone();
     let run_id = args
         .run_id
         .as_deref()
@@ -143,10 +150,12 @@ async fn run(args: Args) -> Result<()> {
         .unwrap_or_else(|| format!("ext-stress-{run_id}"));
 
     let (specs, names) = if args.synthetic_hostcall_extensions > 0 {
-        let synthetic_root = report_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join("synthetic_hostcall_extensions");
+        let synthetic_root = synthetic_hostcall_root.clone().unwrap_or_else(|| {
+            report_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("synthetic_hostcall_extensions")
+        });
         build_synthetic_hostcall_specs(&synthetic_root, args.synthetic_hostcall_extensions)?
     } else {
         let mut entries = extensions_by_tier(&manifest_path, &args.tier)?;
@@ -276,6 +285,8 @@ async fn run(args: Args) -> Result<()> {
     };
     let latency_summary = summarize_us(&run_result.latencies_us);
     let logical_cpus = std::thread::available_parallelism().map_or(1, usize::from);
+    let reactor_activity = ReactorActivity::from_report(&run_result.reactor);
+    let reactor_activity_ok = !args.require_reactor_activity || reactor_activity.ok;
 
     let report = serde_json::json!({
         "schema": "pi.ext.stress_profile.v1",
@@ -297,6 +308,9 @@ async fn run(args: Args) -> Result<()> {
             "events_per_sec": args.events_per_sec,
             "max_extensions": args.max_extensions,
             "synthetic_hostcall_extensions": args.synthetic_hostcall_extensions,
+            "synthetic_hostcall_root": synthetic_hostcall_root
+                .as_ref()
+                .map(|path| path.display().to_string()),
             "reactor_enabled": args.reactor_enabled,
             "reactor_shards": target_shards,
             "reactor_lane_capacity": lane_capacity,
@@ -305,6 +319,7 @@ async fn run(args: Args) -> Result<()> {
             "dispatch_timeout_ms": args.dispatch_timeout_ms,
             "compare_shard_baseline": args.compare_shard_baseline,
             "compare_baseline_shards": baseline_shards,
+            "require_reactor_activity": args.require_reactor_activity,
         },
         "extensions": {
             "count": names.len(),
@@ -338,16 +353,19 @@ async fn run(args: Args) -> Result<()> {
             "sample_errors": run_result.errors,
         },
         "reactor": run_result.reactor,
+        "reactor_activity": reactor_activity.to_json(),
         "comparison": comparison,
         "pass": {
             "rss_ok": run_result.rss_ok,
             "latency_ok": run_result.latency_ok,
             "events_ok": run_result.events_ok,
             "comparison_ok": comparison_ok,
+            "reactor_activity_ok": reactor_activity_ok,
             "overall": run_result.rss_ok
                 && run_result.latency_ok
                 && run_result.events_ok
-                && comparison_ok,
+                && comparison_ok
+                && reactor_activity_ok,
         }
     });
 
@@ -369,6 +387,16 @@ async fn run(args: Args) -> Result<()> {
         run_result.rss_ok,
         run_result.latency_ok
     );
+    println!(
+        "Reactor activity: enabled={}, enqueued_total={}, dispatched_total={}, active_shards={}, ok={}",
+        reactor_activity.enabled,
+        reactor_activity.enqueued_total,
+        reactor_activity.dispatched_total,
+        reactor_activity.active_shards,
+        reactor_activity.ok
+    );
+
+    ensure_reactor_activity(args.require_reactor_activity, reactor_activity)?;
 
     Ok(())
 }
@@ -1000,6 +1028,78 @@ fn sum_u64_array_field(value: &Value, key: &str) -> u64 {
         .map_or(0, |items| items.iter().filter_map(Value::as_u64).sum())
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ReactorActivity {
+    enabled: bool,
+    enqueued_total: u64,
+    dispatched_total: u64,
+    active_shards: usize,
+    ok: bool,
+    failure_reason: Option<&'static str>,
+}
+
+impl ReactorActivity {
+    fn from_report(reactor: &Value) -> Self {
+        let enabled = reactor
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let enqueued_total = sum_u64_array_field(reactor, "total_enqueued_by_shard");
+        let dispatched_total = value_u64_at_path(reactor, &["total_dispatched"]);
+        let active_shards = reactor
+            .get("total_enqueued_by_shard")
+            .and_then(Value::as_array)
+            .map_or(0, |items| {
+                items
+                    .iter()
+                    .filter(|item| item.as_u64().unwrap_or(0) > 0)
+                    .count()
+            });
+        let failure_reason = if !enabled {
+            Some("reactor_disabled")
+        } else if enqueued_total == 0 {
+            Some("no_reactor_enqueues")
+        } else if dispatched_total == 0 {
+            Some("no_reactor_dispatches")
+        } else {
+            None
+        };
+
+        Self {
+            enabled,
+            enqueued_total,
+            dispatched_total,
+            active_shards,
+            ok: failure_reason.is_none(),
+            failure_reason,
+        }
+    }
+
+    fn to_json(self) -> Value {
+        serde_json::json!({
+            "enabled": self.enabled,
+            "enqueued_total": self.enqueued_total,
+            "dispatched_total": self.dispatched_total,
+            "active_shards": self.active_shards,
+            "ok": self.ok,
+            "failure_reason": self.failure_reason,
+        })
+    }
+}
+
+fn ensure_reactor_activity(required: bool, activity: ReactorActivity) -> Result<()> {
+    if !required || activity.ok {
+        return Ok(());
+    }
+    bail!(
+        "--require-reactor-activity requested but reactor activity check failed: {} \
+         (enqueued_total={}, dispatched_total={})",
+        activity.failure_reason.unwrap_or("unknown"),
+        activity.enqueued_total,
+        activity.dispatched_total
+    );
+}
+
 fn build_shard_comparison_report(
     baseline: &RunResult,
     candidate: &RunResult,
@@ -1182,7 +1282,7 @@ fn synthetic_hostcall_source(idx: usize) -> String {
     format!(
         r#"export default function syntheticHostcall{idx}(pi) {{
   pi.on("agent_start", async () => {{
-    await pi.session("getSessionName", {{}});
+    await pi.events("list_flags", {{}});
     return undefined;
   }});
 }}
@@ -1433,11 +1533,53 @@ mod tests {
     }
 
     #[test]
-    fn synthetic_hostcall_source_uses_agent_start_session_hostcall() {
+    fn synthetic_hostcall_source_uses_agent_start_events_hostcall() {
         let source = synthetic_hostcall_source(3);
         assert!(source.contains("syntheticHostcall3"));
         assert!(source.contains("agent_start"));
-        assert!(source.contains("getSessionName"));
+        assert!(source.contains(r#"pi.events("list_flags", {})"#));
+    }
+
+    #[test]
+    fn require_reactor_activity_fails_when_counters_stay_zero() {
+        let activity = ReactorActivity::from_report(&serde_json::json!({
+            "enabled": true,
+            "total_enqueued_by_shard": [0, 0, 0, 0],
+            "total_dispatched": 0,
+        }));
+        let err = ensure_reactor_activity(true, activity).unwrap_err();
+        assert!(
+            err.to_string().contains("no_reactor_enqueues"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn require_reactor_activity_fails_when_dispatches_stay_zero() {
+        let activity = ReactorActivity::from_report(&serde_json::json!({
+            "enabled": true,
+            "total_enqueued_by_shard": [2, 0, 3, 0],
+            "total_dispatched": 0,
+        }));
+        let err = ensure_reactor_activity(true, activity).unwrap_err();
+        assert!(
+            err.to_string().contains("no_reactor_dispatches"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn require_reactor_activity_accepts_enqueues_and_dispatches() {
+        let activity = ReactorActivity::from_report(&serde_json::json!({
+            "enabled": true,
+            "total_enqueued_by_shard": [2, 0, 3, 0],
+            "total_dispatched": 5,
+        }));
+        assert!(activity.ok);
+        assert_eq!(activity.enqueued_total, 5);
+        assert_eq!(activity.dispatched_total, 5);
+        assert_eq!(activity.active_shards, 2);
+        assert!(ensure_reactor_activity(true, activity).is_ok());
     }
 
     #[test]
