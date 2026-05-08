@@ -47,6 +47,16 @@ The JSON form is stable for automation. The text form is deterministic for hando
 
 Regime decisions emit schema `pi.resource_governor.tail_latency_regime.v1` with the active regime, fallback state, hysteresis streaks, the live sample, and fallback reasons such as `p99_latency`, `p999_latency`, `queue_depth`, `resource_pressure`, or `hysteresis_hold`. When fallback is active, callers can apply the decision to `HostResourceBudgets` to reduce output, queue-depth, process, file-descriptor, load, and RSS budgets before admission checks.
 
+## Capacity planner
+
+`plan_swarm_capacity_from_jsonl` in `src/resource_governor.rs` turns the session workload matrix `swarm_metrics` JSONL rows and a `SwarmHostInventory` into schema `pi.resource_governor.capacity_plan.v1`. The generated plan includes conservative starting values for active agent concurrency, tool concurrency, extension hostcall lanes, RCH verification fanout, memory pressure thresholds, backoff windows, `HostResourceBudgets`, and `TailLatencyRegimeConfig`.
+
+The planner fails closed when no complete `swarm_metrics` evidence is present, when required nested fields are missing, when host inventory is zero, or when latency/RSS/queue values cannot be parsed as finite non-negative numbers. Rows without `swarm_metrics` are ignored so mixed harness JSONL can still be processed; rows that claim `swarm_metrics` but omit required fields are rejected.
+
+Use `SwarmCapacityPlan::what_if` to replay the same evidence summary against smaller CPU/RAM inventories. This is intended for quick operator budgeting, for example checking that a 64-core/256GiB evidence run would recommend lower agent and RCH fanout on a 16-core/1GiB constrained host before those budgets are wired into a `ResourceGovernor`.
+
+Capacity recommendations are starting points, not proof of a safe maximum. Confidence drops or uncertainties are emitted for sparse evidence, host-capacity mismatches, zero reported CPU usage, queue-depth floors, and RSS headroom pressure. File-descriptor limits are still bounded with conservative built-in defaults because the current swarm harness records CPU/RAM inventory but not host fd limits.
+
 Example row:
 
 ```json

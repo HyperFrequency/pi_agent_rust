@@ -17365,6 +17365,110 @@ enum JsRuntimeCommand {
     Shutdown,
 }
 
+#[derive(Debug, Default)]
+struct WarmRuntimePoolState {
+    active_fingerprint: Option<String>,
+    last_startup_latency_ms: Option<u64>,
+}
+
+fn duration_ms_u64(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn file_change_token(path: &Path) -> Value {
+    let metadata = std::fs::metadata(path).ok();
+    let modified_nanos = metadata
+        .as_ref()
+        .and_then(|meta| meta.modified().ok())
+        .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |duration| duration.as_nanos());
+    json!({
+        "path": safe_canonicalize(path).display().to_string(),
+        "len": metadata.as_ref().map(std::fs::Metadata::len),
+        "modified_nanos": modified_nanos.to_string(),
+    })
+}
+
+fn js_extension_spec_token(spec: &JsExtensionLoadSpec) -> Value {
+    let mut sidecars = Vec::new();
+    if let Some(parent) = spec.entry_path.parent() {
+        for filename in ["extension.json", "package.json"] {
+            let candidate = parent.join(filename);
+            if candidate.exists() {
+                sidecars.push(file_change_token(&candidate));
+            }
+        }
+    }
+
+    json!({
+        "extension_id": &spec.extension_id,
+        "entry": file_change_token(&spec.entry_path),
+        "name": &spec.name,
+        "version": &spec.version,
+        "api_version": &spec.api_version,
+        "sidecars": sidecars,
+    })
+}
+
+fn warm_runtime_pool_fingerprint(
+    config: &PiJsRuntimeConfig,
+    policy: &ExtensionPolicy,
+    specs: &[JsExtensionLoadSpec],
+) -> String {
+    let env_hashes = config
+        .env
+        .iter()
+        .map(|(key, value)| (key.clone(), sha256_hex_standalone(value)))
+        .collect::<BTreeMap<_, _>>();
+    let mut spec_tokens = specs
+        .iter()
+        .map(js_extension_spec_token)
+        .collect::<Vec<_>>();
+    spec_tokens.sort_by(|a, b| {
+        let a_key = a
+            .get("extension_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let b_key = b
+            .get("extension_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        a_key.cmp(b_key)
+    });
+
+    let policy_value = serde_json::to_value(policy).unwrap_or_else(|_| json!("policy-unavailable"));
+    let payload = json!({
+        "cwd": &config.cwd,
+        "args": &config.args,
+        "env": env_hashes,
+        "limits": {
+            "memory_limit_bytes": config.limits.memory_limit_bytes,
+            "module_cache_limit_bytes": config.limits.module_cache_limit_bytes,
+            "max_stack_bytes": config.limits.max_stack_bytes,
+            "interrupt_budget": config.limits.interrupt_budget,
+            "hostcall_timeout_ms": config.limits.hostcall_timeout_ms,
+            "hostcall_fast_queue_capacity": config.limits.hostcall_fast_queue_capacity,
+            "hostcall_overflow_queue_capacity": config.limits.hostcall_overflow_queue_capacity,
+        },
+        "repair_mode": format!("{:?}", config.repair_mode),
+        "allow_unsafe_sync_exec": config.allow_unsafe_sync_exec,
+        "deny_env": config.deny_env,
+        "disk_cache_dir": config
+            .disk_cache_dir
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        "policy": policy_value,
+        "specs": spec_tokens,
+    });
+    let encoded = serde_json::to_string(&payload)
+        .unwrap_or_else(|_| "{\"error\":\"warm_pool_fingerprint\"}".to_string());
+    sha256_hex_standalone(&encoded)
+}
+
+fn short_warm_pool_fingerprint(fingerprint: &str) -> &str {
+    fingerprint.get(..16).unwrap_or(fingerprint)
+}
+
 /// Handle to the JS extension runtime thread.
 ///
 /// Cloning shares the same underlying runtime. Call [`shutdown`](Self::shutdown)
@@ -17467,14 +17571,31 @@ impl JsExtensionRuntimeHandle {
             runtime.block_on(async move {
                 let cx = Cx::for_request();
                 let runtime_config = config.clone();
+                let warm_pool = crate::extensions_js::WarmIsolatePool::new(runtime_config.clone());
+                let cold_init_started = Instant::now();
+                let init_config = warm_pool.make_config();
                 let init = PiJsRuntime::with_clock_and_config_with_policy(
                     crate::scheduler::WallClock,
-                    runtime_config.clone(),
+                    init_config.clone(),
                     Some(runtime_policy.clone()),
                 )
                 .await;
+                let cold_init_latency_ms = duration_ms_u64(cold_init_started.elapsed());
                 let mut js_runtime = match init {
                     Ok(runtime) => {
+                        tracing::info!(
+                            event = "extension_runtime.warm_pool.startup",
+                            phase = "cold_init",
+                            cold_init_latency_ms,
+                            memory_limit_bytes = init_config.limits.memory_limit_bytes.unwrap_or(0),
+                            module_cache_limit_bytes = init_config
+                                .limits
+                                .module_cache_limit_bytes
+                                .unwrap_or(0),
+                            pool_created_count = warm_pool.created_count(),
+                            pool_reset_count = warm_pool.reset_count(),
+                            "QuickJS warm runtime pool initialized"
+                        );
                         let _ = init_tx.send(&cx, Ok(()));
                         runtime
                     }
@@ -17489,56 +17610,81 @@ impl JsExtensionRuntimeHandle {
                 let mut warm_reset_successes = 0_u64;
                 let mut warm_reset_failures = 0_u64;
                 let mut cold_fallbacks = 0_u64;
+                let mut warm_pool_state = WarmRuntimePoolState::default();
 
                 while let Ok(cmd) = rx.recv(&cx).await {
                     match cmd {
                         JsRuntimeCommand::Shutdown => break,
                         JsRuntimeCommand::LoadExtensions { specs, reply } => {
+                            let startup_started = Instant::now();
+                            let load_fingerprint =
+                                warm_runtime_pool_fingerprint(&runtime_config, &runtime_policy, &specs);
+                            let fingerprint_short =
+                                short_warm_pool_fingerprint(&load_fingerprint).to_string();
+                            let previous_startup_latency_ms =
+                                warm_pool_state.last_startup_latency_ms;
+                            let pool_invalidated = has_loaded_extensions
+                                && warm_pool_state.active_fingerprint.as_deref()
+                                    != Some(load_fingerprint.as_str());
                             let mut fallback_reason: Option<String> = None;
                             let mut reset_report = None;
+                            let mut warm_reset_latency_ms = None;
+                            let mut cold_rebuild_latency_ms = None;
 
                             if has_loaded_extensions {
-                                warm_reset_attempts = warm_reset_attempts.saturating_add(1);
-                                match js_runtime.reset_for_warm_reload().await {
-                                    Ok(report) => {
-                                        if report.reused {
-                                            warm_reset_successes =
-                                                warm_reset_successes.saturating_add(1);
-                                        } else {
+                                if pool_invalidated {
+                                    fallback_reason = Some("pool_key_changed".to_string());
+                                } else {
+                                    warm_reset_attempts = warm_reset_attempts.saturating_add(1);
+                                    let reset_started = Instant::now();
+                                    match js_runtime.reset_for_warm_reload().await {
+                                        Ok(report) => {
+                                            warm_reset_latency_ms =
+                                                Some(duration_ms_u64(reset_started.elapsed()));
+                                            if report.reused {
+                                                warm_reset_successes =
+                                                    warm_reset_successes.saturating_add(1);
+                                                warm_pool.record_reset();
+                                            } else {
+                                                warm_reset_failures =
+                                                    warm_reset_failures.saturating_add(1);
+                                                fallback_reason = report
+                                                    .reason_code
+                                                    .clone()
+                                                    .or_else(|| Some("warm_reset_unknown".to_string()));
+                                            }
+                                            reset_report = Some(report);
+                                        }
+                                        Err(err) => {
                                             warm_reset_failures =
                                                 warm_reset_failures.saturating_add(1);
-                                            fallback_reason = report
-                                                .reason_code
-                                                .clone()
-                                                .or_else(|| Some("warm_reset_unknown".to_string()));
+                                            fallback_reason = Some("warm_reset_error".to_string());
+                                            tracing::warn!(
+                                                event = "extension_runtime.warm_reset.error",
+                                                error = %err,
+                                                "Warm reload reset failed; falling back to cold runtime rebuild"
+                                            );
                                         }
-                                        reset_report = Some(report);
-                                    }
-                                    Err(err) => {
-                                        warm_reset_failures =
-                                            warm_reset_failures.saturating_add(1);
-                                        fallback_reason = Some("warm_reset_error".to_string());
-                                        tracing::warn!(
-                                            event = "extension_runtime.warm_reset.error",
-                                            error = %err,
-                                            "Warm reload reset failed; falling back to cold runtime rebuild"
-                                        );
                                     }
                                 }
 
                                 if fallback_reason.is_some() {
                                     cold_fallbacks = cold_fallbacks.saturating_add(1);
-                                    let rebuild =
-                                        PiJsRuntime::with_clock_and_config_with_policy(
+                                    let rebuild_started = Instant::now();
+                                    let rebuild_config = warm_pool.make_config();
+                                    let rebuild = PiJsRuntime::with_clock_and_config_with_policy(
                                         crate::scheduler::WallClock,
-                                        runtime_config.clone(),
+                                        rebuild_config,
                                         Some(runtime_policy.clone()),
                                     )
                                     .await;
+                                    cold_rebuild_latency_ms =
+                                        Some(duration_ms_u64(rebuild_started.elapsed()));
                                     match rebuild {
                                         Ok(runtime) => {
                                             js_runtime = runtime;
                                             has_loaded_extensions = false;
+                                            warm_pool_state.active_fingerprint = None;
                                         }
                                         Err(err) => {
                                             let _ = reply.send(&cx, Err(err));
@@ -17549,8 +17695,16 @@ impl JsExtensionRuntimeHandle {
                             }
 
                             let result = load_all_extensions(&js_runtime, &host, &specs).await;
+                            let startup_latency_ms = duration_ms_u64(startup_started.elapsed());
+                            let reset_cleared_runtime =
+                                reset_report.as_ref().is_some_and(|report| report.reused);
                             if result.is_ok() {
                                 has_loaded_extensions = true;
+                                warm_pool_state.active_fingerprint = Some(load_fingerprint);
+                                warm_pool_state.last_startup_latency_ms = Some(startup_latency_ms);
+                            } else if reset_cleared_runtime || fallback_reason.is_some() {
+                                has_loaded_extensions = false;
+                                warm_pool_state.active_fingerprint = None;
                             }
 
                             let warm_reuse_rate = if warm_reset_attempts == 0 {
@@ -17562,6 +17716,16 @@ impl JsExtensionRuntimeHandle {
                                     u32::try_from(warm_reset_attempts).unwrap_or(u32::MAX);
                                 f64::from(successes) / f64::from(attempts)
                             };
+                            let has_previous_startup_latency =
+                                previous_startup_latency_ms.is_some();
+                            let previous_startup_latency_ms =
+                                previous_startup_latency_ms.unwrap_or(0);
+                            let startup_latency_delta_ms = i64::try_from(startup_latency_ms)
+                                .unwrap_or(i64::MAX)
+                                .saturating_sub(
+                                    i64::try_from(previous_startup_latency_ms)
+                                        .unwrap_or(i64::MAX),
+                                );
 
                             if let Some(report) = reset_report.as_ref() {
                                 let module_cache_denominator =
@@ -17584,7 +17748,30 @@ impl JsExtensionRuntimeHandle {
                                     pending_timers_before = report.pending_timers_before,
                                     residual_entries_after = report.residual_entries_after,
                                     module_cache_entries = report.module_cache_entries,
+                                    module_cache_bytes = report.module_cache_bytes,
+                                    module_cache_report_limit_bytes = report
+                                        .module_cache_limit_bytes
+                                        .unwrap_or(0),
                                     module_cache_hit_rate,
+                                    pool_fingerprint = %fingerprint_short,
+                                    pool_invalidated,
+                                    capability_scope_reset = report.reused,
+                                    warm_reset_latency_ms = warm_reset_latency_ms.unwrap_or(0),
+                                    cold_rebuild_latency_ms = cold_rebuild_latency_ms.unwrap_or(0),
+                                    previous_startup_latency_ms,
+                                    has_previous_startup_latency,
+                                    startup_latency_ms,
+                                    startup_latency_delta_ms,
+                                    memory_limit_bytes = runtime_config
+                                        .limits
+                                        .memory_limit_bytes
+                                        .unwrap_or(0),
+                                    module_cache_limit_bytes = runtime_config
+                                        .limits
+                                        .module_cache_limit_bytes
+                                        .unwrap_or(0),
+                                    pool_created_count = warm_pool.created_count(),
+                                    pool_reset_count = warm_pool.reset_count(),
                                     warm_reuse_rate,
                                     warm_reset_attempts,
                                     warm_reset_successes,
@@ -17597,6 +17784,25 @@ impl JsExtensionRuntimeHandle {
                                     event = "extension_runtime.warm_reload.metrics",
                                     reused = false,
                                     reason_code = fallback_reason.as_deref().unwrap_or("none"),
+                                    pool_fingerprint = %fingerprint_short,
+                                    pool_invalidated,
+                                    capability_scope_reset = false,
+                                    warm_reset_latency_ms = warm_reset_latency_ms.unwrap_or(0),
+                                    cold_rebuild_latency_ms = cold_rebuild_latency_ms.unwrap_or(0),
+                                    previous_startup_latency_ms,
+                                    has_previous_startup_latency,
+                                    startup_latency_ms,
+                                    startup_latency_delta_ms,
+                                    memory_limit_bytes = runtime_config
+                                        .limits
+                                        .memory_limit_bytes
+                                        .unwrap_or(0),
+                                    module_cache_limit_bytes = runtime_config
+                                        .limits
+                                        .module_cache_limit_bytes
+                                        .unwrap_or(0),
+                                    pool_created_count = warm_pool.created_count(),
+                                    pool_reset_count = warm_pool.reset_count(),
                                     warm_reuse_rate,
                                     warm_reset_attempts,
                                     warm_reset_successes,
@@ -52026,6 +52232,68 @@ mod tests {
             }
             other => panic!(),
         }
+    }
+
+    #[test]
+    fn warm_runtime_pool_fingerprint_changes_when_extension_entry_changes() {
+        let dir = tempdir().expect("tempdir");
+        let entry = dir.path().join("index.ts");
+        std::fs::write(&entry, "export const value = 1;\n").expect("write entry");
+        let spec = JsExtensionLoadSpec::from_entry_path(&entry).expect("load spec");
+        let config = PiJsRuntimeConfig::default();
+        let policy = ExtensionPolicy::default();
+
+        let before = warm_runtime_pool_fingerprint(&config, &policy, std::slice::from_ref(&spec));
+        std::fs::write(
+            &entry,
+            "export const value = 2;\nexport const changed = true;\n",
+        )
+        .expect("rewrite entry");
+        let after_spec = JsExtensionLoadSpec::from_entry_path(&entry).expect("reload spec");
+        let after =
+            warm_runtime_pool_fingerprint(&config, &policy, std::slice::from_ref(&after_spec));
+
+        assert_ne!(
+            before, after,
+            "warm runtime pool key must invalidate when extension source changes"
+        );
+    }
+
+    #[test]
+    fn warm_runtime_pool_fingerprint_changes_when_config_or_policy_changes() {
+        let dir = tempdir().expect("tempdir");
+        let entry = dir.path().join("index.ts");
+        std::fs::write(&entry, "export default function init() {}\n").expect("write entry");
+        let spec = JsExtensionLoadSpec::from_entry_path(&entry).expect("load spec");
+        let config = PiJsRuntimeConfig {
+            cwd: dir.path().display().to_string(),
+            limits: crate::extensions_js::PiJsRuntimeLimits {
+                memory_limit_bytes: Some(16 * 1024 * 1024),
+                ..crate::extensions_js::PiJsRuntimeLimits::default()
+            },
+            ..PiJsRuntimeConfig::default()
+        };
+        let policy = ExtensionPolicy::default();
+
+        let baseline = warm_runtime_pool_fingerprint(&config, &policy, std::slice::from_ref(&spec));
+
+        let mut changed_config = config.clone();
+        changed_config.limits.memory_limit_bytes = Some(32 * 1024 * 1024);
+        assert_ne!(
+            baseline,
+            warm_runtime_pool_fingerprint(&changed_config, &policy, std::slice::from_ref(&spec)),
+            "warm runtime pool key must include runtime memory/cache config"
+        );
+
+        let changed_policy = ExtensionPolicy {
+            deny_caps: vec!["session".to_string()],
+            ..policy
+        };
+        assert_ne!(
+            baseline,
+            warm_runtime_pool_fingerprint(&config, &changed_policy, std::slice::from_ref(&spec)),
+            "warm runtime pool key must include capability policy"
+        );
     }
 
     #[cfg(target_os = "linux")]

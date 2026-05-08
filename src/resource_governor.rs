@@ -4,8 +4,10 @@
 //! get live `/proc` sampling, while other platforms keep deterministic fallback
 //! budgets and only enforce request-local limits such as tool-output caps.
 
+use std::fmt;
+
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 const PROC_PAGE_SIZE_BYTES: u64 = 4096;
 const DEFAULT_MEMORY_BYTES: u64 = 1_073_741_824;
@@ -19,6 +21,15 @@ const DEFAULT_TAIL_LATENCY_ENTER_SAMPLES: usize = 3;
 const DEFAULT_TAIL_LATENCY_EXIT_SAMPLES: usize = 3;
 const DEFAULT_TAIL_LATENCY_RECOVERY_RATIO: f64 = 0.80;
 const DEFAULT_TAIL_LATENCY_RESOURCE_PRESSURE_RATIO: f64 = 0.85;
+const DEFAULT_CAPACITY_AGENT_CPU_HEADROOM_RATIO: f64 = 0.50;
+const DEFAULT_CAPACITY_MEMORY_PRESSURE_RATIO: f64 = 0.70;
+const DEFAULT_CAPACITY_TOOL_CONCURRENCY_PER_AGENT: u64 = 2;
+const DEFAULT_CAPACITY_EXTENSION_LANE_CPU_DIVISOR: u64 = 4;
+const DEFAULT_CAPACITY_RCH_FANOUT_CPU_DIVISOR: u64 = 8;
+const MAX_RECOMMENDED_EXTENSION_HOSTCALL_LANES: u64 = 32;
+const MAX_RECOMMENDED_RCH_FANOUT: u64 = 8;
+const MIN_AGENT_MEMORY_BYTES: u64 = 256 * 1024 * 1024;
+const MIN_TOOL_OUTPUT_BYTES: u64 = 1024 * 1024;
 const MIN_PROCESS_BUDGET: u64 = 64;
 const MIN_FD_BUDGET: u64 = 128;
 const MIN_LOAD_BUDGET: f64 = 2.0;
@@ -49,7 +60,7 @@ pub struct HostResourceBudgets {
 impl HostResourceBudgets {
     /// Derive conservative budgets from the current host.
     #[must_use]
-    #[allow(clippy::cast_precision_loss)]
+    #[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
     pub fn from_host() -> Self {
         let cpu_cores = std::thread::available_parallelism()
             .ok()
@@ -268,6 +279,9 @@ pub enum ResourceDimension {
 /// Stable schema for tail-latency regime telemetry.
 pub const TAIL_LATENCY_REGIME_SCHEMA: &str = "pi.resource_governor.tail_latency_regime.v1";
 
+/// Stable schema for swarm capacity recommendations.
+pub const SWARM_CAPACITY_PLAN_SCHEMA: &str = "pi.resource_governor.capacity_plan.v1";
+
 /// Current tail-latency regime selected by the guard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -460,6 +474,386 @@ impl TailLatencyRegimeConfig {
         reasons
     }
 }
+
+/// CPU and memory inventory for the host that will run the swarm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct SwarmHostInventory {
+    /// Intended host class for the evidence run.
+    pub target_cpu_cores: u64,
+    /// CPU cores actually observed on the host.
+    pub observed_cpu_cores: u64,
+    /// Total host memory in MiB.
+    pub mem_total_mb: u64,
+}
+
+impl SwarmHostInventory {
+    /// Create a host inventory snapshot.
+    #[must_use]
+    pub const fn new(target_cpu_cores: u64, observed_cpu_cores: u64, mem_total_mb: u64) -> Self {
+        Self {
+            target_cpu_cores,
+            observed_cpu_cores,
+            mem_total_mb,
+        }
+    }
+
+    fn validate(self) -> Result<Self, SwarmCapacityPlanError> {
+        if self.target_cpu_cores == 0 {
+            return Err(SwarmCapacityPlanError::InvalidHostInventory(
+                "target_cpu_cores",
+            ));
+        }
+        if self.observed_cpu_cores == 0 {
+            return Err(SwarmCapacityPlanError::InvalidHostInventory(
+                "observed_cpu_cores",
+            ));
+        }
+        if self.mem_total_mb == 0 {
+            return Err(SwarmCapacityPlanError::InvalidHostInventory("mem_total_mb"));
+        }
+        self.memory_bytes()?;
+        Ok(self)
+    }
+
+    fn effective_cpu_cores(self) -> u64 {
+        self.target_cpu_cores.min(self.observed_cpu_cores).max(1)
+    }
+
+    fn memory_bytes(self) -> Result<u64, SwarmCapacityPlanError> {
+        self.mem_total_mb
+            .checked_mul(1024 * 1024)
+            .ok_or(SwarmCapacityPlanError::InvalidHostInventory("mem_total_mb"))
+    }
+}
+
+/// Conservative knobs used when deriving a swarm capacity plan from evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct SwarmCapacityPlannerConfig {
+    /// Fraction of effective CPU cores initially assigned to agent loops.
+    pub agent_cpu_headroom_ratio: f64,
+    /// Fraction of host memory allowed before memory pressure is considered unsafe.
+    pub memory_pressure_threshold_ratio: f64,
+    /// Tool hostcall lanes per recommended agent.
+    pub tool_concurrency_per_agent: u64,
+    /// CPU divisor used to size extension hostcall lanes.
+    pub extension_lane_cpu_divisor: u64,
+    /// CPU divisor used to size RCH verification fanout.
+    pub rch_fanout_cpu_divisor: u64,
+}
+
+impl Default for SwarmCapacityPlannerConfig {
+    fn default() -> Self {
+        Self {
+            agent_cpu_headroom_ratio: DEFAULT_CAPACITY_AGENT_CPU_HEADROOM_RATIO,
+            memory_pressure_threshold_ratio: DEFAULT_CAPACITY_MEMORY_PRESSURE_RATIO,
+            tool_concurrency_per_agent: DEFAULT_CAPACITY_TOOL_CONCURRENCY_PER_AGENT,
+            extension_lane_cpu_divisor: DEFAULT_CAPACITY_EXTENSION_LANE_CPU_DIVISOR,
+            rch_fanout_cpu_divisor: DEFAULT_CAPACITY_RCH_FANOUT_CPU_DIVISOR,
+        }
+    }
+}
+
+impl SwarmCapacityPlannerConfig {
+    /// Build a plan from JSONL rows emitted by the swarm performance harness.
+    pub fn plan_from_jsonl(
+        self,
+        jsonl: &str,
+        inventory: SwarmHostInventory,
+    ) -> Result<SwarmCapacityPlan, SwarmCapacityPlanError> {
+        let inventory = inventory.validate()?;
+        let evidence = parse_capacity_evidence_jsonl(jsonl, inventory)?;
+        self.plan_from_summary(evidence, inventory)
+    }
+
+    /// Build a plan from an already-validated evidence summary.
+    #[allow(clippy::cast_precision_loss)]
+    pub fn plan_from_summary(
+        self,
+        evidence: SwarmCapacityEvidenceSummary,
+        inventory: SwarmHostInventory,
+    ) -> Result<SwarmCapacityPlan, SwarmCapacityPlanError> {
+        let config = self.normalized();
+        let inventory = inventory.validate()?;
+        if evidence.complete_records == 0 {
+            return Err(SwarmCapacityPlanError::MissingEvidence("swarm_metrics"));
+        }
+        if evidence.max_p99_ms == 0 {
+            return Err(SwarmCapacityPlanError::InvalidEvidence {
+                line: 0,
+                field: "swarm_metrics.latency_quantiles_ms.p99",
+            });
+        }
+        if evidence.max_p999_ms == 0 {
+            return Err(SwarmCapacityPlanError::InvalidEvidence {
+                line: 0,
+                field: "swarm_metrics.latency_quantiles_ms.p999",
+            });
+        }
+        if evidence.max_rss_mb == 0 {
+            return Err(SwarmCapacityPlanError::InvalidEvidence {
+                line: 0,
+                field: "swarm_metrics.resource_usage.rss_mb",
+            });
+        }
+
+        let effective_cpu_cores = inventory.effective_cpu_cores();
+        let memory_bytes = inventory.memory_bytes()?;
+        let observed_rss_bytes =
+            mb_to_bytes(evidence.max_rss_mb, "swarm_metrics.resource_usage.rss_mb")?;
+        let usable_memory_bytes =
+            scale_u64_by_ratio(memory_bytes, config.memory_pressure_threshold_ratio).max(1);
+        let per_agent_memory_bytes = observed_rss_bytes
+            .saturating_mul(2)
+            .max(MIN_AGENT_MEMORY_BYTES);
+        let memory_limited_agents = usable_memory_bytes
+            .checked_div(per_agent_memory_bytes)
+            .unwrap_or(0)
+            .max(1);
+        let cpu_limited_agents =
+            scale_u64_by_ratio(effective_cpu_cores, config.agent_cpu_headroom_ratio).max(1);
+        let recommended_agent_concurrency = cpu_limited_agents
+            .min(memory_limited_agents)
+            .min(effective_cpu_cores)
+            .max(1);
+        let max_queue_depth =
+            planned_queue_depth_budget(effective_cpu_cores, evidence.max_queue_depth);
+        let queue_limited_tools = u64::try_from(max_queue_depth)
+            .unwrap_or(u64::MAX)
+            .saturating_div(2)
+            .max(1);
+        let recommended_tool_concurrency = recommended_agent_concurrency
+            .saturating_mul(config.tool_concurrency_per_agent)
+            .min(queue_limited_tools)
+            .max(1);
+        let recommended_extension_hostcall_lanes = effective_cpu_cores
+            .div_ceil(config.extension_lane_cpu_divisor)
+            .clamp(1, MAX_RECOMMENDED_EXTENSION_HOSTCALL_LANES)
+            .min(recommended_tool_concurrency)
+            .max(1);
+        let recommended_rch_verification_fanout = effective_cpu_cores
+            .div_ceil(config.rch_fanout_cpu_divisor)
+            .clamp(1, MAX_RECOMMENDED_RCH_FANOUT)
+            .min(recommended_agent_concurrency)
+            .max(1);
+        let max_rss_floor = observed_rss_bytes
+            .saturating_mul(2)
+            .max(MIN_AGENT_MEMORY_BYTES);
+        let max_rss_bytes = max_rss_floor.clamp(1, usable_memory_bytes);
+        let max_tool_output_bytes =
+            (max_rss_bytes / 8).clamp(MIN_TOOL_OUTPUT_BYTES, DEFAULT_TOOL_OUTPUT_BYTES);
+        let max_processes = recommended_agent_concurrency
+            .saturating_mul(64)
+            .saturating_add(recommended_rch_verification_fanout.saturating_mul(8))
+            .max(MIN_PROCESS_BUDGET);
+        let max_fds = recommended_tool_concurrency
+            .saturating_mul(128)
+            .clamp(MIN_FD_BUDGET, DEFAULT_FD_LIMIT.saturating_mul(4));
+        let resource_budgets = HostResourceBudgets {
+            cpu_cores: effective_cpu_cores,
+            max_load_avg_1m: ((effective_cpu_cores as f64) * 2.0).max(MIN_LOAD_BUDGET),
+            max_rss_bytes,
+            max_processes,
+            max_fds,
+            max_tool_output_bytes,
+            max_queue_depth,
+            backpressure_ratio: config.memory_pressure_threshold_ratio.clamp(0.50, 0.85),
+            deny_ratio: 1.0,
+        };
+        let calibrated_p99_ms = scale_u64_by_ratio(evidence.max_p99_ms, 1.50).max(100);
+        let calibrated_p999_ms =
+            scale_u64_by_ratio(evidence.max_p999_ms, 1.50).max(calibrated_p99_ms.saturating_mul(2));
+        let tail_latency_config = TailLatencyRegimeConfig::new(
+            calibrated_p99_ms,
+            calibrated_p999_ms,
+            max_queue_depth,
+            DEFAULT_TAIL_LATENCY_RESOURCE_PRESSURE_RATIO,
+            DEFAULT_TAIL_LATENCY_RECOVERY_RATIO,
+            DEFAULT_TAIL_LATENCY_ENTER_SAMPLES,
+            DEFAULT_TAIL_LATENCY_EXIT_SAMPLES,
+        )
+        .normalized();
+        let uncertainties = capacity_uncertainties(
+            &evidence,
+            max_rss_floor > usable_memory_bytes,
+            max_queue_depth == DEFAULT_MIN_QUEUE_DEPTH_BUDGET,
+        );
+        let confidence = capacity_confidence(&evidence, &uncertainties);
+
+        Ok(SwarmCapacityPlan {
+            schema: SWARM_CAPACITY_PLAN_SCHEMA,
+            host_inventory: inventory,
+            recommended_agent_concurrency,
+            recommended_tool_concurrency,
+            recommended_extension_hostcall_lanes,
+            recommended_rch_verification_fanout,
+            memory_pressure_threshold_ratio: config.memory_pressure_threshold_ratio,
+            backoff_initial_ms: evidence.max_p99_ms.clamp(50, 500),
+            backoff_max_ms: evidence
+                .max_p999_ms
+                .max(evidence.max_p99_ms.saturating_mul(2))
+                .clamp(500, 5_000),
+            resource_budgets,
+            tail_latency_config,
+            confidence,
+            uncertainties,
+            evidence,
+        })
+    }
+
+    fn normalized(self) -> Self {
+        Self {
+            agent_cpu_headroom_ratio: normalized_ratio(
+                self.agent_cpu_headroom_ratio,
+                DEFAULT_CAPACITY_AGENT_CPU_HEADROOM_RATIO,
+                0.10,
+                1.0,
+            ),
+            memory_pressure_threshold_ratio: normalized_ratio(
+                self.memory_pressure_threshold_ratio,
+                DEFAULT_CAPACITY_MEMORY_PRESSURE_RATIO,
+                0.10,
+                0.90,
+            ),
+            tool_concurrency_per_agent: self.tool_concurrency_per_agent.max(1),
+            extension_lane_cpu_divisor: self.extension_lane_cpu_divisor.max(1),
+            rch_fanout_cpu_divisor: self.rch_fanout_cpu_divisor.max(1),
+        }
+    }
+}
+
+/// Build a capacity plan from JSONL rows with default conservative knobs.
+pub fn plan_swarm_capacity_from_jsonl(
+    jsonl: &str,
+    inventory: SwarmHostInventory,
+) -> Result<SwarmCapacityPlan, SwarmCapacityPlanError> {
+    SwarmCapacityPlannerConfig::default().plan_from_jsonl(jsonl, inventory)
+}
+
+/// Confidence assigned to a generated swarm capacity plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmCapacityConfidence {
+    /// Multiple complete rows match the requested host inventory.
+    High,
+    /// Evidence is usable but has limited row count or minor caveats.
+    Medium,
+    /// Evidence is complete enough to plan from, but material caveats remain.
+    Low,
+}
+
+/// Bounded summary of the swarm performance evidence consumed by the planner.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SwarmCapacityEvidenceSummary {
+    /// Complete `swarm_metrics` records consumed.
+    pub complete_records: usize,
+    /// Rows with a complete `host_capacity` section.
+    pub host_capacity_rows: usize,
+    /// Host-capacity rows that did not match the requested inventory.
+    pub host_capacity_mismatch_rows: usize,
+    /// Maximum p99 latency observed in milliseconds.
+    pub max_p99_ms: u64,
+    /// Maximum p999 latency observed in milliseconds.
+    pub max_p999_ms: u64,
+    /// Maximum queue depth observed.
+    pub max_queue_depth: usize,
+    /// Maximum RSS observed in MiB.
+    pub max_rss_mb: u64,
+    /// Maximum CPU utilization percentage observed.
+    pub max_cpu_pct: f64,
+}
+
+/// Recommended starting budgets for a host-scale agent swarm.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SwarmCapacityPlan {
+    /// Stable schema identifier for serialized plans.
+    pub schema: &'static str,
+    /// Host inventory the plan targets.
+    pub host_inventory: SwarmHostInventory,
+    /// Recommended number of concurrently active agents.
+    pub recommended_agent_concurrency: u64,
+    /// Recommended tool hostcall concurrency.
+    pub recommended_tool_concurrency: u64,
+    /// Recommended extension hostcall lanes.
+    pub recommended_extension_hostcall_lanes: u64,
+    /// Recommended concurrent RCH verification jobs.
+    pub recommended_rch_verification_fanout: u64,
+    /// Memory pressure ratio used for backpressure budgets.
+    pub memory_pressure_threshold_ratio: f64,
+    /// Initial backoff delay in milliseconds when pressure starts.
+    pub backoff_initial_ms: u64,
+    /// Maximum backoff delay in milliseconds under sustained pressure.
+    pub backoff_max_ms: u64,
+    /// Budgets that can be passed directly into [`ResourceGovernor`].
+    pub resource_budgets: HostResourceBudgets,
+    /// Tail-latency thresholds that can be passed into [`TailLatencyRegimeGuard`].
+    pub tail_latency_config: TailLatencyRegimeConfig,
+    /// Planner confidence after evidence validation.
+    pub confidence: SwarmCapacityConfidence,
+    /// Deterministic caveats attached to the recommendation.
+    pub uncertainties: Vec<String>,
+    /// Evidence summary used to derive this plan.
+    pub evidence: SwarmCapacityEvidenceSummary,
+}
+
+impl SwarmCapacityPlan {
+    /// Render stable JSON telemetry for the capacity plan.
+    #[must_use]
+    pub fn telemetry(&self) -> Value {
+        json!(self)
+    }
+
+    /// Re-plan the same evidence summary against a different CPU/RAM inventory.
+    pub fn what_if(&self, inventory: SwarmHostInventory) -> Result<Self, SwarmCapacityPlanError> {
+        SwarmCapacityPlannerConfig::default().plan_from_summary(self.evidence.clone(), inventory)
+    }
+}
+
+/// Error returned when capacity evidence cannot safely produce recommendations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SwarmCapacityPlanError {
+    /// Required host inventory is absent or invalid.
+    InvalidHostInventory(&'static str),
+    /// A JSONL row is not valid JSON.
+    InvalidJson {
+        /// One-indexed JSONL line number.
+        line: usize,
+        /// Parser error.
+        message: String,
+    },
+    /// A row contains `swarm_metrics`, but a required field is absent or invalid.
+    InvalidEvidence {
+        /// One-indexed JSONL line number, or zero for summarized evidence.
+        line: usize,
+        /// Required evidence field.
+        field: &'static str,
+    },
+    /// No complete required evidence was found.
+    MissingEvidence(&'static str),
+}
+
+impl fmt::Display for SwarmCapacityPlanError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidHostInventory(field) => {
+                write!(formatter, "invalid host inventory field: {field}")
+            }
+            Self::InvalidJson { line, message } => {
+                write!(formatter, "invalid JSONL at line {line}: {message}")
+            }
+            Self::InvalidEvidence { line, field } if *line == 0 => {
+                write!(formatter, "invalid summarized evidence field: {field}")
+            }
+            Self::InvalidEvidence { line, field } => {
+                write!(formatter, "invalid swarm evidence at line {line}: {field}")
+            }
+            Self::MissingEvidence(field) => {
+                write!(formatter, "missing required swarm evidence: {field}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SwarmCapacityPlanError {}
 
 /// Result of observing one tail-latency sample.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -906,6 +1300,312 @@ fn scale_usize_by_ratio(value: usize, ratio: f64) -> usize {
     ((value as f64) * ratio).ceil().max(1.0) as usize
 }
 
+fn parse_capacity_evidence_jsonl(
+    jsonl: &str,
+    requested_inventory: SwarmHostInventory,
+) -> Result<SwarmCapacityEvidenceSummary, SwarmCapacityPlanError> {
+    let mut accumulator = CapacityEvidenceAccumulator::default();
+    for (line_index, row) in jsonl.lines().enumerate() {
+        let line = line_index.saturating_add(1);
+        let row = row.trim();
+        if row.is_empty() {
+            continue;
+        }
+        let value: Value =
+            serde_json::from_str(row).map_err(|err| SwarmCapacityPlanError::InvalidJson {
+                line,
+                message: err.to_string(),
+            })?;
+        let Some(swarm_metrics) = value.get("swarm_metrics") else {
+            continue;
+        };
+        let swarm_metrics = value_as_object(swarm_metrics, "swarm_metrics", line)?;
+        let record = parse_swarm_metrics_record(swarm_metrics, line)?;
+        accumulator.observe(record, requested_inventory);
+    }
+    accumulator.finish()
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SwarmMetricsRecord {
+    host_inventory: SwarmHostInventory,
+    p99_ms: u64,
+    p999_ms: u64,
+    max_queue_depth: usize,
+    rss_mb: u64,
+    cpu_pct: f64,
+}
+
+#[derive(Default)]
+struct CapacityEvidenceAccumulator {
+    complete_records: usize,
+    host_capacity_rows: usize,
+    host_capacity_mismatch_rows: usize,
+    max_p99_ms: u64,
+    max_p999_ms: u64,
+    max_queue_depth: usize,
+    max_rss_mb: u64,
+    max_cpu_pct: f64,
+}
+
+impl CapacityEvidenceAccumulator {
+    fn observe(&mut self, record: SwarmMetricsRecord, requested_inventory: SwarmHostInventory) {
+        self.complete_records = self.complete_records.saturating_add(1);
+        self.host_capacity_rows = self.host_capacity_rows.saturating_add(1);
+        if record.host_inventory != requested_inventory {
+            self.host_capacity_mismatch_rows = self.host_capacity_mismatch_rows.saturating_add(1);
+        }
+        self.max_p99_ms = self.max_p99_ms.max(record.p99_ms);
+        self.max_p999_ms = self.max_p999_ms.max(record.p999_ms);
+        self.max_queue_depth = self.max_queue_depth.max(record.max_queue_depth);
+        self.max_rss_mb = self.max_rss_mb.max(record.rss_mb);
+        self.max_cpu_pct = self.max_cpu_pct.max(record.cpu_pct);
+    }
+
+    const fn finish(self) -> Result<SwarmCapacityEvidenceSummary, SwarmCapacityPlanError> {
+        if self.complete_records == 0 {
+            return Err(SwarmCapacityPlanError::MissingEvidence("swarm_metrics"));
+        }
+        Ok(SwarmCapacityEvidenceSummary {
+            complete_records: self.complete_records,
+            host_capacity_rows: self.host_capacity_rows,
+            host_capacity_mismatch_rows: self.host_capacity_mismatch_rows,
+            max_p99_ms: self.max_p99_ms,
+            max_p999_ms: self.max_p999_ms,
+            max_queue_depth: self.max_queue_depth,
+            max_rss_mb: self.max_rss_mb,
+            max_cpu_pct: self.max_cpu_pct,
+        })
+    }
+}
+
+fn parse_swarm_metrics_record(
+    metrics: &Map<String, Value>,
+    line: usize,
+) -> Result<SwarmMetricsRecord, SwarmCapacityPlanError> {
+    let latency = required_object(
+        metrics,
+        "latency_quantiles_ms",
+        "swarm_metrics.latency_quantiles_ms",
+        line,
+    )?;
+    let queue_depth = required_object(metrics, "queue_depth", "swarm_metrics.queue_depth", line)?;
+    let resource_usage = required_object(
+        metrics,
+        "resource_usage",
+        "swarm_metrics.resource_usage",
+        line,
+    )?;
+    let host_capacity = required_object(
+        metrics,
+        "host_capacity",
+        "swarm_metrics.host_capacity",
+        line,
+    )?;
+    let p99_ms = required_positive_u64_ceil(
+        latency,
+        "p99",
+        "swarm_metrics.latency_quantiles_ms.p99",
+        line,
+    )?;
+    let p999_ms = required_positive_u64_ceil(
+        latency,
+        "p999",
+        "swarm_metrics.latency_quantiles_ms.p999",
+        line,
+    )?;
+    if p999_ms < p99_ms {
+        return Err(SwarmCapacityPlanError::InvalidEvidence {
+            line,
+            field: "swarm_metrics.latency_quantiles_ms.p999",
+        });
+    }
+    let max_queue_depth =
+        required_positive_usize_ceil(queue_depth, "max", "swarm_metrics.queue_depth.max", line)?;
+    let rss_mb = required_positive_u64_ceil(
+        resource_usage,
+        "rss_mb",
+        "swarm_metrics.resource_usage.rss_mb",
+        line,
+    )?;
+    let cpu_pct = required_non_negative_f64(
+        resource_usage,
+        "cpu_pct",
+        "swarm_metrics.resource_usage.cpu_pct",
+        line,
+    )?;
+    let target_cpu_cores = required_positive_u64_ceil(
+        host_capacity,
+        "target_cpu_cores",
+        "swarm_metrics.host_capacity.target_cpu_cores",
+        line,
+    )?;
+    let observed_cpu_cores = required_positive_u64_ceil(
+        host_capacity,
+        "observed_cpu_cores",
+        "swarm_metrics.host_capacity.observed_cpu_cores",
+        line,
+    )?;
+    let mem_total_mb = required_positive_u64_ceil(
+        host_capacity,
+        "mem_total_mb",
+        "swarm_metrics.host_capacity.mem_total_mb",
+        line,
+    )?;
+
+    Ok(SwarmMetricsRecord {
+        host_inventory: SwarmHostInventory::new(target_cpu_cores, observed_cpu_cores, mem_total_mb),
+        p99_ms,
+        p999_ms,
+        max_queue_depth,
+        rss_mb,
+        cpu_pct,
+    })
+}
+
+fn value_as_object<'a>(
+    value: &'a Value,
+    field: &'static str,
+    line: usize,
+) -> Result<&'a Map<String, Value>, SwarmCapacityPlanError> {
+    value
+        .as_object()
+        .ok_or(SwarmCapacityPlanError::InvalidEvidence { line, field })
+}
+
+fn required_object<'a>(
+    map: &'a Map<String, Value>,
+    key: &'static str,
+    field: &'static str,
+    line: usize,
+) -> Result<&'a Map<String, Value>, SwarmCapacityPlanError> {
+    let value = map
+        .get(key)
+        .ok_or(SwarmCapacityPlanError::InvalidEvidence { line, field })?;
+    value_as_object(value, field, line)
+}
+
+fn required_non_negative_f64(
+    map: &Map<String, Value>,
+    key: &'static str,
+    field: &'static str,
+    line: usize,
+) -> Result<f64, SwarmCapacityPlanError> {
+    let value = map
+        .get(key)
+        .ok_or(SwarmCapacityPlanError::InvalidEvidence { line, field })?;
+    let number = value
+        .as_f64()
+        .ok_or(SwarmCapacityPlanError::InvalidEvidence { line, field })?;
+    if number.is_finite() && number >= 0.0 {
+        Ok(number)
+    } else {
+        Err(SwarmCapacityPlanError::InvalidEvidence { line, field })
+    }
+}
+
+fn required_positive_u64_ceil(
+    map: &Map<String, Value>,
+    key: &'static str,
+    field: &'static str,
+    line: usize,
+) -> Result<u64, SwarmCapacityPlanError> {
+    let number = required_non_negative_f64(map, key, field, line)?;
+    let value =
+        ceil_f64_to_u64(number).ok_or(SwarmCapacityPlanError::InvalidEvidence { line, field })?;
+    if value == 0 {
+        Err(SwarmCapacityPlanError::InvalidEvidence { line, field })
+    } else {
+        Ok(value)
+    }
+}
+
+fn required_positive_usize_ceil(
+    map: &Map<String, Value>,
+    key: &'static str,
+    field: &'static str,
+    line: usize,
+) -> Result<usize, SwarmCapacityPlanError> {
+    let value = required_positive_u64_ceil(map, key, field, line)?;
+    usize::try_from(value).map_err(|_| SwarmCapacityPlanError::InvalidEvidence { line, field })
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+fn ceil_f64_to_u64(value: f64) -> Option<u64> {
+    if !value.is_finite() || value < 0.0 || value > (u64::MAX as f64) {
+        return None;
+    }
+    Some(value.ceil() as u64)
+}
+
+fn mb_to_bytes(mb: u64, field: &'static str) -> Result<u64, SwarmCapacityPlanError> {
+    mb.checked_mul(1024 * 1024)
+        .ok_or(SwarmCapacityPlanError::InvalidEvidence { line: 0, field })
+}
+
+fn planned_queue_depth_budget(cpu_cores: u64, observed_max_queue_depth: usize) -> usize {
+    let host_budget = queue_depth_budget(cpu_cores);
+    observed_max_queue_depth
+        .saturating_mul(2)
+        .max(DEFAULT_MIN_QUEUE_DEPTH_BUDGET)
+        .min(host_budget)
+        .max(1)
+}
+
+fn normalized_ratio(value: f64, fallback: f64, minimum: f64, maximum: f64) -> f64 {
+    if value.is_finite() && value > 0.0 {
+        value.clamp(minimum, maximum)
+    } else {
+        fallback
+    }
+}
+
+fn capacity_uncertainties(
+    evidence: &SwarmCapacityEvidenceSummary,
+    rss_exceeds_memory_headroom: bool,
+    queue_depth_floor_applied: bool,
+) -> Vec<String> {
+    let mut uncertainties = Vec::new();
+    if evidence.complete_records < 3 {
+        uncertainties.push("fewer_than_three_complete_swarm_records".to_owned());
+    }
+    if evidence.host_capacity_mismatch_rows > 0 {
+        uncertainties.push("host_capacity_mismatch".to_owned());
+    }
+    if evidence.max_cpu_pct <= f64::EPSILON {
+        uncertainties.push("cpu_usage_reported_zero".to_owned());
+    }
+    if rss_exceeds_memory_headroom {
+        uncertainties.push("rss_exceeds_memory_headroom".to_owned());
+    }
+    if queue_depth_floor_applied {
+        uncertainties.push("queue_depth_floor_applied".to_owned());
+    }
+    uncertainties
+}
+
+fn capacity_confidence(
+    evidence: &SwarmCapacityEvidenceSummary,
+    uncertainties: &[String],
+) -> SwarmCapacityConfidence {
+    let material_caveat = evidence.host_capacity_mismatch_rows > 0
+        || evidence.max_cpu_pct <= f64::EPSILON
+        || uncertainties
+            .iter()
+            .any(|uncertainty| uncertainty == "rss_exceeds_memory_headroom");
+    if material_caveat {
+        SwarmCapacityConfidence::Low
+    } else if uncertainties.is_empty() {
+        SwarmCapacityConfidence::High
+    } else {
+        SwarmCapacityConfidence::Medium
+    }
+}
+
 #[allow(clippy::trivially_copy_pass_by_ref)]
 const fn is_false(value: &bool) -> bool {
     !*value
@@ -1033,9 +1733,11 @@ const fn read_open_files_soft_limit() -> Option<u64> {
 mod tests {
     use super::{
         AdmissionAction, HostResourceBudgets, HostResourceSample, ResourceDimension,
-        ResourceGovernor, ResourceOperationKind, ResourceRequest, TAIL_LATENCY_REGIME_SCHEMA,
-        TailLatencyFallbackReason, TailLatencyRegime, TailLatencyRegimeConfig,
-        TailLatencyRegimeGuard, TailLatencyRegimeSample,
+        ResourceGovernor, ResourceOperationKind, ResourceRequest, SWARM_CAPACITY_PLAN_SCHEMA,
+        SwarmCapacityConfidence, SwarmCapacityPlanError, SwarmHostInventory,
+        TAIL_LATENCY_REGIME_SCHEMA, TailLatencyFallbackReason, TailLatencyRegime,
+        TailLatencyRegimeConfig, TailLatencyRegimeGuard, TailLatencyRegimeSample,
+        plan_swarm_capacity_from_jsonl,
     };
 
     fn budgets() -> HostResourceBudgets {
@@ -1053,6 +1755,16 @@ mod tests {
 
     fn tail_config() -> TailLatencyRegimeConfig {
         TailLatencyRegimeConfig::new(100, 500, 4, 0.80, 0.50, 2, 2)
+    }
+
+    fn capacity_inventory() -> SwarmHostInventory {
+        SwarmHostInventory::new(64, 64, 262_144)
+    }
+
+    fn capacity_fixture_jsonl() -> &'static str {
+        r#"{"schema":"pi.perf.session_workload_matrix_cell.v1","swarm_metrics":{"latency_quantiles_ms":{"p50":80.0,"p95":105.0,"p99":120.0,"p999":600.0},"queue_depth":{"p50":32,"p95":96,"p99":160,"p999":224,"max":256},"resource_usage":{"rss_mb":384,"cpu_pct":41.0},"component_breakdown_ms":{"tool":4.0,"provider":12.0,"extension":8.0,"session":56.0},"stage_breakdown_ms":{"open":8.0,"append":16.0,"save":20.0,"index":12.0},"host_capacity":{"target_cpu_cores":64,"observed_cpu_cores":64,"mem_total_mb":262144}}}
+{"schema":"pi.perf.session_workload_matrix_cell.v1","swarm_metrics":{"latency_quantiles_ms":{"p50":95.0,"p95":130.0,"p99":180.0,"p999":800.0},"queue_depth":{"p50":48,"p95":112,"p99":192,"p999":256,"max":256},"resource_usage":{"rss_mb":512,"cpu_pct":55.0},"component_breakdown_ms":{"tool":6.0,"provider":14.0,"extension":10.0,"session":65.0},"stage_breakdown_ms":{"open":10.0,"append":18.0,"save":24.0,"index":13.0},"host_capacity":{"target_cpu_cores":64,"observed_cpu_cores":64,"mem_total_mb":262144}}}
+{"schema":"pi.perf.session_workload_matrix_cell.v1","swarm_metrics":{"latency_quantiles_ms":{"p50":90.0,"p95":125.0,"p99":150.0,"p999":700.0},"queue_depth":{"p50":40,"p95":100,"p99":180,"p999":240,"max":256},"resource_usage":{"rss_mb":448,"cpu_pct":49.0},"component_breakdown_ms":{"tool":5.0,"provider":13.0,"extension":9.0,"session":63.0},"stage_breakdown_ms":{"open":9.0,"append":17.0,"save":23.0,"index":14.0},"host_capacity":{"target_cpu_cores":64,"observed_cpu_cores":64,"mem_total_mb":262144}}}"#
     }
 
     #[test]
@@ -1142,6 +1854,96 @@ mod tests {
                 .and_then(|value| value.get("action"))
                 .and_then(serde_json::Value::as_str),
             Some("admit")
+        );
+    }
+
+    #[test]
+    fn capacity_plan_derives_stable_resource_governor_budgets() {
+        let plan =
+            plan_swarm_capacity_from_jsonl(capacity_fixture_jsonl(), capacity_inventory()).unwrap();
+
+        assert_eq!(plan.schema, SWARM_CAPACITY_PLAN_SCHEMA);
+        assert_eq!(plan.confidence, SwarmCapacityConfidence::High);
+        assert!(plan.uncertainties.is_empty());
+        assert_eq!(plan.evidence.complete_records, 3);
+        assert_eq!(plan.recommended_agent_concurrency, 32);
+        assert_eq!(plan.recommended_tool_concurrency, 64);
+        assert_eq!(plan.recommended_extension_hostcall_lanes, 16);
+        assert_eq!(plan.recommended_rch_verification_fanout, 8);
+        assert_eq!(plan.resource_budgets.cpu_cores, 64);
+        assert_eq!(plan.resource_budgets.max_queue_depth, 512);
+        assert_eq!(plan.tail_latency_config.calibrated_p99_ms, 270);
+        assert_eq!(plan.tail_latency_config.calibrated_p999_ms, 1_200);
+
+        let governor = ResourceGovernor::with_budgets(plan.resource_budgets);
+        let request =
+            ResourceRequest::new(ResourceOperationKind::Tool, "read").with_queue_depth(128);
+        let decision = governor.admit_sample(
+            &request,
+            HostResourceSample {
+                load_avg_1m: Some(20.0),
+                rss_bytes: Some(512 * 1024 * 1024),
+                process_count: Some(128),
+                fd_count: Some(128),
+            },
+        );
+        assert_eq!(decision.action, AdmissionAction::Admit);
+    }
+
+    #[test]
+    fn capacity_plan_telemetry_contains_stable_schema() {
+        let plan =
+            plan_swarm_capacity_from_jsonl(capacity_fixture_jsonl(), capacity_inventory()).unwrap();
+
+        let telemetry = plan.telemetry();
+
+        assert_eq!(
+            telemetry.get("schema").and_then(serde_json::Value::as_str),
+            Some(SWARM_CAPACITY_PLAN_SCHEMA)
+        );
+        assert_eq!(
+            telemetry
+                .get("recommended_agent_concurrency")
+                .and_then(serde_json::Value::as_u64),
+            Some(32)
+        );
+    }
+
+    #[test]
+    fn capacity_plan_fails_closed_without_swarm_metrics() {
+        let err = plan_swarm_capacity_from_jsonl(
+            "{\"schema\":\"pi.perf.session_workload_matrix_cell.v1\"}\n",
+            capacity_inventory(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            SwarmCapacityPlanError::MissingEvidence("swarm_metrics")
+        ));
+    }
+
+    #[test]
+    fn capacity_plan_what_if_reduces_budgets_for_smaller_hosts() {
+        let plan =
+            plan_swarm_capacity_from_jsonl(capacity_fixture_jsonl(), capacity_inventory()).unwrap();
+
+        let constrained = plan
+            .what_if(SwarmHostInventory::new(16, 16, 1_024))
+            .unwrap();
+
+        assert!(constrained.recommended_agent_concurrency < plan.recommended_agent_concurrency);
+        assert!(
+            constrained.recommended_rch_verification_fanout
+                < plan.recommended_rch_verification_fanout
+        );
+        assert!(constrained.resource_budgets.max_rss_bytes < plan.resource_budgets.max_rss_bytes);
+        assert_eq!(constrained.host_inventory.observed_cpu_cores, 16);
+        assert!(
+            constrained
+                .uncertainties
+                .iter()
+                .any(|uncertainty| uncertainty == "rss_exceeds_memory_headroom")
         );
     }
 

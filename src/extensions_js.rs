@@ -383,6 +383,7 @@ impl HostcallRequest {
 
 const MAX_JSON_DEPTH: usize = 64;
 const MAX_JOBS_PER_TICK: usize = 10_000;
+const DEFAULT_MODULE_CACHE_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 
 /// Convert a serde_json::Value to a rquickjs Value.
 #[allow(clippy::option_if_let_else)]
@@ -2475,14 +2476,25 @@ pub struct PiJsTickStats {
     pub module_cache_invalidations: u64,
     /// Number of module entries currently retained in the cache.
     pub module_cache_entries: u64,
+    /// Approximate bytes retained by the in-memory compiled-source cache.
+    pub module_cache_bytes: u64,
+    /// Configured hard cap for the in-memory compiled-source cache.
+    pub module_cache_limit_bytes: Option<u64>,
     /// Number of disk cache hits (transpiled source loaded from persistent storage).
     pub module_disk_cache_hits: u64,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct PiJsRuntimeLimits {
     /// Limit runtime heap usage (QuickJS allocator). `None` means unlimited.
     pub memory_limit_bytes: Option<usize>,
+    /// Limit warm in-memory compiled/transpiled module cache bytes.
+    ///
+    /// This caps the bytecode/source cache preserved across warm resets so a
+    /// reused runtime cannot grow without bound. `None` disables the in-memory
+    /// cache byte cap; persistent disk cache remains controlled by
+    /// `PiJsRuntimeConfig::disk_cache_dir`.
+    pub module_cache_limit_bytes: Option<usize>,
     /// Limit runtime stack usage. `None` uses QuickJS default.
     pub max_stack_bytes: Option<usize>,
     /// Interrupt budget to bound JS execution. `None` disables budget enforcement.
@@ -2500,6 +2512,20 @@ pub struct PiJsRuntimeLimits {
     ///
     /// `0` means use the runtime default.
     pub hostcall_overflow_queue_capacity: usize,
+}
+
+impl Default for PiJsRuntimeLimits {
+    fn default() -> Self {
+        Self {
+            memory_limit_bytes: None,
+            module_cache_limit_bytes: Some(DEFAULT_MODULE_CACHE_LIMIT_BYTES),
+            max_stack_bytes: None,
+            interrupt_budget: None,
+            hostcall_timeout_ms: None,
+            hostcall_fast_queue_capacity: 0,
+            hostcall_overflow_queue_capacity: 0,
+        }
+    }
 }
 
 /// Controls how the auto-repair pipeline behaves at extension load time.
@@ -4814,6 +4840,12 @@ struct PiJsModuleState {
     repair_events: Arc<std::sync::Mutex<Vec<ExtensionRepairEvent>>>,
     /// Directory for persistent transpiled-source disk cache.
     disk_cache_dir: Option<PathBuf>,
+    /// Approximate retained bytes across all in-memory compiled sources.
+    compiled_sources_bytes: usize,
+    /// LRU order for in-memory compiled sources.
+    compiled_source_lru: VecDeque<String>,
+    /// Hard cap for retained in-memory compiled source bytes.
+    compiled_cache_limit_bytes: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4854,6 +4886,9 @@ impl PiJsModuleState {
             extension_roots_without_id: Vec::new(),
             repair_events: Arc::new(std::sync::Mutex::new(Vec::new())),
             disk_cache_dir: None,
+            compiled_sources_bytes: 0,
+            compiled_source_lru: VecDeque::new(),
+            compiled_cache_limit_bytes: Some(DEFAULT_MODULE_CACHE_LIMIT_BYTES),
         }
     }
 
@@ -4874,6 +4909,70 @@ impl PiJsModuleState {
         self.disk_cache_dir = dir;
         self
     }
+
+    const fn with_compiled_cache_limit_bytes(mut self, limit: Option<usize>) -> Self {
+        self.compiled_cache_limit_bytes = limit;
+        self
+    }
+}
+
+fn compiled_source_len(entry: &CompiledModuleCacheEntry) -> usize {
+    entry.source.len()
+}
+
+fn remove_compiled_source(
+    state: &mut PiJsModuleState,
+    name: &str,
+) -> Option<CompiledModuleCacheEntry> {
+    let removed = state.compiled_sources.remove(name);
+    if let Some(entry) = removed.as_ref() {
+        state.compiled_sources_bytes = state
+            .compiled_sources_bytes
+            .saturating_sub(compiled_source_len(entry));
+        state.compiled_source_lru.retain(|key| key != name);
+    }
+    removed
+}
+
+fn record_compiled_source_access(state: &mut PiJsModuleState, name: &str) {
+    state.compiled_source_lru.retain(|key| key != name);
+    state.compiled_source_lru.push_back(name.to_string());
+}
+
+fn insert_compiled_source(
+    state: &mut PiJsModuleState,
+    name: &str,
+    entry: CompiledModuleCacheEntry,
+) {
+    let entry_len = compiled_source_len(&entry);
+    if let Some(limit) = state.compiled_cache_limit_bytes {
+        if limit == 0 || entry_len > limit {
+            let _ = remove_compiled_source(state, name);
+            state.module_cache_counters.invalidations =
+                state.module_cache_counters.invalidations.saturating_add(1);
+            return;
+        }
+    }
+
+    let _ = remove_compiled_source(state, name);
+    if let Some(limit) = state.compiled_cache_limit_bytes {
+        while state.compiled_sources_bytes.saturating_add(entry_len) > limit {
+            let Some(victim) = state.compiled_source_lru.pop_front() else {
+                break;
+            };
+            if let Some(evicted) = state.compiled_sources.remove(&victim) {
+                state.compiled_sources_bytes = state
+                    .compiled_sources_bytes
+                    .saturating_sub(compiled_source_len(&evicted));
+                state.module_cache_counters.invalidations =
+                    state.module_cache_counters.invalidations.saturating_add(1);
+            }
+        }
+    }
+
+    state.compiled_sources_bytes = state.compiled_sources_bytes.saturating_add(entry_len);
+    state.compiled_sources.insert(name.to_string(), entry);
+    record_compiled_source_access(state, name);
 }
 
 fn current_extension_id(ctx: &Ctx<'_>) -> Option<String> {
@@ -5397,7 +5496,7 @@ fn maybe_register_builtin_compat_overlay(
         state
             .dynamic_virtual_modules
             .insert(overlay_key.clone(), overlay);
-        if state.compiled_sources.remove(&overlay_key).is_some() {
+        if remove_compiled_source(state, &overlay_key).is_some() {
             state.module_cache_counters.invalidations =
                 state.module_cache_counters.invalidations.saturating_add(1);
         }
@@ -5570,7 +5669,7 @@ impl JsModuleResolver for PiJsResolver {
                 if exports_changed || !state.dynamic_virtual_modules.contains_key(spec) {
                     let stub = generate_proxy_stub_module(spec, &export_names);
                     state.dynamic_virtual_modules.insert(entry_key, stub);
-                    if state.compiled_sources.remove(spec).is_some() {
+                    if remove_compiled_source(&mut state, spec).is_some() {
                         state.module_cache_counters.invalidations =
                             state.module_cache_counters.invalidations.saturating_add(1);
                     }
@@ -5800,10 +5899,13 @@ fn load_compiled_module_source(
     // 1. Check in-memory cache — Arc clone is O(1) atomic increment.
     if let Some(cached) = state.compiled_sources.get(name) {
         if cached.cache_key == cache_key {
+            let source = Arc::clone(&cached.source);
             state.module_cache_counters.hits = state.module_cache_counters.hits.saturating_add(1);
-            return Ok(cached.source.to_vec());
+            record_compiled_source_access(state, name);
+            return Ok(source.to_vec());
         }
 
+        let _ = remove_compiled_source(state, name);
         state.module_cache_counters.invalidations =
             state.module_cache_counters.invalidations.saturating_add(1);
     }
@@ -5816,8 +5918,9 @@ fn load_compiled_module_source(
         state.module_cache_counters.disk_hits =
             state.module_cache_counters.disk_hits.saturating_add(1);
         let source: Arc<[u8]> = disk_cached.into();
-        state.compiled_sources.insert(
-            name.to_string(),
+        insert_compiled_source(
+            state,
+            name,
             CompiledModuleCacheEntry {
                 cache_key,
                 source: Arc::clone(&source),
@@ -5834,8 +5937,9 @@ fn load_compiled_module_source(
         name,
     )?;
     let source: Arc<[u8]> = compiled.into();
-    state.compiled_sources.insert(
-        name.to_string(),
+    insert_compiled_source(
+        state,
+        name,
         CompiledModuleCacheEntry {
             cache_key: cache_key.clone(),
             source: Arc::clone(&source),
@@ -14331,6 +14435,8 @@ pub struct PiJsWarmResetReport {
     pub module_cache_misses: u64,
     pub module_cache_invalidations: u64,
     pub module_cache_entries: u64,
+    pub module_cache_bytes: u64,
+    pub module_cache_limit_bytes: Option<u64>,
 }
 
 #[allow(clippy::future_not_send)]
@@ -14412,11 +14518,13 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
 
         let repair_events: Arc<std::sync::Mutex<Vec<ExtensionRepairEvent>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
+        let compiled_cache_limit_bytes = config.limits.module_cache_limit_bytes;
         let module_state = Rc::new(RefCell::new(
             PiJsModuleState::new()
                 .with_repair_mode(config.repair_mode)
                 .with_repair_events(Arc::clone(&repair_events))
-                .with_disk_cache_dir(config.disk_cache_dir.clone()),
+                .with_disk_cache_dir(config.disk_cache_dir.clone())
+                .with_compiled_cache_limit_bytes(compiled_cache_limit_bytes),
         ));
         runtime
             .set_loader(
@@ -14520,15 +14628,21 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
         tick == 1 || (tick % UNBOUNDED_MEMORY_USAGE_SAMPLE_EVERY_TICKS == 0)
     }
 
-    fn module_cache_snapshot(&self) -> (u64, u64, u64, u64, u64) {
+    fn module_cache_snapshot(&self) -> (u64, u64, u64, u64, u64, u64, Option<u64>) {
         let state = self.module_state.borrow();
         let entries = u64::try_from(state.compiled_sources.len()).unwrap_or(u64::MAX);
+        let bytes = u64::try_from(state.compiled_sources_bytes).unwrap_or(u64::MAX);
+        let limit = state
+            .compiled_cache_limit_bytes
+            .map(|value| u64::try_from(value).unwrap_or(u64::MAX));
         (
             state.module_cache_counters.hits,
             state.module_cache_counters.misses,
             state.module_cache_counters.invalidations,
             entries,
             state.module_cache_counters.disk_hits,
+            bytes,
+            limit,
         )
     }
 
@@ -14612,7 +14726,7 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
             state.extension_roots_without_id.clear();
 
             for spec in dynamic_specs {
-                if state.compiled_sources.remove(&spec).is_some() {
+                if remove_compiled_source(&mut state, &spec).is_some() {
                     dynamic_invalidations = dynamic_invalidations.saturating_add(1);
                 }
             }
@@ -14625,12 +14739,21 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
         }
         report.dynamic_module_invalidations = dynamic_invalidations;
 
-        let (cache_hits, cache_misses, cache_invalidations, cache_entries, _disk_hits) =
-            self.module_cache_snapshot();
+        let (
+            cache_hits,
+            cache_misses,
+            cache_invalidations,
+            cache_entries,
+            _disk_hits,
+            cache_bytes,
+            cache_limit_bytes,
+        ) = self.module_cache_snapshot();
         report.module_cache_hits = cache_hits;
         report.module_cache_misses = cache_misses;
         report.module_cache_invalidations = cache_invalidations;
         report.module_cache_entries = cache_entries;
+        report.module_cache_bytes = cache_bytes;
+        report.module_cache_limit_bytes = cache_limit_bytes;
 
         if report.pending_tasks_before > 0
             || report.pending_hostcalls_before > 0
@@ -14754,6 +14877,9 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
         // Clear hostcall state.
         self.hostcall_queue.borrow_mut().clear();
         *self.hostcall_tracker.borrow_mut() = HostcallTracker::default();
+        if let Ok(mut roots) = self.allowed_read_roots.lock() {
+            roots.clear();
+        }
         // Drain repair events.
         if let Ok(mut events) = self.repair_events.lock() {
             events.clear();
@@ -15053,13 +15179,22 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                 .load(std::sync::atomic::Ordering::SeqCst);
         }
         stats.repairs_total = self.repair_count();
-        let (cache_hits, cache_misses, cache_invalidations, cache_entries, disk_hits) =
-            self.module_cache_snapshot();
+        let (
+            cache_hits,
+            cache_misses,
+            cache_invalidations,
+            cache_entries,
+            disk_hits,
+            cache_bytes,
+            cache_limit_bytes,
+        ) = self.module_cache_snapshot();
         stats.module_cache_hits = cache_hits;
         stats.module_cache_misses = cache_misses;
         stats.module_cache_invalidations = cache_invalidations;
         stats.module_cache_entries = cache_entries;
         stats.module_disk_cache_hits = disk_hits;
+        stats.module_cache_bytes = cache_bytes;
+        stats.module_cache_limit_bytes = cache_limit_bytes;
 
         if let Some(limit) = self.config.limits.memory_limit_bytes {
             let limit = u64::try_from(limit).unwrap_or(u64::MAX);
@@ -21317,6 +21452,52 @@ import { isIPv4 as netIsIpv4 } from "node:net";
     }
 
     #[test]
+    fn compiled_source_cache_enforces_hard_byte_cap() {
+        let mut state = PiJsModuleState::new().with_compiled_cache_limit_bytes(Some(8));
+        insert_compiled_source(
+            &mut state,
+            "a",
+            CompiledModuleCacheEntry {
+                cache_key: Some("a-v1".to_string()),
+                source: b"aaaa".to_vec().into(),
+            },
+        );
+        insert_compiled_source(
+            &mut state,
+            "b",
+            CompiledModuleCacheEntry {
+                cache_key: Some("b-v1".to_string()),
+                source: b"bbbbb".to_vec().into(),
+            },
+        );
+
+        assert!(
+            !state.compiled_sources.contains_key("a"),
+            "oldest entry must be evicted when the warm cache exceeds its cap"
+        );
+        assert!(state.compiled_sources.contains_key("b"));
+        assert_eq!(state.compiled_sources_bytes, 5);
+        assert_eq!(state.module_cache_counters.invalidations, 1);
+    }
+
+    #[test]
+    fn compiled_source_cache_rejects_single_entry_over_cap() {
+        let mut state = PiJsModuleState::new().with_compiled_cache_limit_bytes(Some(4));
+        insert_compiled_source(
+            &mut state,
+            "oversized",
+            CompiledModuleCacheEntry {
+                cache_key: Some("oversized-v1".to_string()),
+                source: b"too-large".to_vec().into(),
+            },
+        );
+
+        assert!(state.compiled_sources.is_empty());
+        assert_eq!(state.compiled_sources_bytes, 0);
+        assert_eq!(state.module_cache_counters.invalidations, 1);
+    }
+
+    #[test]
     fn warm_reset_clears_extension_registry_state() {
         futures::executor::block_on(async {
             let runtime = PiJsRuntime::with_clock(DeterministicClock::new(0))
@@ -21424,6 +21605,7 @@ import { isIPv4 as netIsIpv4 } from "node:net";
             {
                 let mut state = runtime.module_state.borrow_mut();
                 let extension_root = PathBuf::from("/tmp/ext-root");
+                runtime.add_allowed_read_root(&extension_root);
                 state.extension_roots.push(extension_root.clone());
                 state
                     .extension_root_tiers
@@ -21439,8 +21621,9 @@ import { isIPv4 as netIsIpv4 } from "node:net";
                 state
                     .dynamic_virtual_named_exports
                     .insert(cache_key.clone(), exports);
-                state.compiled_sources.insert(
-                    cache_key.clone(),
+                insert_compiled_source(
+                    &mut state,
+                    &cache_key,
                     CompiledModuleCacheEntry {
                         cache_key: Some("cache-v1".to_string()),
                         source: b"compiled-source".to_vec().into(),
@@ -21481,6 +21664,12 @@ import { isIPv4 as netIsIpv4 } from "node:net";
                 .store(7, std::sync::atomic::Ordering::SeqCst);
 
             runtime.reset_transient_state();
+
+            let roots_empty = runtime
+                .allowed_read_roots
+                .lock()
+                .is_ok_and(|roots| roots.is_empty());
+            assert!(roots_empty);
 
             {
                 let state = runtime.module_state.borrow();
