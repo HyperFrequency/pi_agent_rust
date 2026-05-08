@@ -24,6 +24,23 @@ Summaries retain exact totals for event count, redacted entries, redacted fields
 
 Latency details named `latency_ms`, `duration_ms`, or `elapsed_ms` feed a bounded sample sketch. The summary reports retained sample count, min, p50, p95, p99, max, and a conservative rank-error bound. Sketches can be merged across runs; the receiving sketch keeps its configured capacities and downsamples merged latency samples back to the requested bound.
 
+## Swarm digest
+
+`SwarmActivityLedger::digest`, `digest_from_jsonl`, and `SwarmActivityDigest::to_text` derive schema `pi.swarm.activity_digest.v1` for handoff and saturation checks. The digest is a bounded redacted view over existing ledger rows, not a new source of truth.
+
+Digests include:
+
+- Active agents by event count.
+- Recent Beads status changes.
+- Recent Agent Mail events.
+- File reservation activity.
+- Verification evidence from verification, RCH, and git events.
+- Repeated blocker hot spots.
+- Stale Agent Mail threads measured from the newest represented event.
+- Saturation signals for few newly filed bugs, duplicate work, repeated blockers, and stale threads.
+
+The JSON form is stable for automation. The text form is deterministic for handoff notes and uses only the already-redacted summaries and selected detail fields. Prompt bodies, transcripts, tokens, API keys, cookies, authorization headers, and other sensitive values remain redacted before they can reach either output.
+
 ## Tail-latency regime guard
 
 `TailLatencyRegimeGuard` in `src/resource_governor.rs` consumes live p99, p999, queue-depth, and resource-pressure samples to detect when a swarm has left its calibrated operating regime. It requires consecutive violating samples before entering conservative fallback and consecutive recovered samples before returning to calibrated mode, so brief spikes do not flap the controller.

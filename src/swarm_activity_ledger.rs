@@ -5,6 +5,7 @@
 //! sensitive fields by default, and exports stable JSONL for incident review.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
@@ -14,11 +15,23 @@ pub const SWARM_ACTIVITY_LEDGER_SCHEMA: &str = "pi.swarm.activity_ledger.v1";
 /// Schema emitted by bounded swarm activity summaries.
 pub const SWARM_ACTIVITY_SUMMARY_SCHEMA: &str = "pi.swarm.activity_summary.v1";
 
+/// Schema emitted by bounded swarm transcript digests.
+pub const SWARM_ACTIVITY_DIGEST_SCHEMA: &str = "pi.swarm.activity_digest.v1";
+
 /// Default number of hot spots retained per summary dimension.
 pub const DEFAULT_SWARM_ACTIVITY_HOTSPOT_CAPACITY: usize = 64;
 
 /// Default number of latency samples retained by the bounded sketch.
 pub const DEFAULT_SWARM_ACTIVITY_LATENCY_SAMPLE_CAPACITY: usize = 256;
+
+/// Default number of items retained per digest section.
+pub const DEFAULT_SWARM_ACTIVITY_DIGEST_ITEM_CAPACITY: usize = 16;
+
+/// Default age after which an Agent Mail thread is reported as stale.
+pub const DEFAULT_SWARM_ACTIVITY_STALE_THREAD_AFTER_MS: u64 = 30 * 60 * 1000;
+
+/// Default effort window for saturation detection.
+pub const DEFAULT_SWARM_ACTIVITY_SATURATION_WINDOW_MS: u64 = 60 * 60 * 1000;
 
 const REDACTED: &str = "[REDACTED]";
 const HOTSPOT_KEY_MAX_CHARS: usize = 240;
@@ -34,6 +47,21 @@ const DETAIL_HOTSPOT_KEYS: &[&str] = &[
     "verification_id",
 ];
 const LATENCY_DETAIL_KEYS: &[&str] = &["duration_ms", "elapsed_ms", "latency_ms"];
+const DIGEST_DETAIL_KEYS: &[&str] = &[
+    "action",
+    "command",
+    "decision",
+    "exit_code",
+    "file",
+    "issue_type",
+    "model",
+    "path",
+    "provider",
+    "status",
+    "tool",
+    "tool_name",
+    "verification_id",
+];
 const SENSITIVE_KEY_FRAGMENTS: &[&str] = &[
     "authorization",
     "bearer",
@@ -72,6 +100,58 @@ impl SwarmActivitySummaryConfig {
         Self {
             max_hotspots,
             max_latency_samples,
+        }
+    }
+}
+
+/// Capacity and threshold controls for swarm transcript digests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmActivityDigestConfig {
+    /// Maximum retained rows in each bounded digest section.
+    pub max_items: usize,
+    /// Thread inactivity age, measured from the newest ledger row.
+    pub stale_thread_after_ms: u64,
+    /// Recent effort window used when counting newly filed bugs.
+    pub saturation_window_ms: u64,
+    /// Minimum newly filed bug count expected in the effort window.
+    pub min_new_bugs_per_window: u64,
+    /// Count at which duplicate-work events become a saturation signal.
+    pub duplicate_work_threshold: u64,
+    /// Count at which a blocker key is considered repeated.
+    pub repeated_blocker_threshold: u64,
+}
+
+impl Default for SwarmActivityDigestConfig {
+    fn default() -> Self {
+        Self {
+            max_items: DEFAULT_SWARM_ACTIVITY_DIGEST_ITEM_CAPACITY,
+            stale_thread_after_ms: DEFAULT_SWARM_ACTIVITY_STALE_THREAD_AFTER_MS,
+            saturation_window_ms: DEFAULT_SWARM_ACTIVITY_SATURATION_WINDOW_MS,
+            min_new_bugs_per_window: 1,
+            duplicate_work_threshold: 2,
+            repeated_blocker_threshold: 2,
+        }
+    }
+}
+
+impl SwarmActivityDigestConfig {
+    /// Create digest controls for deterministic handoff summaries.
+    #[must_use]
+    pub const fn new(
+        max_items: usize,
+        stale_thread_after_ms: u64,
+        saturation_window_ms: u64,
+        min_new_bugs_per_window: u64,
+        duplicate_work_threshold: u64,
+        repeated_blocker_threshold: u64,
+    ) -> Self {
+        Self {
+            max_items,
+            stale_thread_after_ms,
+            saturation_window_ms,
+            min_new_bugs_per_window,
+            duplicate_work_threshold,
+            repeated_blocker_threshold,
         }
     }
 }
@@ -134,6 +214,143 @@ pub struct SwarmActivitySummary {
     /// Approximate latency quantiles when latency detail fields were present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latency_ms: Option<SwarmActivityLatencySummary>,
+}
+
+/// One representative redacted event retained in a swarm digest section.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmActivityDigestItem {
+    /// Event timestamp in Unix milliseconds.
+    pub timestamp_ms: u64,
+    /// Activity category.
+    pub kind: SwarmActivityKind,
+    /// Stable event correlation ID.
+    pub correlation_id: String,
+    /// Redacted human summary.
+    pub summary: String,
+    /// Beads issue ID, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bead_id: Option<String>,
+    /// Agent name, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
+    /// One selected redacted detail field for quick scanning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// Agent Mail thread with no recent ledger activity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmActivityStaleThread {
+    /// Agent Mail thread ID.
+    pub mail_thread_id: String,
+    /// Last observed activity timestamp in Unix milliseconds.
+    pub last_timestamp_ms: u64,
+    /// Number of ledger rows observed for this thread.
+    pub event_count: u64,
+    /// Last redacted summary observed for this thread.
+    pub last_summary: String,
+}
+
+/// Saturation signals derived from a bounded swarm transcript digest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmActivitySaturationSignals {
+    /// Effort window used for new-bug counting.
+    pub window_ms: u64,
+    /// Start of the effort window, when the digest is non-empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_start_ms: Option<u64>,
+    /// Newly filed bug count in the effort window.
+    pub new_bug_count: u64,
+    /// True when the recent window found too few new bugs.
+    pub few_new_bugs: bool,
+    /// Repeated blocker events represented by digest hot spots.
+    pub repeated_blocker_count: u64,
+    /// Duplicate-work events in the represented transcript.
+    pub duplicate_work_count: u64,
+    /// Stale Agent Mail thread count.
+    pub stale_thread_count: u64,
+    /// True when any saturation signal is active.
+    pub saturated: bool,
+    /// Stable textual reasons for active signals.
+    pub reasons: Vec<String>,
+}
+
+/// Deterministic redacted digest for swarm handoff and saturation review.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmActivityDigest {
+    /// Stable schema identifier.
+    pub schema: String,
+    /// Total events represented by this digest.
+    pub event_count: u64,
+    /// Earliest represented event timestamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_timestamp_ms: Option<u64>,
+    /// Latest represented event timestamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_timestamp_ms: Option<u64>,
+    /// Most active agents by redacted event count.
+    pub active_agents: Vec<SwarmActivityHotspot>,
+    /// Recent Beads changes.
+    pub bead_changes: Vec<SwarmActivityDigestItem>,
+    /// Recent Agent Mail activity.
+    pub agent_mail_activity: Vec<SwarmActivityDigestItem>,
+    /// Recent file reservation activity.
+    pub file_reservations: Vec<SwarmActivityDigestItem>,
+    /// Recent verification, RCH, and git evidence.
+    pub verification_evidence: Vec<SwarmActivityDigestItem>,
+    /// Repeated blocker hot spots.
+    pub repeated_blockers: Vec<SwarmActivityHotspot>,
+    /// Inactive Agent Mail threads.
+    pub stale_threads: Vec<SwarmActivityStaleThread>,
+    /// Saturation and duplicate-work signals.
+    pub saturation: SwarmActivitySaturationSignals,
+}
+
+impl SwarmActivityDigest {
+    /// Render a deterministic redacted text digest for operators.
+    #[must_use]
+    pub fn to_text(&self) -> String {
+        let mut out = String::new();
+        out.push_str("Swarm activity digest\n");
+        if self.event_count == 0 {
+            out.push_str("Events: 0\n");
+            out.push_str("No swarm activity events.\n");
+            return out;
+        }
+
+        let _ = writeln!(out, "Events: {}", self.event_count);
+        if let (Some(first), Some(last)) = (self.first_timestamp_ms, self.last_timestamp_ms) {
+            let _ = writeln!(out, "Window: {first}..{last}");
+        }
+        write_hotspot_section(&mut out, "Active agents", &self.active_agents);
+        write_item_section(&mut out, "Bead changes", &self.bead_changes);
+        write_item_section(&mut out, "Agent Mail", &self.agent_mail_activity);
+        write_item_section(&mut out, "File reservations", &self.file_reservations);
+        write_item_section(
+            &mut out,
+            "Verification evidence",
+            &self.verification_evidence,
+        );
+        write_hotspot_section(&mut out, "Repeated blockers", &self.repeated_blockers);
+        write_stale_thread_section(&mut out, &self.stale_threads);
+        let _ = writeln!(
+            out,
+            "Saturation: {}",
+            if self.saturation.saturated {
+                "yes"
+            } else {
+                "no"
+            }
+        );
+        if self.saturation.reasons.is_empty() {
+            out.push_str("- none\n");
+        } else {
+            for reason in &self.saturation.reasons {
+                let _ = writeln!(out, "- {reason}");
+            }
+        }
+        out
+    }
 }
 
 /// Mergeable bounded sketch for swarm activity events.
@@ -553,6 +770,18 @@ impl SwarmActivityLedger {
         sketch.record_entries(&self.entries);
         sketch.snapshot()
     }
+
+    /// Build a deterministic redacted digest from all retained raw entries.
+    #[must_use]
+    pub fn digest(&self) -> SwarmActivityDigest {
+        self.digest_with_config(SwarmActivityDigestConfig::default())
+    }
+
+    /// Build a deterministic redacted digest with custom capacities.
+    #[must_use]
+    pub fn digest_with_config(&self, config: SwarmActivityDigestConfig) -> SwarmActivityDigest {
+        digest_entries_with_config(&self.entries, config)
+    }
 }
 
 /// Timeline event used by replay/incident review.
@@ -678,6 +907,363 @@ pub fn timeline_from_jsonl(
         .iter()
         .map(SwarmActivityTimelineEvent::from)
         .collect())
+}
+
+/// Build a deterministic redacted digest from JSONL ledger rows.
+///
+/// # Errors
+///
+/// Returns a validation error if any JSONL row is invalid.
+pub fn digest_from_jsonl(
+    input: &str,
+    config: SwarmActivityDigestConfig,
+) -> Result<SwarmActivityDigest, SwarmActivityLedgerError> {
+    let entries = entries_from_jsonl(input)?;
+    Ok(digest_entries_with_config(&entries, config))
+}
+
+/// Build a deterministic redacted digest from validated ledger entries.
+#[must_use]
+pub fn digest_entries_with_config(
+    entries: &[SwarmActivityLedgerEntry],
+    config: SwarmActivityDigestConfig,
+) -> SwarmActivityDigest {
+    let event_count = usize_to_u64(entries.len());
+    let first_timestamp_ms = entries.iter().map(|entry| entry.timestamp_ms).min();
+    let last_timestamp_ms = entries.iter().map(|entry| entry.timestamp_ms).max();
+    let mut agent_counts = BTreeMap::new();
+    for entry in entries {
+        record_optional_hotspot(
+            &mut agent_counts,
+            entry.ids.agent_name.as_deref(),
+            config.max_items,
+        );
+    }
+
+    let repeated_blockers = repeated_blockers(entries, config);
+    let stale_threads = stale_threads(entries, config);
+    let saturation = saturation_signals(entries, config, &repeated_blockers, &stale_threads);
+
+    SwarmActivityDigest {
+        schema: SWARM_ACTIVITY_DIGEST_SCHEMA.to_string(),
+        event_count,
+        first_timestamp_ms,
+        last_timestamp_ms,
+        active_agents: top_hotspots(&agent_counts, config.max_items),
+        bead_changes: recent_digest_items(entries, config.max_items, |entry| {
+            entry.kind == SwarmActivityKind::BeadStatus
+        }),
+        agent_mail_activity: recent_digest_items(entries, config.max_items, |entry| {
+            entry.kind == SwarmActivityKind::AgentMail
+        }),
+        file_reservations: recent_digest_items(entries, config.max_items, |entry| {
+            entry.kind == SwarmActivityKind::FileReservation
+        }),
+        verification_evidence: recent_digest_items(entries, config.max_items, |entry| {
+            matches!(
+                entry.kind,
+                SwarmActivityKind::Verification
+                    | SwarmActivityKind::RchJob
+                    | SwarmActivityKind::GitCommit
+            )
+        }),
+        repeated_blockers,
+        stale_threads,
+        saturation,
+    }
+}
+
+fn recent_digest_items(
+    entries: &[SwarmActivityLedgerEntry],
+    max_items: usize,
+    mut include: impl FnMut(&SwarmActivityLedgerEntry) -> bool,
+) -> Vec<SwarmActivityDigestItem> {
+    if max_items == 0 {
+        return Vec::new();
+    }
+    let mut retained = entries
+        .iter()
+        .filter(|entry| include(entry))
+        .collect::<Vec<_>>();
+    retained.sort_by(|left, right| {
+        right
+            .timestamp_ms
+            .cmp(&left.timestamp_ms)
+            .then_with(|| right.sequence.cmp(&left.sequence))
+            .then_with(|| left.ids.correlation_id.cmp(&right.ids.correlation_id))
+    });
+    retained.truncate(max_items);
+    retained.into_iter().map(digest_item_from_entry).collect()
+}
+
+fn digest_item_from_entry(entry: &SwarmActivityLedgerEntry) -> SwarmActivityDigestItem {
+    SwarmActivityDigestItem {
+        timestamp_ms: entry.timestamp_ms,
+        kind: entry.kind,
+        correlation_id: entry.ids.correlation_id.clone(),
+        summary: entry.summary.clone(),
+        bead_id: entry.ids.bead_id.clone(),
+        agent_name: entry.ids.agent_name.clone(),
+        detail: selected_digest_detail(entry),
+    }
+}
+
+fn selected_digest_detail(entry: &SwarmActivityLedgerEntry) -> Option<String> {
+    for key in DIGEST_DETAIL_KEYS {
+        if let Some(value) = entry.details().get(*key) {
+            return Some(format!("{key}={value}"));
+        }
+    }
+    None
+}
+
+fn repeated_blockers(
+    entries: &[SwarmActivityLedgerEntry],
+    config: SwarmActivityDigestConfig,
+) -> Vec<SwarmActivityHotspot> {
+    let mut counts = BTreeMap::new();
+    for entry in entries {
+        if is_blocker_entry(entry) {
+            record_hotspot(&mut counts, &blocker_key(entry), config.max_items);
+        }
+    }
+    top_hotspots(&counts, config.max_items)
+        .into_iter()
+        .filter(|hotspot| hotspot.count >= config.repeated_blocker_threshold)
+        .collect()
+}
+
+fn stale_threads(
+    entries: &[SwarmActivityLedgerEntry],
+    config: SwarmActivityDigestConfig,
+) -> Vec<SwarmActivityStaleThread> {
+    if config.max_items == 0 {
+        return Vec::new();
+    }
+    let Some(last_timestamp_ms) = entries.iter().map(|entry| entry.timestamp_ms).max() else {
+        return Vec::new();
+    };
+    let mut thread_stats = BTreeMap::<String, ThreadDigestAccumulator>::new();
+    for entry in entries {
+        if entry.kind != SwarmActivityKind::AgentMail {
+            continue;
+        }
+        let Some(thread_id) = entry.ids.mail_thread_id.as_deref() else {
+            continue;
+        };
+        let stats = thread_stats.entry(thread_id.to_string()).or_default();
+        stats.event_count = stats.event_count.saturating_add(1);
+        if entry.timestamp_ms >= stats.last_timestamp_ms {
+            stats.last_timestamp_ms = entry.timestamp_ms;
+            stats.last_summary.clone_from(&entry.summary);
+        }
+    }
+
+    let mut stale = thread_stats
+        .into_iter()
+        .filter_map(|(mail_thread_id, stats)| {
+            let age_ms = last_timestamp_ms.saturating_sub(stats.last_timestamp_ms);
+            (age_ms >= config.stale_thread_after_ms).then_some(SwarmActivityStaleThread {
+                mail_thread_id,
+                last_timestamp_ms: stats.last_timestamp_ms,
+                event_count: stats.event_count,
+                last_summary: stats.last_summary,
+            })
+        })
+        .collect::<Vec<_>>();
+    stale.sort_by(|left, right| {
+        left.last_timestamp_ms
+            .cmp(&right.last_timestamp_ms)
+            .then_with(|| left.mail_thread_id.cmp(&right.mail_thread_id))
+    });
+    stale.truncate(config.max_items);
+    stale
+}
+
+fn saturation_signals(
+    entries: &[SwarmActivityLedgerEntry],
+    config: SwarmActivityDigestConfig,
+    repeated_blockers: &[SwarmActivityHotspot],
+    stale_threads: &[SwarmActivityStaleThread],
+) -> SwarmActivitySaturationSignals {
+    let last_timestamp_ms = entries.iter().map(|entry| entry.timestamp_ms).max();
+    let window_start_ms = last_timestamp_ms
+        .map(|timestamp_ms| timestamp_ms.saturating_sub(config.saturation_window_ms));
+    let new_bug_count = window_start_ms.map_or(0, |start_ms| {
+        entries
+            .iter()
+            .filter(|entry| entry.timestamp_ms >= start_ms && is_new_bug_entry(entry))
+            .count()
+            .try_into()
+            .unwrap_or(u64::MAX)
+    });
+    let duplicate_work_count = entries
+        .iter()
+        .filter(|entry| is_duplicate_work_entry(entry))
+        .count()
+        .try_into()
+        .unwrap_or(u64::MAX);
+    let repeated_blocker_count = repeated_blockers
+        .iter()
+        .map(|hotspot| hotspot.count)
+        .sum::<u64>();
+    let stale_thread_count = usize_to_u64(stale_threads.len());
+    let few_new_bugs = !entries.is_empty() && new_bug_count < config.min_new_bugs_per_window;
+
+    let mut reasons = Vec::new();
+    if few_new_bugs {
+        reasons.push(format!(
+            "few_new_bugs: {new_bug_count} in {} ms",
+            config.saturation_window_ms
+        ));
+    }
+    if repeated_blocker_count > 0 {
+        reasons.push(format!("repeated_blockers: {repeated_blocker_count}"));
+    }
+    if duplicate_work_count >= config.duplicate_work_threshold {
+        reasons.push(format!("duplicate_work: {duplicate_work_count}"));
+    }
+    if stale_thread_count > 0 {
+        reasons.push(format!("stale_threads: {stale_thread_count}"));
+    }
+    let saturated = !reasons.is_empty();
+
+    SwarmActivitySaturationSignals {
+        window_ms: config.saturation_window_ms,
+        window_start_ms,
+        new_bug_count,
+        few_new_bugs,
+        repeated_blocker_count,
+        duplicate_work_count,
+        stale_thread_count,
+        saturated,
+        reasons,
+    }
+}
+
+#[derive(Default)]
+struct ThreadDigestAccumulator {
+    last_timestamp_ms: u64,
+    event_count: u64,
+    last_summary: String,
+}
+
+fn blocker_key(entry: &SwarmActivityLedgerEntry) -> String {
+    entry
+        .ids
+        .bead_id
+        .clone()
+        .or_else(|| entry.ids.mail_thread_id.clone())
+        .unwrap_or_else(|| bounded_hotspot_key(&entry.summary))
+}
+
+fn is_blocker_entry(entry: &SwarmActivityLedgerEntry) -> bool {
+    entry_contains_any(
+        entry,
+        &[
+            "blocked", "blocker", "failed", "failure", "stalled", "timeout",
+        ],
+    )
+}
+
+fn is_duplicate_work_entry(entry: &SwarmActivityLedgerEntry) -> bool {
+    entry_contains_any(
+        entry,
+        &[
+            "already claimed",
+            "duplicate",
+            "duplicate work",
+            "same bead",
+        ],
+    )
+}
+
+fn is_new_bug_entry(entry: &SwarmActivityLedgerEntry) -> bool {
+    if entry.kind != SwarmActivityKind::BeadStatus {
+        return false;
+    }
+    let has_bug_signal =
+        detail_equals(entry, "issue_type", "bug") || entry_contains_any(entry, &["bug"]);
+    let has_open_signal = detail_equals(entry, "status", "open")
+        || detail_equals(entry, "status", "created")
+        || detail_equals(entry, "action", "created")
+        || entry_contains_any(entry, &["filed", "created"]);
+    has_bug_signal && has_open_signal
+}
+
+fn detail_equals(entry: &SwarmActivityLedgerEntry, key: &str, expected: &str) -> bool {
+    entry
+        .details()
+        .get(key)
+        .is_some_and(|value| value.eq_ignore_ascii_case(expected))
+}
+
+fn entry_contains_any(entry: &SwarmActivityLedgerEntry, needles: &[&str]) -> bool {
+    let summary = entry.summary.to_ascii_lowercase();
+    if needles.iter().any(|needle| summary.contains(needle)) {
+        return true;
+    }
+    entry.details().iter().any(|(key, value)| {
+        let key = key.to_ascii_lowercase();
+        let value = value.to_ascii_lowercase();
+        needles
+            .iter()
+            .any(|needle| key.contains(needle) || value.contains(needle))
+    })
+}
+
+fn write_hotspot_section(out: &mut String, title: &str, hotspots: &[SwarmActivityHotspot]) {
+    let _ = writeln!(out, "{title}:");
+    if hotspots.is_empty() {
+        out.push_str("- none\n");
+        return;
+    }
+    for hotspot in hotspots {
+        let _ = writeln!(out, "- {} ({})", hotspot.key, hotspot.count);
+    }
+}
+
+fn write_item_section(out: &mut String, title: &str, items: &[SwarmActivityDigestItem]) {
+    let _ = writeln!(out, "{title}:");
+    if items.is_empty() {
+        out.push_str("- none\n");
+        return;
+    }
+    for item in items {
+        let _ = write!(
+            out,
+            "- {} {:?} {}",
+            item.timestamp_ms, item.kind, item.summary
+        );
+        if let Some(bead_id) = &item.bead_id {
+            let _ = write!(out, " bead={bead_id}");
+        }
+        if let Some(agent_name) = &item.agent_name {
+            let _ = write!(out, " agent={agent_name}");
+        }
+        if let Some(detail) = &item.detail {
+            let _ = write!(out, " {detail}");
+        }
+        out.push('\n');
+    }
+}
+
+fn write_stale_thread_section(out: &mut String, threads: &[SwarmActivityStaleThread]) {
+    out.push_str("Stale threads:\n");
+    if threads.is_empty() {
+        out.push_str("- none\n");
+        return;
+    }
+    for thread in threads {
+        let _ = writeln!(
+            out,
+            "- {} last={} events={} {}",
+            thread.mail_thread_id,
+            thread.last_timestamp_ms,
+            thread.event_count,
+            thread.last_summary
+        );
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -999,9 +1585,10 @@ fn looks_sensitive(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        SWARM_ACTIVITY_LEDGER_SCHEMA, SWARM_ACTIVITY_SUMMARY_SCHEMA, SwarmActivityIds,
-        SwarmActivityKind, SwarmActivityLedger, SwarmActivityLedgerError, SwarmActivitySketch,
-        SwarmActivitySummaryConfig, entries_from_jsonl, timeline_from_jsonl,
+        SWARM_ACTIVITY_DIGEST_SCHEMA, SWARM_ACTIVITY_LEDGER_SCHEMA, SWARM_ACTIVITY_SUMMARY_SCHEMA,
+        SwarmActivityDigestConfig, SwarmActivityIds, SwarmActivityKind, SwarmActivityLedger,
+        SwarmActivityLedgerError, SwarmActivitySketch, SwarmActivitySummaryConfig,
+        digest_from_jsonl, entries_from_jsonl, timeline_from_jsonl,
     };
 
     #[test]
@@ -1290,6 +1877,144 @@ mod tests {
         assert_rank_within_bound(latency.p50_ms, 50, latency.rank_error_bound);
         assert_rank_within_bound(latency.p95_ms, 95, latency.rank_error_bound);
         assert_rank_within_bound(latency.p99_ms, 99, latency.rank_error_bound);
+    }
+
+    #[test]
+    fn digest_handles_empty_ledgers_deterministically() {
+        let ledger = SwarmActivityLedger::new();
+        let digest = ledger.digest();
+
+        assert_eq!(digest.schema, SWARM_ACTIVITY_DIGEST_SCHEMA);
+        assert_eq!(digest.event_count, 0);
+        assert!(digest.active_agents.is_empty());
+        assert!(!digest.saturation.saturated);
+        assert!(digest.to_text().contains("No swarm activity events."));
+    }
+
+    #[test]
+    fn digest_summarizes_handoff_inputs_without_prompt_content() {
+        let mut ledger = SwarmActivityLedger::new();
+        ledger.append(
+            10_000,
+            SwarmActivityKind::AgentMail,
+            SwarmActivityIds::new("mail-old")
+                .with_agent_name("CopperOx")
+                .with_mail_thread_id("bd-old"),
+            "start message sent",
+            [("subject", "[bd-old] start")],
+        );
+        ledger.append(
+            4_000_000,
+            SwarmActivityKind::FileReservation,
+            SwarmActivityIds::new("lease-1")
+                .with_agent_name("SunnyBeacon")
+                .with_bead_id("bd-2zcs5.20"),
+            "reserved digest files",
+            [("path", "src/swarm_activity_ledger.rs")],
+        );
+        ledger.append(
+            4_000_100,
+            SwarmActivityKind::Verification,
+            SwarmActivityIds::new("verify-1")
+                .with_agent_name("SunnyBeacon")
+                .with_bead_id("bd-2zcs5.20"),
+            "cargo check passed",
+            [
+                ("command", "cargo check --all-targets"),
+                ("status", "passed"),
+            ],
+        );
+        ledger.append(
+            4_000_200,
+            SwarmActivityKind::BeadStatus,
+            SwarmActivityIds::new("bug-1")
+                .with_agent_name("SunnyBeacon")
+                .with_bead_id("bd-bug"),
+            "filed bug for failing digest edge case",
+            [
+                ("issue_type", "bug"),
+                ("status", "open"),
+                ("prompt_body", "secret prompt text"),
+            ],
+        );
+        ledger.append(
+            4_000_300,
+            SwarmActivityKind::AgentMail,
+            SwarmActivityIds::new("mail-dup-1")
+                .with_agent_name("OtherAgent")
+                .with_mail_thread_id("bd-2zcs5.20"),
+            "duplicate work noticed",
+            [("status", "duplicate")],
+        );
+        ledger.append(
+            4_000_400,
+            SwarmActivityKind::AgentMail,
+            SwarmActivityIds::new("mail-dup-2")
+                .with_agent_name("OtherAgent")
+                .with_mail_thread_id("bd-2zcs5.20"),
+            "same bead duplicate work noticed",
+            [("status", "duplicate")],
+        );
+        ledger.append(
+            4_000_500,
+            SwarmActivityKind::BeadStatus,
+            SwarmActivityIds::new("blocked-1")
+                .with_agent_name("SunnyBeacon")
+                .with_bead_id("bd-blocked"),
+            "blocked by UBS historical findings",
+            [("status", "blocked")],
+        );
+        ledger.append(
+            4_000_600,
+            SwarmActivityKind::BeadStatus,
+            SwarmActivityIds::new("blocked-2")
+                .with_agent_name("SunnyBeacon")
+                .with_bead_id("bd-blocked"),
+            "blocker repeated in UBS staged scan",
+            [("status", "blocked")],
+        );
+
+        let digest = ledger.digest_with_config(SwarmActivityDigestConfig::new(
+            4, 30_000, 1_000_000, 1, 2, 2,
+        ));
+        let text = digest.to_text();
+
+        assert_eq!(digest.event_count, 8);
+        assert_eq!(digest.active_agents[0].key, "SunnyBeacon");
+        assert_eq!(digest.file_reservations.len(), 1);
+        assert_eq!(digest.verification_evidence.len(), 1);
+        assert_eq!(digest.saturation.new_bug_count, 1);
+        assert!(!digest.saturation.few_new_bugs);
+        assert_eq!(digest.saturation.duplicate_work_count, 2);
+        assert_eq!(digest.repeated_blockers[0].key, "bd-blocked");
+        assert_eq!(digest.stale_threads[0].mail_thread_id, "bd-old");
+        assert!(digest.saturation.saturated);
+        assert!(text.contains("duplicate_work: 2"));
+        assert!(!text.contains("secret prompt text"));
+    }
+
+    #[test]
+    fn digest_from_jsonl_flags_few_new_bugs_in_effort_window() {
+        let mut ledger = SwarmActivityLedger::new();
+        ledger.append(
+            1_000,
+            SwarmActivityKind::Verification,
+            SwarmActivityIds::new("verify-only").with_agent_name("SunnyBeacon"),
+            "cargo check passed",
+            [("status", "passed")],
+        );
+
+        let jsonl = ledger.to_jsonl().expect("ledger should serialize");
+        let digest = digest_from_jsonl(
+            &jsonl,
+            SwarmActivityDigestConfig::new(8, 60_000, 60_000, 1, 2, 2),
+        )
+        .expect("digest should parse");
+
+        assert_eq!(digest.saturation.new_bug_count, 0);
+        assert!(digest.saturation.few_new_bugs);
+        assert!(digest.saturation.saturated);
+        assert_eq!(digest.saturation.reasons[0], "few_new_bugs: 0 in 60000 ms");
     }
 
     #[test]
