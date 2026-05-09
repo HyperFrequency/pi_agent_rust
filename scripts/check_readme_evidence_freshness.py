@@ -380,6 +380,58 @@ def run_self_test() -> int:
             print("SELF-TEST FAIL: no-data budget summary citation should fail")
             return 2
 
+        provenance_mismatch = repo_root / "tests/perf/reports/provenance_mismatch.json"
+        provenance_mismatch.write_text(
+            json.dumps(
+                {
+                    "generated_at": now.isoformat(),
+                    "correlation_id": "actual-run",
+                    "ok": True,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        os.utime(provenance_mismatch, (fresh_ts, fresh_ts))
+        readme.write_text(
+            "Claim: *(from tests/perf/reports/provenance_mismatch.json, run cited-run)*\n",
+            encoding="utf-8",
+        )
+        fourth_output = io.StringIO()
+        with contextlib.redirect_stdout(fourth_output):
+            fourth_result = check_readme(repo_root, now=now)
+        fourth_text = fourth_output.getvalue()
+        if fourth_result != 1 or "cited run 'cited-run' not found" not in fourth_text:
+            print(fourth_text)
+            print("SELF-TEST FAIL: cited run mismatch should fail")
+            return 2
+
+        generated_stale = repo_root / "tests/perf/reports/generated_stale.json"
+        generated_stale.write_text(
+            json.dumps(
+                {
+                    "generated_at": (now - timedelta(days=30)).isoformat(),
+                    "correlation_id": "stale-run",
+                    "ok": True,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        os.utime(generated_stale, (fresh_ts, fresh_ts))
+        readme.write_text(
+            "Claim: *(from tests/perf/reports/generated_stale.json, run stale-run)*\n",
+            encoding="utf-8",
+        )
+        fifth_output = io.StringIO()
+        with contextlib.redirect_stdout(fifth_output):
+            fifth_result = check_readme(repo_root, now=now)
+        fifth_text = fifth_output.getvalue()
+        if fifth_result != 1 or "artifact generated_at is stale" not in fifth_text:
+            print(fifth_text)
+            print("SELF-TEST FAIL: stale generated_at should fail even with fresh mtime")
+            return 2
+
     print("SELF-TEST PASS")
     return 0
 
