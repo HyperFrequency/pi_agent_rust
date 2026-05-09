@@ -276,7 +276,7 @@ fn total_v2_message_count(store: &SessionStoreV2) -> Result<Option<u64>> {
 
     let mut total = 0u64;
     for frame in store.read_all_entries()? {
-        if frame.entry_type == "message" {
+        if frame.entry_type.eq("message") {
             total = total.saturating_add(1);
         }
     }
@@ -487,7 +487,9 @@ impl ExtensionSession for SessionHandle {
             .lock(cx.cx())
             .await
             .map_err(|e| Error::session(format!("Failed to lock session: {e}")))?;
-        let changed = current_path_thinking_level(&session).as_deref() != Some(level.as_str());
+        let changed = !current_path_thinking_level(&session)
+            .as_deref()
+            .is_some_and(|current| current.eq(level.as_str()));
         if changed {
             session.append_thinking_level_change(level.clone());
         }
@@ -1717,7 +1719,7 @@ impl Session {
                 let found = path_entries.iter().any(|entry| {
                     entry
                         .base_id()
-                        .is_some_and(|entry_id| entry_id == &first_kept_entry_id)
+                        .is_some_and(|entry_id| entry_id.eq(&first_kept_entry_id))
                 });
                 (
                     Some(path_entries.len().saturating_sub(idx.saturating_add(1))),
@@ -1859,7 +1861,7 @@ impl Session {
                 session_dir: None,
                 store_kind: SessionStoreKind::Jsonl,
                 entry_ids: finalized.entry_ids,
-                is_linear: finalized.is_linear && leaf_id == natural_leaf_id,
+                is_linear: finalized.is_linear && leaf_id.eq(&natural_leaf_id),
                 entry_index: finalized.entry_index,
                 cached_message_count: finalized
                     .message_count
@@ -1929,7 +1931,7 @@ impl Session {
             session_dir: None,
             store_kind: SessionStoreKind::Sqlite,
             entry_ids: finalized.entry_ids,
-            is_linear: finalized.is_linear && leaf_id == natural_leaf_id,
+            is_linear: finalized.is_linear && leaf_id.eq(&natural_leaf_id),
             entry_index: finalized.entry_index,
             cached_message_count: finalized.message_count,
             cached_name: finalized.name,
@@ -2294,7 +2296,7 @@ impl Session {
                     .chars()
                     .take(8)
                     .map(|ch| {
-                        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
                             ch
                         } else {
                             '_'
@@ -2318,7 +2320,7 @@ impl Session {
             self.header_dirty = true;
         }
         let desired_leaf_override = self.persisted_leaf_override();
-        if self.header.current_leaf != desired_leaf_override {
+        if !self.header.current_leaf.eq(&desired_leaf_override) {
             self.header.current_leaf = desired_leaf_override;
             self.header_dirty = true;
         }
@@ -2374,7 +2376,7 @@ impl Session {
                     self.leaf_id = previous_leaf
                         .filter(|id| self.entry_index.contains_key(id))
                         .or_else(|| finalized.leaf_id.clone());
-                    self.is_linear = finalized.is_linear && self.leaf_id == finalized.leaf_id;
+                    self.is_linear = finalized.is_linear && self.leaf_id.eq(&finalized.leaf_id);
                     self.persisted_entry_count
                         .store(self.entries.len(), Ordering::SeqCst);
                     self.header_dirty = false;
@@ -2561,7 +2563,7 @@ impl Session {
                 .map(String::as_str),
         ) {
             (None, _) => Some(ROOT_LEAF_OVERRIDE_SENTINEL.to_string()),
-            (Some(current), Some(natural_tip)) if current == natural_tip => None,
+            (Some(current), Some(natural_tip)) if current.eq(natural_tip) => None,
             (Some(current), _) => Some(current.to_string()),
         }
     }
@@ -2570,14 +2572,22 @@ impl Session {
         let mut changed = false;
 
         let desired_leaf_override = self.persisted_leaf_override();
-        if self.header.current_leaf != desired_leaf_override {
+        if !self.header.current_leaf.eq(&desired_leaf_override) {
             self.header.current_leaf = desired_leaf_override;
             changed = true;
         }
 
         if let Some((provider, model_id)) = self.effective_model_for_current_path() {
-            if self.header.provider.as_deref() != Some(provider.as_str())
-                || self.header.model_id.as_deref() != Some(model_id.as_str())
+            if !self
+                .header
+                .provider
+                .as_deref()
+                .is_some_and(|current| current.eq(provider.as_str()))
+                || !self
+                    .header
+                    .model_id
+                    .as_deref()
+                    .is_some_and(|current| current.eq(model_id.as_str()))
             {
                 self.header.provider = Some(provider);
                 self.header.model_id = Some(model_id);
@@ -2592,7 +2602,12 @@ impl Session {
         }
 
         if let Some(thinking_level) = self.effective_thinking_level_for_current_path() {
-            if self.header.thinking_level.as_deref() != Some(thinking_level.as_str()) {
+            if !self
+                .header
+                .thinking_level
+                .as_deref()
+                .is_some_and(|current| current.eq(thinking_level.as_str()))
+            {
                 self.header.thinking_level = Some(thinking_level);
                 changed = true;
             }
@@ -2609,7 +2624,7 @@ impl Session {
 
     fn clear_persisted_leaf_override_after_append(&mut self) {
         let desired_leaf_override = self.persisted_leaf_override();
-        if self.header.current_leaf != desired_leaf_override {
+        if !self.header.current_leaf.eq(&desired_leaf_override) {
             self.header.current_leaf = desired_leaf_override;
             self.header_dirty = true;
         }
@@ -2824,7 +2839,7 @@ impl Session {
         // current leaf_id pointing at the last entry.  If the user navigated
         // to a mid-chain entry before saving, the leaf differs from the tip
         // and the fast path would return wrong results.
-        self.is_linear = finalized.is_linear && self.leaf_id == finalized.leaf_id;
+        self.is_linear = finalized.is_linear && self.leaf_id.eq(&finalized.leaf_id);
     }
 
     /// Convert session entries to model messages (for provider context).
@@ -3020,7 +3035,7 @@ impl Session {
             .iter()
             .filter_map(|entry| {
                 let id = entry.base_id()?;
-                if entry.base().parent_id.as_deref() == entry_id {
+                if entry.base().parent_id.as_deref().eq(&entry_id) {
                     Some(id.clone())
                 } else {
                     None
@@ -3062,7 +3077,7 @@ impl Session {
                 .entries
                 .last()
                 .and_then(|e| e.base_id())
-                .is_some_and(|id| id == entry_id);
+                .is_some_and(|id| id.eq(entry_id));
             if !is_tip {
                 self.is_linear = false;
             }
@@ -3272,21 +3287,21 @@ impl Session {
             let has_kept_entry = (0..path_len).any(|idx| {
                 entry_at(idx)
                     .base_id()
-                    .is_some_and(|id| id == &compaction.first_kept_entry_id)
+                    .is_some_and(|id| id.eq(&compaction.first_kept_entry_id))
             });
 
             let mut keep = false;
             let mut past_compaction = false;
             for idx in 0..path_len {
                 let entry = entry_at(idx);
-                if idx == compaction_idx {
+                if idx.eq(&compaction_idx) {
                     past_compaction = true;
                 }
                 if !keep {
                     if has_kept_entry {
                         if entry
                             .base_id()
-                            .is_some_and(|id| id == &compaction.first_kept_entry_id)
+                            .is_some_and(|id| id.eq(&compaction.first_kept_entry_id))
                         {
                             keep = true;
                         } else {
@@ -3588,12 +3603,8 @@ fn prune_session_index_path(index: &SessionIndex, path: &Path, reason: &'static 
     }
 }
 
-const fn can_reuse_known_entry(
-    known_entry: &SessionPickEntry,
-    disk_ms: i64,
-    disk_size: u64,
-) -> bool {
-    known_entry.last_modified_ms == disk_ms && known_entry.size_bytes == disk_size
+fn can_reuse_known_entry(known_entry: &SessionPickEntry, disk_ms: i64, disk_size: u64) -> bool {
+    known_entry.last_modified_ms.eq(&disk_ms) && known_entry.size_bytes.eq(&disk_size)
 }
 
 struct ScanSessionsResult {
@@ -3888,10 +3899,10 @@ impl SessionHeader {
     }
 
     pub fn validate(&self) -> std::result::Result<(), String> {
-        if self.r#type != "session" {
+        if !self.r#type.eq("session") {
             return Err(format!("type must be `session`, got `{}`", self.r#type));
         }
-        if self.version != Some(SESSION_VERSION) {
+        if !self.version.eq(&Some(SESSION_VERSION)) {
             return Err(format!(
                 "version must be {SESSION_VERSION}, got {}",
                 self.version
@@ -4796,7 +4807,7 @@ fn open_jsonl_blocking(path_buf: PathBuf) -> Result<(Session, SessionOpenDiagnos
             session_dir: None,
             store_kind: SessionStoreKind::Jsonl,
             entry_ids: finalized.entry_ids,
-            is_linear: finalized.is_linear && leaf_id == natural_leaf_id,
+            is_linear: finalized.is_linear && leaf_id.eq(&natural_leaf_id),
             entry_index: finalized.entry_index,
             cached_message_count: finalized.message_count,
             cached_name: finalized.name,
@@ -5155,12 +5166,12 @@ pub fn verify_v2_against_jsonl(
     let frames = store.read_all_entries()?;
     let v2_ids: Vec<String> = frames.iter().map(|f| f.entry_id.clone()).collect();
 
-    let entry_count_match = jsonl_ids.len() == v2_ids.len() && jsonl_ids == v2_ids;
+    let entry_count_match = jsonl_ids.len().eq(&v2_ids.len()) && jsonl_ids.eq(&v2_ids);
 
     // Check hash chain via validate_integrity (which also verifies checksums).
     let index_consistent = store.validate_integrity().is_ok();
 
-    let hash_chain_match = jsonl_chain_hash == store.chain_hash();
+    let hash_chain_match = jsonl_chain_hash.eq(store.chain_hash());
 
     Ok(session_store_v2::MigrationVerification {
         entry_count_match,
@@ -5588,7 +5599,7 @@ fn emit_set_name_deadline_probe(session_id: &str, deadline: Option<asupersync::T
     let probe = set_name_deadline_probe();
     let guard = probe.lock().expect("lock set_name deadline probe");
     if let Some((target_session_id, tx)) = guard.as_ref() {
-        if target_session_id == session_id {
+        if target_session_id.eq(session_id) {
             let _ = tx.send(deadline);
         }
     }
@@ -5606,6 +5617,15 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::{Mutex as StdMutex, OnceLock};
     use std::time::Duration;
+
+    macro_rules! test_fail {
+        ($message:literal $(,)?) => {
+            std::panic::panic_any($message)
+        };
+        ($fmt:literal, $($arg:tt)+) => {
+            std::panic::panic_any(format!($fmt, $($arg)+))
+        };
+    }
 
     fn make_test_message(text: &str) -> SessionMessage {
         SessionMessage::User {
@@ -5911,14 +5931,14 @@ mod tests {
             .first_mut()
             .expect("first tampered entry should exist")
         else {
-            panic!("expected message entry");
+            test_fail!("expected message entry");
         };
         let SessionMessage::User {
             content: UserContent::Text(text),
             ..
         } = &mut message_entry.message
         else {
-            panic!("expected user text message");
+            test_fail!("expected user text message");
         };
         *text = "alpha-tampered".to_string();
 
@@ -5976,7 +5996,11 @@ mod tests {
         let message_id = branch
             .iter()
             .find_map(|entry| {
-                if entry.get("type").and_then(Value::as_str) == Some("message") {
+                if entry
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|entry_type| entry_type.eq("message"))
+                {
                     entry
                         .get("id")
                         .and_then(Value::as_str)
@@ -6146,12 +6170,20 @@ mod tests {
         let branch = run_async(async { handle.get_branch().await });
         let model_changes = branch
             .iter()
-            .filter(|entry| entry.get("type").and_then(Value::as_str) == Some("model_change"))
+            .filter(|entry| {
+                entry
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|entry_type| entry_type.eq("model_change"))
+            })
             .count();
         let thinking_changes = branch
             .iter()
             .filter(|entry| {
-                entry.get("type").and_then(Value::as_str) == Some("thinking_level_change")
+                entry
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|entry_type| entry_type.eq("thinking_level_change"))
             })
             .count();
         assert_eq!(model_changes, 1);
@@ -6180,7 +6212,11 @@ mod tests {
         let model_changes: Vec<_> = branch
             .iter()
             .filter_map(|entry| {
-                if entry.get("type").and_then(Value::as_str) == Some("model_change") {
+                if entry
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|entry_type| entry_type.eq("model_change"))
+                {
                     Some((
                         entry.get("provider").and_then(Value::as_str),
                         entry.get("modelId").and_then(Value::as_str),
@@ -6295,12 +6331,20 @@ mod tests {
         let branch = run_async(async { handle.get_branch().await });
         let model_changes = branch
             .iter()
-            .filter(|entry| entry.get("type").and_then(Value::as_str) == Some("model_change"))
+            .filter(|entry| {
+                entry
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|entry_type| entry_type.eq("model_change"))
+            })
             .count();
         let thinking_changes = branch
             .iter()
             .filter(|entry| {
-                entry.get("type").and_then(Value::as_str) == Some("thinking_level_change")
+                entry
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|entry_type| entry_type.eq("thinking_level_change"))
             })
             .count();
 
@@ -6978,10 +7022,10 @@ mod tests {
             .expect("reopen session");
 
         assert!(loaded.entries.iter().any(|entry| {
-            matches!(entry, SessionEntry::Compaction(compaction) if compaction.summary == "compacted" && compaction.tokens_before == 123)
+            matches!(entry, SessionEntry::Compaction(compaction) if compaction.summary.eq("compacted") && compaction.tokens_before.eq(&123))
         }));
         assert!(loaded.entries.iter().any(|entry| {
-            matches!(entry, SessionEntry::BranchSummary(summary) if summary.summary == "branch summary")
+            matches!(entry, SessionEntry::BranchSummary(summary) if summary.summary.eq("branch summary"))
         }));
 
         let html = loaded.to_html();
@@ -7165,7 +7209,7 @@ mod tests {
         // Verify it converts to model message
         let messages = session.to_messages();
         assert_eq!(messages.len(), 2);
-        assert!(matches!(&messages[1], Message::ToolResult(tr) if tr.tool_call_id == "call_123"));
+        assert!(matches!(&messages[1], Message::ToolResult(tr) if tr.tool_call_id.eq("call_123")));
     }
 
     #[test]
@@ -7188,10 +7232,10 @@ mod tests {
             if let SessionMessage::ToolResult { is_error, .. } = &msg.message {
                 assert!(is_error);
             } else {
-                panic!("Expected SessionMessage::ToolResult, got {:?}", msg.message);
+                test_fail!("Expected SessionMessage::ToolResult, got {:?}", msg.message);
             }
         } else {
-            panic!("Expected SessionEntry::Message");
+            test_fail!("Expected SessionEntry::Message");
         }
     }
 
@@ -7218,13 +7262,13 @@ mod tests {
                 assert_eq!(command, "echo hello");
                 assert_eq!(*exit_code, 0);
             } else {
-                panic!(
+                test_fail!(
                     "Expected SessionMessage::BashExecution, got {:?}",
                     msg.message
                 );
             }
         } else {
-            panic!("Expected SessionEntry::Message");
+            test_fail!("Expected SessionEntry::Message");
         }
 
         // BashExecution converts to User message for model context
@@ -7291,10 +7335,10 @@ mod tests {
                 assert_eq!(custom_type, "extension_state");
                 assert!(!display);
             } else {
-                panic!("Expected SessionMessage::Custom, got {:?}", msg.message);
+                test_fail!("Expected SessionMessage::Custom, got {:?}", msg.message);
             }
         } else {
-            panic!("Expected SessionEntry::Message");
+            test_fail!("Expected SessionEntry::Message");
         }
     }
 
@@ -7314,7 +7358,7 @@ mod tests {
             assert_eq!(custom.data, Some(serde_json::json!(42)));
             assert_eq!(custom.base.parent_id.as_deref(), Some(root_id.as_str()));
         } else {
-            panic!("Expected SessionEntry::Custom, got {:?}", entry);
+            test_fail!("Expected SessionEntry::Custom, got {:?}", entry);
         }
     }
 
@@ -7361,7 +7405,7 @@ mod tests {
             assert_eq!(mc.provider, "openai");
             assert_eq!(mc.model_id, "gpt-4");
         } else {
-            panic!("Expected SessionEntry::ModelChange, got {:?}", entry);
+            test_fail!("Expected SessionEntry::ModelChange, got {:?}", entry);
         }
     }
 
@@ -7379,7 +7423,7 @@ mod tests {
         if let SessionEntry::ThinkingLevelChange(tlc) = entry {
             assert_eq!(tlc.thinking_level, "high");
         } else {
-            panic!(
+            test_fail!(
                 "Expected SessionEntry::ThinkingLevelChange, got {:?}",
                 entry
             );
@@ -7431,7 +7475,7 @@ mod tests {
             assert_eq!(label.target_id, msg_id);
             assert_eq!(label.label.as_deref(), Some("important"));
         } else {
-            panic!("Expected SessionEntry::Label, got {:?}", entry);
+            test_fail!("Expected SessionEntry::Label, got {:?}", entry);
         }
     }
 
@@ -7498,7 +7542,7 @@ mod tests {
                 e,
                 SessionEntry::Message(m) if matches!(
                     &m.message,
-                    SessionMessage::ToolResult { tool_name, .. } if tool_name == "read"
+                    SessionMessage::ToolResult { tool_name, .. } if tool_name.eq("read")
                 )
             )
         });
@@ -7509,7 +7553,7 @@ mod tests {
                 e,
                 SessionEntry::Message(m) if matches!(
                     &m.message,
-                    SessionMessage::BashExecution { command, .. } if command == "ls"
+                    SessionMessage::BashExecution { command, .. } if command.eq("ls")
                 )
             )
         });
@@ -7518,7 +7562,7 @@ mod tests {
         let has_custom = loaded.entries.iter().any(|e| {
             matches!(
                 e,
-                SessionEntry::Custom(c) if c.custom_type == "ext_data"
+                SessionEntry::Custom(c) if c.custom_type.eq("ext_data")
             )
         });
         assert!(has_custom, "custom entry should survive round-trip");
@@ -7831,7 +7875,12 @@ mod tests {
         let siblings = session.sibling_branches();
         assert!(siblings.is_some());
         let (fork_point, branches) = siblings.unwrap();
-        assert!(fork_point.is_none() || fork_point.as_deref() == Some(id_a.as_str()));
+        assert!(
+            fork_point.is_none()
+                || fork_point
+                    .as_deref()
+                    .is_some_and(|fork_point_id| fork_point_id.eq(id_a.as_str()))
+        );
         assert_eq!(branches.len(), 2);
 
         // One should be current, one not
@@ -8330,10 +8379,10 @@ mod tests {
             if let SessionMessage::User { content, .. } = &msg.message {
                 match content {
                     UserContent::Text(t) => assert_eq!(t, "Modified"),
-                    UserContent::Blocks(_) => panic!("Expected UserContent::Text, got Blocks"),
+                    UserContent::Blocks(_) => test_fail!("Expected UserContent::Text, got Blocks"),
                 }
             } else {
-                panic!("Expected SessionMessage::User, got {:?}", msg.message);
+                test_fail!("Expected SessionMessage::User, got {:?}", msg.message);
             }
         }
     }
@@ -8680,11 +8729,12 @@ mod tests {
         let index = SessionIndex::for_sessions_root(temp.path());
         index.index_session(&session).expect("index session");
         let cwd_display = session.header.cwd.clone();
+        let expected_path = path.display().to_string();
         let has_indexed_path = index
             .list_sessions(Some(&cwd_display))
             .expect("list indexed sessions")
             .into_iter()
-            .any(|meta| meta.path == path.display().to_string());
+            .any(|meta| meta.path.eq(&expected_path));
         assert!(
             has_indexed_path,
             "expected indexed session before corruption"
@@ -8704,7 +8754,7 @@ mod tests {
             .list_sessions(Some(&cwd_display))
             .expect("list indexed sessions after cleanup")
             .into_iter()
-            .any(|meta| meta.path == path.display().to_string());
+            .any(|meta| meta.path.eq(&expected_path));
         assert!(
             !still_indexed,
             "corrupt session should be pruned from the recent-session index"
@@ -8727,11 +8777,12 @@ mod tests {
         let index = SessionIndex::for_sessions_root(temp.path());
         index.index_session(&session).expect("index session");
         let cwd_display = session.header.cwd.clone();
+        let expected_path = path.display().to_string();
         let has_indexed_path = index
             .list_sessions(Some(&cwd_display))
             .expect("list indexed sessions")
             .into_iter()
-            .any(|meta| meta.path == path.display().to_string());
+            .any(|meta| meta.path.eq(&expected_path));
         assert!(
             has_indexed_path,
             "expected indexed session before moving file"
@@ -8752,7 +8803,7 @@ mod tests {
             .list_sessions(Some(&cwd_display))
             .expect("list indexed sessions after cleanup")
             .into_iter()
-            .any(|meta| meta.path == path.display().to_string());
+            .any(|meta| meta.path.eq(&expected_path));
         assert!(
             !still_indexed,
             "missing session should be pruned from the recent-session index"
@@ -8775,6 +8826,7 @@ mod tests {
         let index = SessionIndex::for_sessions_root(temp.path());
         index.index_session(&session).expect("index session");
         let cwd_display = session.header.cwd.clone();
+        let expected_path = path.display().to_string();
         let cwd = std::path::Path::new(&cwd_display);
         let project_session_dir = temp.path().join(encode_cwd(cwd));
         let moved_project_dir = temp.path().join("moved-project-dir");
@@ -8794,7 +8846,7 @@ mod tests {
             .list_sessions(Some(&cwd_display))
             .expect("list indexed sessions after cleanup")
             .into_iter()
-            .any(|meta| meta.path == path.display().to_string());
+            .any(|meta| meta.path.eq(&expected_path));
         assert!(
             !still_indexed,
             "missing project dir should prune stale rows from the recent-session index"
@@ -8868,6 +8920,7 @@ mod tests {
 
         let index = SessionIndex::for_sessions_root(temp.path());
         index.index_session(&session).expect("index session");
+        let expected_path = path.display().to_string();
         let cwd_display = std::env::current_dir()
             .expect("current dir")
             .display()
@@ -8891,7 +8944,7 @@ mod tests {
             .list_sessions(Some(&cwd_display))
             .expect("list indexed sessions after cleanup")
             .into_iter()
-            .any(|meta| meta.path == path.display().to_string());
+            .any(|meta| meta.path.eq(&expected_path));
         assert!(
             !still_indexed,
             "unreadable session should be pruned from the recent-session index"
@@ -9170,7 +9223,9 @@ mod tests {
                 if let SessionMessage::User { content, .. } = &msg.message {
                     match content {
                         UserContent::Text(t) => assert_eq!(t, unicode_texts[i]),
-                        UserContent::Blocks(_) => panic!("Expected UserContent::Text, got Blocks"),
+                        UserContent::Blocks(_) => {
+                            test_fail!("Expected UserContent::Text, got Blocks")
+                        }
                     }
                 }
             }
@@ -9402,7 +9457,7 @@ mod tests {
                     return message
                         .content
                         .iter()
-                        .any(|c| matches!(c, ContentBlock::ToolCall(tc) if tc.id == "call_abc"));
+                        .any(|c| matches!(c, ContentBlock::ToolCall(tc) if tc.id.eq("call_abc")));
                 }
             }
             false
@@ -9818,7 +9873,7 @@ mod tests {
 
                 for i in 0..n_entries {
                     let eid = format!("{i:08x}");
-                    let parent = if i == orphan_idx {
+                    let parent = if i.eq(&orphan_idx) {
                         // Point to a nonexistent parent
                         Some("deadbeef".to_string())
                     } else {
@@ -10593,7 +10648,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(
-            entry_texts.iter().any(|text| text == "from appender"),
+            entry_texts.iter().any(|text| text.eq("from appender")),
             "full rewrite should preserve entries appended after this session was opened"
         );
         assert_eq!(loaded.header.provider.as_deref(), Some("new-provider"));
@@ -10969,7 +11024,7 @@ mod tests {
     #[test]
     fn crash_finish_worker_result_propagates_panic_before_cancellation() {
         let handle = thread::spawn(|| -> () {
-            panic!("jsonl worker panic");
+            test_fail!("jsonl worker panic");
         });
 
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
