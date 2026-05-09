@@ -535,6 +535,7 @@ async fn run_loop(
     #[allow(clippy::cast_precision_loss)]
     let interval = Duration::from_secs_f64(1.0 / events_per_sec as f64);
     let start = Instant::now();
+    let deadline = start + duration;
     let telemetry_start_index = manager.runtime_hostcall_telemetry_artifact().entries.len();
     let mut next_event = start;
 
@@ -562,10 +563,13 @@ async fn run_loop(
     let mut reactor_queue_samples = Vec::new();
     push_reactor_queue_sample(manager, Duration::from_secs(0), &mut reactor_queue_samples);
 
-    while start.elapsed() < duration {
+    while Instant::now() < deadline {
         let now = Instant::now();
         if now < next_event {
-            sleep(wall_now(), next_event - now).await;
+            let Some(delay) = next_event_sleep_duration(now, next_event, deadline) else {
+                break;
+            };
+            sleep(wall_now(), delay).await;
             continue;
         }
 
@@ -681,6 +685,17 @@ async fn run_loop(
         events_ok,
         reactor,
     })
+}
+
+fn next_event_sleep_duration(
+    now: Instant,
+    next_event: Instant,
+    deadline: Instant,
+) -> Option<Duration> {
+    if now >= deadline || next_event >= deadline {
+        return None;
+    }
+    next_event.checked_duration_since(now)
 }
 
 async fn dispatch_event_with_harness_timeout(
@@ -1538,6 +1553,26 @@ mod tests {
         assert!(source.contains("syntheticHostcall3"));
         assert!(source.contains("agent_start"));
         assert!(source.contains(r#"pi.events("list_flags", {})"#));
+    }
+
+    #[test]
+    fn event_pacer_does_not_sleep_at_run_deadline() {
+        let start = Instant::now();
+        let deadline = start + Duration::from_secs(4);
+        let before_deadline = start + Duration::from_secs(3);
+
+        assert_eq!(
+            next_event_sleep_duration(start, before_deadline, deadline),
+            Some(Duration::from_secs(3))
+        );
+        assert_eq!(
+            next_event_sleep_duration(before_deadline, deadline, deadline),
+            None
+        );
+        assert_eq!(
+            next_event_sleep_duration(deadline, deadline, deadline),
+            None
+        );
     }
 
     #[test]
