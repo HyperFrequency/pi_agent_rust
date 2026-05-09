@@ -37,6 +37,7 @@ const SWARM_DOCTOR_TEMP_DIR_SCHEMA: &str = "pi.doctor.swarm_temp_dir.v1";
 const SWARM_DOCTOR_BUILD_SLOT_SCHEMA: &str = "pi.doctor.agent_mail_build_slots.v1";
 const SWARM_DOCTOR_CONTACTS_SCHEMA: &str = "pi.doctor.agent_mail_contacts.v1";
 const SWARM_DOCTOR_STALLED_REAPER_SCHEMA: &str = "pi.doctor.stalled_bead_reaper.v1";
+const SWARM_DOCTOR_NEXT_ACTION_SCHEMA: &str = "pi.doctor.communication_purgatory_next_action.v1";
 const SWARM_CARGO_SCRATCH_ROOT: &str = "/data/tmp/pi_agent_rust_cargo";
 const SWARM_BUILD_SLOT_SOON_EXPIRING_MINUTES: i64 = 30;
 const MIB_BYTES: u64 = 1024 * 1024;
@@ -1096,6 +1097,7 @@ fn check_swarm(cwd: &Path, findings: &mut Vec<Finding>) {
     check_swarm_br_status(cwd, findings);
     check_swarm_agent_mail(cwd, findings);
     check_swarm_stalled_bead_reaper(cwd, findings);
+    check_swarm_next_action(cwd, findings);
     check_swarm_git(cwd, findings);
     check_swarm_rch(findings);
     check_swarm_temp_dirs(findings);
@@ -1132,6 +1134,8 @@ struct BeadsIssueRecord {
     assignee: Option<String>,
     #[serde(default)]
     owner: Option<String>,
+    #[serde(default, alias = "type")]
+    issue_type: Option<String>,
     status: String,
     updated_at: Option<String>,
 }
@@ -2014,6 +2018,574 @@ fn collect_agent_mail_activity_rows(
             }
         }
         _ => {}
+    }
+}
+
+fn check_swarm_next_action(cwd: &Path, findings: &mut Vec<Finding>) {
+    let mut snapshot = SwarmNextActionSnapshot {
+        agent_name: first_non_empty_env(&["AGENT_MAIL_AGENT", "AGENT_NAME"]),
+        ..SwarmNextActionSnapshot::default()
+    };
+
+    apply_next_action_beads_snapshot(cwd, &mut snapshot);
+    apply_next_action_br_ready_snapshot(cwd, &mut snapshot);
+    apply_next_action_bv_snapshot(cwd, &mut snapshot);
+    apply_next_action_agent_mail_snapshot(cwd, &mut snapshot);
+
+    findings.push(classify_swarm_next_action(&snapshot));
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct SwarmNextActionSnapshot {
+    agent_name: Option<String>,
+    mail_unread: u64,
+    mail_urgent: u64,
+    mail_ack_required: u64,
+    reservations_active: usize,
+    reservations_own_active: usize,
+    beads_open: usize,
+    beads_in_progress: usize,
+    beads_parse_errors: usize,
+    stale_in_progress: usize,
+    current_in_progress: usize,
+    open_epic_count: usize,
+    ready_ids: Vec<String>,
+    bv_highest_impact: Option<String>,
+    bv_recommendation_count: usize,
+    source_errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SwarmNextAction {
+    AckMail,
+    ImplementCurrent,
+    UnblockStalledBead,
+    ClaimReadyBead,
+    CreateFollowupBeads,
+    NoWork,
+}
+
+impl SwarmNextAction {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::AckMail => "ack_mail",
+            Self::ImplementCurrent => "implement_current",
+            Self::UnblockStalledBead => "unblock_stalled_bead",
+            Self::ClaimReadyBead => "claim_ready_bead",
+            Self::CreateFollowupBeads => "create_followup_beads",
+            Self::NoWork => "no_work",
+        }
+    }
+
+    const fn remediation(self) -> &'static str {
+        match self {
+            Self::AckMail => {
+                "Read and acknowledge urgent or ack-required Agent Mail before taking more work"
+            }
+            Self::ImplementCurrent => {
+                "Continue the current claimed work; keep reservations fresh and avoid unrelated coordination churn"
+            }
+            Self::UnblockStalledBead => {
+                "Inspect stalled in-progress beads and contact owners before reopening or reclaiming any work"
+            }
+            Self::ClaimReadyBead => {
+                "Claim the highest-impact ready bead, reserve the edit surface, and announce the start in Agent Mail"
+            }
+            Self::CreateFollowupBeads => {
+                "Break the open roadmap or epic into concrete ready beads before waiting for more coordination"
+            }
+            Self::NoWork => {
+                "No actionable swarm work is visible; rerun triage after syncing Beads and Agent Mail"
+            }
+        }
+    }
+
+    const fn severity(self) -> Severity {
+        match self {
+            Self::AckMail | Self::UnblockStalledBead | Self::CreateFollowupBeads => Severity::Warn,
+            Self::NoWork => Severity::Info,
+            Self::ImplementCurrent | Self::ClaimReadyBead => Severity::Pass,
+        }
+    }
+}
+
+fn classify_swarm_next_action(snapshot: &SwarmNextActionSnapshot) -> Finding {
+    let (next_action, reason) = select_swarm_next_action(snapshot);
+    let mut severity = next_action.severity();
+    if !snapshot.source_errors.is_empty() && matches!(severity, Severity::Pass) {
+        severity = Severity::Warn;
+    }
+
+    let detail = format!(
+        "next_action={}, unread={}, urgent={}, ack_required={}, own_reservations={}, ready={}, open={}, in_progress={}, stale_in_progress={}, current_in_progress={}, open_epics={}, bv_highest_impact={}",
+        next_action.label(),
+        snapshot.mail_unread,
+        snapshot.mail_urgent,
+        snapshot.mail_ack_required,
+        snapshot.reservations_own_active,
+        snapshot.ready_ids.len(),
+        snapshot.beads_open,
+        snapshot.beads_in_progress,
+        snapshot.stale_in_progress,
+        snapshot.current_in_progress,
+        snapshot.open_epic_count,
+        snapshot.bv_highest_impact.as_deref().unwrap_or("none")
+    );
+    let data = serde_json::json!({
+        "schema": SWARM_DOCTOR_NEXT_ACTION_SCHEMA,
+        "next_action": next_action.label(),
+        "reason": reason,
+        "agent_name": snapshot.agent_name,
+        "mail": {
+            "unread": snapshot.mail_unread,
+            "urgent": snapshot.mail_urgent,
+            "ack_required": snapshot.mail_ack_required
+        },
+        "reservations": {
+            "active_count": snapshot.reservations_active,
+            "own_active_count": snapshot.reservations_own_active
+        },
+        "beads": {
+            "open_count": snapshot.beads_open,
+            "in_progress_count": snapshot.beads_in_progress,
+            "parse_errors": snapshot.beads_parse_errors,
+            "ready_count": snapshot.ready_ids.len(),
+            "ready_ids": snapshot.ready_ids,
+            "stale_in_progress_count": snapshot.stale_in_progress,
+            "current_in_progress_count": snapshot.current_in_progress,
+            "open_epic_count": snapshot.open_epic_count
+        },
+        "bv": {
+            "highest_impact": snapshot.bv_highest_impact,
+            "recommendation_count": snapshot.bv_recommendation_count
+        },
+        "source_errors": snapshot.source_errors
+    });
+
+    finding_with_severity(
+        severity,
+        format!(
+            "Communication-purgatory next action: {}",
+            next_action.label()
+        ),
+    )
+    .with_detail(detail)
+    .with_remediation(next_action.remediation())
+    .with_data(data)
+}
+
+fn select_swarm_next_action(snapshot: &SwarmNextActionSnapshot) -> (SwarmNextAction, String) {
+    if snapshot.mail_urgent > 0 || snapshot.mail_ack_required > 0 {
+        return (
+            SwarmNextAction::AckMail,
+            "Agent Mail has urgent or ack-required obligations".to_string(),
+        );
+    }
+    if snapshot.current_in_progress > 0 || snapshot.reservations_own_active > 0 {
+        return (
+            SwarmNextAction::ImplementCurrent,
+            "Current agent already owns in-progress work or active file reservations".to_string(),
+        );
+    }
+    if snapshot.stale_in_progress > 0 {
+        return (
+            SwarmNextAction::UnblockStalledBead,
+            "One or more in-progress beads exceed the stale threshold".to_string(),
+        );
+    }
+    if let Some(first_ready) = snapshot.ready_ids.first() {
+        return (
+            SwarmNextAction::ClaimReadyBead,
+            format!("Ready Beads work is available, starting with {first_ready}"),
+        );
+    }
+    if snapshot.open_epic_count > 0 {
+        return (
+            SwarmNextAction::CreateFollowupBeads,
+            "No ready beads are visible, but open epics or roadmaps need decomposition".to_string(),
+        );
+    }
+    (
+        SwarmNextAction::NoWork,
+        "No mail obligations, ready beads, current work, stale work, or open epics are visible"
+            .to_string(),
+    )
+}
+
+fn finding_with_severity(severity: Severity, title: impl Into<String>) -> Finding {
+    match severity {
+        Severity::Pass => Finding::pass(CheckCategory::Swarm, title),
+        Severity::Info => Finding::info(CheckCategory::Swarm, title),
+        Severity::Warn => Finding::warn(CheckCategory::Swarm, title),
+        Severity::Fail => Finding::fail(CheckCategory::Swarm, title),
+    }
+}
+
+fn apply_next_action_beads_snapshot(cwd: &Path, snapshot: &mut SwarmNextActionSnapshot) {
+    let ledger_path = cwd.join(".beads/issues.jsonl");
+    match std::fs::read_to_string(&ledger_path) {
+        Ok(content) => {
+            let summary =
+                summarize_beads_ledger(&content, Utc::now(), SWARM_STALE_IN_PROGRESS_HOURS);
+            snapshot.beads_open = summary.open;
+            snapshot.beads_in_progress = summary.in_progress;
+            snapshot.beads_parse_errors = summary.parse_errors;
+            snapshot.stale_in_progress = summary.stale_in_progress.len();
+            apply_next_action_issue_counts(&content, snapshot);
+        }
+        Err(err) => snapshot.source_errors.push(format!(
+            "beads ledger unavailable at {}: {err}",
+            ledger_path.display()
+        )),
+    }
+}
+
+fn apply_next_action_issue_counts(content: &str, snapshot: &mut SwarmNextActionSnapshot) {
+    for line in content.lines().filter(|line| !line.trim().is_empty()) {
+        let Ok(issue) = serde_json::from_str::<BeadsIssueRecord>(line) else {
+            continue;
+        };
+        if issue.status.eq("open") && issue_is_epic(&issue) {
+            snapshot.open_epic_count += 1;
+        }
+        if issue.status.eq("in_progress")
+            && snapshot
+                .agent_name
+                .as_deref()
+                .is_some_and(|agent| issue_assignee(&issue) == Some(agent))
+        {
+            snapshot.current_in_progress += 1;
+        }
+    }
+}
+
+fn issue_is_epic(issue: &BeadsIssueRecord) -> bool {
+    issue
+        .issue_type
+        .as_deref()
+        .is_some_and(|issue_type| issue_type.eq_ignore_ascii_case("epic"))
+}
+
+fn apply_next_action_br_ready_snapshot(cwd: &Path, snapshot: &mut SwarmNextActionSnapshot) {
+    if which_tool("br").is_none() {
+        snapshot
+            .source_errors
+            .push("br CLI not found for ready-work probe".to_string());
+        return;
+    }
+    match run_probe_json(
+        SwarmProbeCommand::Br,
+        &["ready", "--json"],
+        Some(cwd),
+        "br ready",
+    ) {
+        Ok(value) => {
+            snapshot.ready_ids = ready_issue_ids(&value)
+                .into_iter()
+                .take(SWARM_DETAIL_LIMIT)
+                .collect();
+        }
+        Err(err) => snapshot.source_errors.push(err),
+    }
+}
+
+fn ready_issue_ids(value: &serde_json::Value) -> Vec<String> {
+    let Some(values) = value.as_array().or_else(|| {
+        value
+            .get("issues")
+            .or_else(|| value.get("items"))
+            .and_then(serde_json::Value::as_array)
+    }) else {
+        return Vec::new();
+    };
+
+    values
+        .iter()
+        .filter_map(|item| item.get("id").and_then(serde_json::Value::as_str))
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn apply_next_action_bv_snapshot(cwd: &Path, snapshot: &mut SwarmNextActionSnapshot) {
+    if which_tool("bv").is_none() {
+        snapshot
+            .source_errors
+            .push("bv CLI not found for graph recommendation probe".to_string());
+        return;
+    }
+    match run_probe_json(
+        SwarmProbeCommand::Bv,
+        &["--robot-plan"],
+        Some(cwd),
+        "bv --robot-plan",
+    ) {
+        Ok(value) => {
+            snapshot.bv_highest_impact = value
+                .pointer("/plan/summary/highest_impact")
+                .and_then(serde_json::Value::as_str)
+                .map(ToString::to_string);
+            snapshot.bv_recommendation_count = bv_plan_item_count(&value);
+        }
+        Err(err) => snapshot.source_errors.push(err),
+    }
+}
+
+fn bv_plan_item_count(value: &serde_json::Value) -> usize {
+    value
+        .pointer("/plan/tracks")
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, |tracks| {
+            tracks
+                .iter()
+                .map(|track| {
+                    track
+                        .get("items")
+                        .and_then(serde_json::Value::as_array)
+                        .map_or(0, Vec::len)
+                })
+                .sum()
+        })
+}
+
+fn apply_next_action_agent_mail_snapshot(cwd: &Path, snapshot: &mut SwarmNextActionSnapshot) {
+    let Some(agent) = snapshot.agent_name.clone() else {
+        snapshot.source_errors.push(
+            "AGENT_MAIL_AGENT and AGENT_NAME are unset for Agent Mail next-action probe"
+                .to_string(),
+        );
+        return;
+    };
+    if which_tool("am").is_none() {
+        snapshot
+            .source_errors
+            .push("Agent Mail CLI not found for next-action probe".to_string());
+        return;
+    }
+
+    let project = cwd.display().to_string();
+    apply_next_action_agent_mail_status(cwd, &project, &agent, snapshot);
+    apply_next_action_agent_mail_inbox(cwd, &project, &agent, snapshot);
+    apply_next_action_agent_mail_reservations(cwd, &project, &agent, snapshot);
+}
+
+fn apply_next_action_agent_mail_status(
+    cwd: &Path,
+    project: &str,
+    agent: &str,
+    snapshot: &mut SwarmNextActionSnapshot,
+) {
+    let args = [
+        "robot",
+        "status",
+        "--format",
+        "json",
+        "--project",
+        project,
+        "--agent",
+        agent,
+    ];
+    match run_probe_json(SwarmProbeCommand::Am, &args, Some(cwd), "am robot status") {
+        Ok(value) => apply_mail_obligation_counts(&value, snapshot),
+        Err(err) => snapshot.source_errors.push(err),
+    }
+}
+
+fn apply_next_action_agent_mail_inbox(
+    cwd: &Path,
+    project: &str,
+    agent: &str,
+    snapshot: &mut SwarmNextActionSnapshot,
+) {
+    let args = [
+        "robot",
+        "inbox",
+        "--format",
+        "json",
+        "--project",
+        project,
+        "--agent",
+        agent,
+        "--unread",
+        "--limit",
+        "20",
+    ];
+    match run_probe_json(SwarmProbeCommand::Am, &args, Some(cwd), "am robot inbox") {
+        Ok(value) => apply_mail_obligation_counts(&value, snapshot),
+        Err(err) => snapshot.source_errors.push(err),
+    }
+}
+
+fn apply_next_action_agent_mail_reservations(
+    cwd: &Path,
+    project: &str,
+    agent: &str,
+    snapshot: &mut SwarmNextActionSnapshot,
+) {
+    let args = [
+        "robot",
+        "reservations",
+        "--format",
+        "json",
+        "--project",
+        project,
+        "--all",
+    ];
+    match run_probe_json(
+        SwarmProbeCommand::Am,
+        &args,
+        Some(cwd),
+        "am robot reservations",
+    ) {
+        Ok(value) => {
+            let counts = agent_mail_reservation_counts(&value, agent);
+            snapshot.reservations_active = counts.active;
+            snapshot.reservations_own_active = counts.own_active;
+        }
+        Err(err) => snapshot.source_errors.push(err),
+    }
+}
+
+fn apply_mail_obligation_counts(value: &serde_json::Value, snapshot: &mut SwarmNextActionSnapshot) {
+    snapshot.mail_unread = snapshot
+        .mail_unread
+        .max(json_number_by_key(value, "unread").unwrap_or(0));
+    snapshot.mail_urgent = snapshot
+        .mail_urgent
+        .max(json_number_by_key(value, "urgent").unwrap_or(0));
+    snapshot.mail_ack_required = snapshot
+        .mail_ack_required
+        .max(json_number_by_key(value, "ack_required").unwrap_or(0));
+    let message_counts = count_mail_message_obligations(value);
+    snapshot.mail_urgent = snapshot.mail_urgent.max(message_counts.urgent);
+    snapshot.mail_ack_required = snapshot.mail_ack_required.max(message_counts.ack_required);
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct MailMessageObligationCounts {
+    urgent: u64,
+    ack_required: u64,
+}
+
+fn count_mail_message_obligations(value: &serde_json::Value) -> MailMessageObligationCounts {
+    let mut counts = MailMessageObligationCounts::default();
+    count_mail_message_obligations_inner(value, &mut counts);
+    counts
+}
+
+fn count_mail_message_obligations_inner(
+    value: &serde_json::Value,
+    counts: &mut MailMessageObligationCounts,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if map.contains_key("subject")
+                || map.contains_key("message_id")
+                || map.contains_key("id")
+            {
+                if map
+                    .get("ack_required")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    counts.ack_required += 1;
+                }
+                let importance = map
+                    .get("importance")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                if matches!(importance, "urgent" | "high") {
+                    counts.urgent += 1;
+                }
+            }
+            for child in map.values() {
+                count_mail_message_obligations_inner(child, counts);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                count_mail_message_obligations_inner(child, counts);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct AgentMailReservationNextActionCounts {
+    active: usize,
+    own_active: usize,
+}
+
+fn agent_mail_reservation_counts(
+    value: &serde_json::Value,
+    agent: &str,
+) -> AgentMailReservationNextActionCounts {
+    let mut counts = AgentMailReservationNextActionCounts::default();
+    count_agent_mail_reservation_rows(value, agent, &mut counts);
+    counts
+}
+
+fn count_agent_mail_reservation_rows(
+    value: &serde_json::Value,
+    agent: &str,
+    counts: &mut AgentMailReservationNextActionCounts,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if map.contains_key("path") || map.contains_key("path_pattern") {
+                let released = map
+                    .get("released_ts")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some()
+                    || map
+                        .get("status")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|status| status.eq_ignore_ascii_case("released"));
+                if !released {
+                    counts.active += 1;
+                    let holder = map
+                        .get("agent")
+                        .or_else(|| map.get("holder"))
+                        .or_else(|| map.get("agent_name"))
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default();
+                    if holder.eq(agent) {
+                        counts.own_active += 1;
+                    }
+                }
+                return;
+            }
+            for child in map.values() {
+                count_agent_mail_reservation_rows(child, agent, counts);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                count_agent_mail_reservation_rows(child, agent, counts);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn run_probe_json(
+    command: SwarmProbeCommand,
+    args: &[&str],
+    cwd: Option<&Path>,
+    label: &str,
+) -> std::result::Result<serde_json::Value, String> {
+    match run_tool_with_timeout(command, args, cwd, SWARM_PROBE_TIMEOUT) {
+        Ok(outcome) if outcome.timed_out => Err(format!(
+            "{label} timed out after {}s",
+            SWARM_PROBE_TIMEOUT.as_secs()
+        )),
+        Ok(outcome) if !outcome.success => Err(format!(
+            "{label} failed: {}",
+            command_failure_detail(&outcome)
+        )),
+        Ok(outcome) => serde_json::from_str::<serde_json::Value>(&outcome.stdout)
+            .map_err(|err| format!("{label} returned non-JSON output: {err}")),
+        Err(err) => Err(format!("{label} failed to start: {err}")),
     }
 }
 
@@ -3332,6 +3904,7 @@ struct CommandOutcome {
 enum SwarmProbeCommand {
     Am,
     Br,
+    Bv,
     Df,
     Git,
     Rch,
@@ -3346,6 +3919,7 @@ fn run_tool_with_timeout(
     let mut command = match tool {
         SwarmProbeCommand::Am => Command::new("am"),
         SwarmProbeCommand::Br => Command::new("br"),
+        SwarmProbeCommand::Bv => Command::new("bv"),
         SwarmProbeCommand::Df => Command::new("df"),
         SwarmProbeCommand::Git => Command::new("git"),
         SwarmProbeCommand::Rch => Command::new("rch"),
@@ -4040,6 +4614,117 @@ not-json
             data["suggestions"][0]["notification_draft"]["to"][0],
             serde_json::json!("OldAgent")
         );
+    }
+
+    #[test]
+    fn swarm_next_action_prioritizes_ack_required_mail() {
+        let snapshot = SwarmNextActionSnapshot {
+            mail_unread: 2,
+            mail_ack_required: 1,
+            ready_ids: vec!["bd-ready".to_string()],
+            ..SwarmNextActionSnapshot::default()
+        };
+
+        let finding = classify_swarm_next_action(&snapshot);
+
+        assert_eq!(finding.severity, Severity::Warn);
+        let data = finding_data(&finding);
+        assert_eq!(data["schema"], SWARM_DOCTOR_NEXT_ACTION_SCHEMA);
+        assert_eq!(data["next_action"], serde_json::json!("ack_mail"));
+        assert_eq!(data["mail"]["ack_required"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn swarm_next_action_keeps_current_work_moving() {
+        let snapshot = SwarmNextActionSnapshot {
+            agent_name: Some("SunnyBeacon".to_string()),
+            reservations_active: 1,
+            reservations_own_active: 1,
+            current_in_progress: 1,
+            ready_ids: vec!["bd-ready".to_string()],
+            ..SwarmNextActionSnapshot::default()
+        };
+
+        let finding = classify_swarm_next_action(&snapshot);
+
+        assert_eq!(finding.severity, Severity::Pass);
+        let data = finding_data(&finding);
+        assert_eq!(data["next_action"], serde_json::json!("implement_current"));
+        assert_eq!(
+            data["reservations"]["own_active_count"],
+            serde_json::json!(1)
+        );
+    }
+
+    #[test]
+    fn swarm_next_action_reports_stale_bead_unblock() {
+        let snapshot = SwarmNextActionSnapshot {
+            stale_in_progress: 1,
+            beads_in_progress: 1,
+            ready_ids: vec!["bd-ready".to_string()],
+            ..SwarmNextActionSnapshot::default()
+        };
+
+        let finding = classify_swarm_next_action(&snapshot);
+
+        assert_eq!(finding.severity, Severity::Warn);
+        let data = finding_data(&finding);
+        assert_eq!(
+            data["next_action"],
+            serde_json::json!("unblock_stalled_bead")
+        );
+        assert_eq!(
+            data["beads"]["stale_in_progress_count"],
+            serde_json::json!(1)
+        );
+    }
+
+    #[test]
+    fn swarm_next_action_claims_ready_work() {
+        let snapshot = SwarmNextActionSnapshot {
+            ready_ids: vec!["bd-ready".to_string()],
+            bv_highest_impact: Some("bd-ready".to_string()),
+            bv_recommendation_count: 1,
+            ..SwarmNextActionSnapshot::default()
+        };
+
+        let finding = classify_swarm_next_action(&snapshot);
+
+        assert_eq!(finding.severity, Severity::Pass);
+        let data = finding_data(&finding);
+        assert_eq!(data["next_action"], serde_json::json!("claim_ready_bead"));
+        assert_eq!(data["beads"]["ready_ids"][0], serde_json::json!("bd-ready"));
+    }
+
+    #[test]
+    fn swarm_next_action_decomposes_open_epic_when_ready_queue_empty() {
+        let snapshot = SwarmNextActionSnapshot {
+            beads_open: 1,
+            open_epic_count: 1,
+            ..SwarmNextActionSnapshot::default()
+        };
+
+        let finding = classify_swarm_next_action(&snapshot);
+
+        assert_eq!(finding.severity, Severity::Warn);
+        let data = finding_data(&finding);
+        assert_eq!(
+            data["next_action"],
+            serde_json::json!("create_followup_beads")
+        );
+        assert_eq!(data["beads"]["ready_count"], serde_json::json!(0));
+    }
+
+    #[test]
+    fn swarm_next_action_reports_no_work_when_everything_is_empty() {
+        let snapshot = SwarmNextActionSnapshot::default();
+
+        let finding = classify_swarm_next_action(&snapshot);
+
+        assert_eq!(finding.severity, Severity::Info);
+        let data = finding_data(&finding);
+        assert_eq!(data["next_action"], serde_json::json!("no_work"));
+        assert_eq!(data["source_errors"].as_array().unwrap().len(), 0);
     }
 
     #[test]
