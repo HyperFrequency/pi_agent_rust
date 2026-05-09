@@ -37,9 +37,14 @@
     "evidence_readiness.overall_status",
     "git_state.dirty",
     "activity_digest.evidence_pointers",
+    "smoke_harness.artifact_manifest",
     "smoke_harness.scenario_statuses",
     "redaction_summary.redacted_count",
     "operator_next_actions"
+  ],
+  "required_source_status_fields": [
+    "size_bytes",
+    "sha256"
   ],
   "required_redacted_fields": [
     "doctor_swarm.findings[0].detail"
@@ -82,6 +87,13 @@
       "description": "Runpack summaries preserve actionable paths for doctor, Beads, Agent Mail, RCH admission, evidence readiness, git state, activity digest, smoke harness, redaction, and next actions.",
       "validated_by": [
         "required_summary_paths"
+      ]
+    },
+    {
+      "id": "RUNPACK-MUST-004A",
+      "description": "Runpack source statuses carry deterministic file size and SHA-256 fingerprints for every provided source artifact.",
+      "validated_by": [
+        "required_source_status_fields"
       ]
     },
     {

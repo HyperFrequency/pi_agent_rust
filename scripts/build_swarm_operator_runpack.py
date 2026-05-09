@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import difflib
+import hashlib
 import json
 import os
 import re
@@ -63,6 +64,8 @@ class SourcePayload:
     schema: str | None
     payload: Any | None
     issue: str | None = None
+    size_bytes: int | None = None
+    sha256: str | None = None
     redacted_count: int = 0
     redacted_fields: tuple[str, ...] = ()
 
@@ -73,6 +76,8 @@ class SourcePayload:
             "status": self.status,
             "schema": self.schema,
             "issue": self.issue,
+            "size_bytes": self.size_bytes,
+            "sha256": self.sha256,
         }
 
 
@@ -154,6 +159,11 @@ def json_dumps(payload: Any, *, pretty: bool = False) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
+def file_fingerprint(path: Path) -> tuple[int, str]:
+    data = path.read_bytes()
+    return len(data), hashlib.sha256(data).hexdigest()
+
+
 def json_schema(value: Any) -> str | None:
     if isinstance(value, dict):
         schema = value.get("schema")
@@ -172,6 +182,7 @@ def load_json_source(
         return SourcePayload(source_id, None, "not_provided", None, None)
     if not path.exists():
         raise RunpackError(f"{source_id} source path does not exist: {path}")
+    size_bytes, sha256 = file_fingerprint(path)
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
@@ -188,6 +199,8 @@ def load_json_source(
         "ok",
         schema,
         redacted,
+        size_bytes=size_bytes,
+        sha256=sha256,
         redacted_count=stats.redacted_count,
         redacted_fields=tuple(sorted(stats.fields or [])),
     )
@@ -198,6 +211,7 @@ def load_cargo_admission(path: Path | None) -> SourcePayload:
         return SourcePayload("cargo_admission", None, "not_provided", None, None)
     if not path.exists():
         raise RunpackError(f"cargo_admission source path does not exist: {path}")
+    size_bytes, sha256 = file_fingerprint(path)
     text = path.read_text(encoding="utf-8")
     try:
         payload = json.loads(text)
@@ -211,6 +225,8 @@ def load_cargo_admission(path: Path | None) -> SourcePayload:
             "ok",
             json_schema(redacted),
             redacted,
+            size_bytes=size_bytes,
+            sha256=sha256,
             redacted_count=stats.redacted_count,
             redacted_fields=tuple(sorted(stats.fields or [])),
         )
@@ -230,6 +246,8 @@ def load_cargo_admission(path: Path | None) -> SourcePayload:
                 "ok",
                 json_schema(redacted),
                 redacted,
+                size_bytes=size_bytes,
+                sha256=sha256,
                 redacted_count=stats.redacted_count,
                 redacted_fields=tuple(sorted(stats.fields or [])),
             )
@@ -241,6 +259,7 @@ def load_git_status(path: Path | None) -> SourcePayload:
         return SourcePayload("git_status", None, "not_provided", None, None)
     if not path.exists():
         raise RunpackError(f"git_status source path does not exist: {path}")
+    size_bytes, sha256 = file_fingerprint(path)
     lines = [line.rstrip("\n") for line in path.read_text(encoding="utf-8").splitlines()]
     return SourcePayload(
         "git_status",
@@ -248,6 +267,8 @@ def load_git_status(path: Path | None) -> SourcePayload:
         "ok",
         None,
         {"dirty": bool(lines), "porcelain_lines": lines},
+        size_bytes=size_bytes,
+        sha256=sha256,
     )
 
 
@@ -418,6 +439,7 @@ def summarize_smoke_harness(source: SourcePayload, max_items: int) -> dict[str, 
         "failed_scenarios": bounded(payload.get("failed_scenarios") or [], max_items),
         "reservation_count": len(payload.get("reservation_ids") or []),
         "artifact_paths": payload.get("artifacts"),
+        "artifact_manifest": bounded(payload.get("artifact_manifest") or [], max_items),
     }
 
 
@@ -641,6 +663,12 @@ def assert_runpack_contract(runpack: dict[str, Any]) -> None:
     assert source_ids == set(contract.get("required_source_ids", []))
     for path in contract.get("required_summary_paths", []):
         get_dotted(runpack, path)
+    for field in contract.get("required_source_status_fields", []):
+        for source in runpack.get("source_statuses", []):
+            if isinstance(source, dict) and source.get("status") == "ok":
+                assert source.get(field) not in {None, ""}, (
+                    f"source {source.get('id')} missing required status field {field}"
+                )
     redaction = runpack.get("redaction_summary")
     assert isinstance(redaction, dict)
     assert redaction.get("redacted_count", 0) >= contract.get("minimum_redacted_count", 0)
@@ -656,7 +684,12 @@ def assert_runpack_contract(runpack: dict[str, Any]) -> None:
 def canonicalize_for_golden(value: Any, workspace: Path) -> Any:
     workspace_text = str(workspace)
     if isinstance(value, dict):
-        return {key: canonicalize_for_golden(item, workspace) for key, item in value.items()}
+        return {
+            key: "[SHA256]"
+            if key == "sha256" and isinstance(item, str)
+            else canonicalize_for_golden(item, workspace)
+            for key, item in value.items()
+        }
     if isinstance(value, list):
         return [canonicalize_for_golden(item, workspace) for item in value]
     if isinstance(value, str):
@@ -746,6 +779,14 @@ def run_self_test() -> int:
             "failed_scenarios": [],
             "scenarios": {"reservation_conflict": {"status": "pass"}},
             "artifacts": {"summary_json": str(workspace / "smoke.json")},
+            "artifact_manifest": [
+                {
+                    "id": "events_jsonl",
+                    "path": str(workspace / "events.jsonl"),
+                    "size_bytes": 128,
+                    "sha256": "a" * 64,
+                }
+            ],
         },
     )
     activity_path = write_json(
@@ -821,6 +862,10 @@ def run_self_test() -> int:
         assert runpack["beads"]["stale"][0]["id"] == "bd-stale"
         assert runpack["activity_digest"]["saturated"] is True
         assert runpack["git_state"]["dirty"] is True
+        assert runpack["smoke_harness"]["artifact_manifest"][0]["sha256"] == "a" * 64
+        for source in runpack["source_statuses"]:
+            assert source["size_bytes"] is not None
+            assert len(source["sha256"]) == 64
         assert runpack["redaction_summary"]["redacted_count"] >= 1
         assert args.out_json.exists() and args.out_md.exists()
         assert_runpack_contract(runpack)

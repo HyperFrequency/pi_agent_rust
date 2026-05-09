@@ -166,6 +166,14 @@
   },
   "schema": "pi.swarm.operator_runpack.v1",
   "smoke_harness": {
+    "artifact_manifest": [
+      {
+        "id": "events_jsonl",
+        "path": "[WORKSPACE]/events.jsonl",
+        "sha256": "[SHA256]",
+        "size_bytes": 128
+      }
+    ],
     "artifact_paths": {
       "summary_json": "[WORKSPACE]/smoke.json"
     },
@@ -184,6 +192,8 @@
       "issue": null,
       "path": "[WORKSPACE]/doctor.json",
       "schema": null,
+      "sha256": "[SHA256]",
+      "size_bytes": 525,
       "status": "ok"
     },
     {
@@ -191,6 +201,8 @@
       "issue": null,
       "path": "[WORKSPACE]/claim.json",
       "schema": "pi.swarm.claim_readiness_report.v1",
+      "sha256": "[SHA256]",
+      "size_bytes": 373,
       "status": "ok"
     },
     {
@@ -198,6 +210,8 @@
       "issue": null,
       "path": "[WORKSPACE]/smoke.json",
       "schema": "pi.swarm.smoke_harness.v1",
+      "sha256": "[SHA256]",
+      "size_bytes": 572,
       "status": "ok"
     },
     {
@@ -205,6 +219,8 @@
       "issue": null,
       "path": "[WORKSPACE]/activity.json",
       "schema": "pi.swarm.activity_digest.v1",
+      "sha256": "[SHA256]",
+      "size_bytes": 368,
       "status": "ok"
     },
     {
@@ -212,6 +228,8 @@
       "issue": null,
       "path": "[WORKSPACE]/cargo.json",
       "schema": "pi.cargo_headroom.admission.v1",
+      "sha256": "[SHA256]",
+      "size_bytes": 346,
       "status": "ok"
     },
     {
@@ -219,6 +237,8 @@
       "issue": null,
       "path": "[WORKSPACE]/beads.json",
       "schema": null,
+      "sha256": "[SHA256]",
+      "size_bytes": 340,
       "status": "ok"
     },
     {
@@ -226,6 +246,8 @@
       "issue": null,
       "path": "[WORKSPACE]/git-status.txt",
       "schema": null,
+      "sha256": "[SHA256]",
+      "size_bytes": 40,
       "status": "ok"
     }
   ],

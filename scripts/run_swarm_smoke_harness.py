@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -144,6 +145,16 @@ def redact_json(value: Any, field: str = "value") -> tuple[Any, RedactionStats]:
 
 def json_dumps(payload: Any) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def artifact_manifest_entry(artifact_id: str, path: Path) -> dict[str, Any]:
+    data = path.read_bytes()
+    return {
+        "id": artifact_id,
+        "path": str(path),
+        "size_bytes": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+    }
 
 
 def parse_json_line(text: str) -> dict[str, Any]:
@@ -708,6 +719,7 @@ class SwarmSmokeHarness:
             for event in self.event_log.events:
                 handle.write(json_dumps(event))
                 handle.write("\n")
+        artifact_manifest = [artifact_manifest_entry("events_jsonl", events_path)]
         failed_scenarios = [
             name for name, scenario in self.scenarios.items() if scenario.get("status") != "pass"
         ]
@@ -722,6 +734,7 @@ class SwarmSmokeHarness:
                 "events_jsonl": str(events_path),
                 "summary_json": str(summary_path),
             },
+            "artifact_manifest": artifact_manifest,
             "agent_names": self.agent_names,
             "bead_ids": self.bead_ids,
             "reservation_ids": self.reservation_ids,
@@ -790,6 +803,12 @@ def run_self_test(args: argparse.Namespace) -> int:
         )
         for artifact_path in summary["artifacts"].values():
             assert_condition(Path(artifact_path).exists(), f"missing artifact: {artifact_path}")
+        manifest = summary.get("artifact_manifest")
+        assert_condition(isinstance(manifest, list) and manifest, "artifact manifest expected")
+        for entry in manifest:
+            assert_condition(Path(entry["path"]).exists(), f"missing manifest artifact: {entry}")
+            assert_condition(entry["size_bytes"] > 0, f"manifest artifact should be non-empty: {entry}")
+            assert_condition(len(entry["sha256"]) == 64, f"manifest artifact should carry sha256: {entry}")
         artifact_dir = Path(summary["artifacts"]["summary_json"]).parent
         overwrite_probe = SwarmSmokeHarness(
             HarnessConfig(
