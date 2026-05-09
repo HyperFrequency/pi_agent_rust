@@ -37,6 +37,9 @@
 #                             Cross-env spread threshold percent (default: 10.0)
 #   PERF_CROSS_ENV_ENFORCE    If 1, fail run when cross-env diagnosis emits alerts
 #   PERF_REMOTE_TARGET_DIR    Optional remote CARGO_TARGET_DIR prefix recorded in artifact staging manifests
+#   PERF_EVIDENCE_CACHE_DIR   Optional perf evidence cache directory (default: $CARGO_TARGET_DIR/perf/evidence_cache)
+#   PI_PERF_EVIDENCE_CACHE_TTL_HOURS
+#                             Maximum reusable perf evidence cache TTL in hours (default: 168)
 #   PERF_QUICK                Set to 1 for PR-safe subset (same as --profile quick)
 #   PERF_SKIP_CRITERION       Set to 1 to skip criterion benchmarks
 #   PERF_SKIP_BUILD           Set to 1 to skip cargo build step
@@ -69,6 +72,8 @@ PGO_ALLOW_FALLBACK="${PERF_PGO_ALLOW_FALLBACK:-1}"
 CROSS_ENV_BASELINES="${PERF_CROSS_ENV_BASELINES:-}"
 CROSS_ENV_VARIANCE_ALERT_PCT="${PERF_CROSS_ENV_VARIANCE_ALERT_PCT:-10.0}"
 CROSS_ENV_ENFORCE="${PERF_CROSS_ENV_ENFORCE:-0}"
+EVIDENCE_CACHE_DIR="${PERF_EVIDENCE_CACHE_DIR:-$TARGET_DIR/perf/evidence_cache}"
+EVIDENCE_CACHE_TTL_HOURS="${PI_PERF_EVIDENCE_CACHE_TTL_HOURS:-168}"
 CORRELATION_ID="${CI_CORRELATION_ID:-}"
 PROFILE="full"
 SKIP_BUILD="${PERF_SKIP_BUILD:-0}"
@@ -77,6 +82,7 @@ SKIP_CRITERION="${PERF_SKIP_CRITERION:-0}"
 CREATE_BUNDLE=0
 VALIDATE_ONLY=""
 GIT_COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")"
+GIT_COMMIT_FULL="$(git rev-parse HEAD 2>/dev/null || echo "unknown")"
 GIT_DIRTY="$(git diff --quiet 2>/dev/null && echo "false" || echo "true")"
 CARGO_RUNNER_REQUEST="${PERF_CARGO_RUNNER:-rch}" # rch | auto | local
 CARGO_RUNNER_MODE="local"
@@ -164,6 +170,10 @@ run_budget_preflight() {
   local args=(
     --repo-root "$PROJECT_ROOT"
     --cargo-target-dir "$TARGET_DIR"
+    --evidence-cache-dir "$EVIDENCE_CACHE_DIR"
+    --cache-ttl-hours "$EVIDENCE_CACHE_TTL_HOURS"
+    --cache-profile "$CARGO_PROFILE"
+    --cache-git-commit "$GIT_COMMIT_FULL"
     --skip-rch-check
   )
   python3 "$SCRIPT_DIR/preflight_budget_inputs.py" "${args[@]}" "$@" > "$output_path"
@@ -177,6 +187,12 @@ run_artifact_staging_manifest() {
     --cargo-target-dir "$TARGET_DIR"
     --local-results-dir "$OUTPUT_DIR/results"
     --runner-mode "$CARGO_RUNNER_MODE"
+    --evidence-cache-dir "$EVIDENCE_CACHE_DIR"
+    --cache-ttl-hours "$EVIDENCE_CACHE_TTL_HOURS"
+    --cache-profile "$CARGO_PROFILE"
+    --cache-git-commit "$GIT_COMMIT_FULL"
+    --run-id "$CORRELATION_ID"
+    --update-evidence-cache
     --output "$output_path"
   )
   if [[ -n "${PERF_REMOTE_TARGET_DIR:-}" ]]; then
@@ -400,6 +416,7 @@ log_step "Output:         $OUTPUT_DIR"
 log_step "Correlation ID: $CORRELATION_ID"
 log_step "Git commit:     $GIT_COMMIT (dirty=$GIT_DIRTY)"
 log_step "Cargo profile:  $CARGO_PROFILE"
+log_step "Evidence cache: $EVIDENCE_CACHE_DIR (ttl=${EVIDENCE_CACHE_TTL_HOURS}h)"
 log_step "PGO mode:       $PGO_MODE"
 log_step "PGO profile:    $PGO_PROFILE_DATA"
 log_step "Cargo runner:   $CARGO_RUNNER_MODE (request=$CARGO_RUNNER_REQUEST)"
@@ -839,6 +856,8 @@ cat > "$OUTPUT_DIR/manifest.json" <<EOF
     "manifest_path": "$STAGING_MANIFEST_PATH",
     "pre_refresh_report_path": "$PREFLIGHT_BEFORE_REFRESH_PATH",
     "post_run_report_path": "$PREFLIGHT_AFTER_RUN_PATH",
+    "evidence_cache_dir": "$EVIDENCE_CACHE_DIR",
+    "evidence_cache_ttl_hours": $EVIDENCE_CACHE_TTL_HOURS,
     "status": "$ARTIFACT_STAGING_STATUS",
     "missing_required_count": $ARTIFACT_STAGING_MISSING_REQUIRED,
     "stale_required_count": $ARTIFACT_STAGING_STALE_REQUIRED,

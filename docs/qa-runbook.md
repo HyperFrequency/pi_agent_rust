@@ -113,6 +113,15 @@ mtime, checksum, and schema when the format provides one. If RCH exposes a
 remote target prefix, set `PERF_REMOTE_TARGET_DIR` so the manifest records the
 remote source path instead of the inferred local target path.
 
+Perf runs also maintain an evidence cache at `PERF_EVIDENCE_CACHE_DIR`
+(default: `$CARGO_TARGET_DIR/perf/evidence_cache`). Cached entries are reusable
+only when their schema, command, git commit, build profile, run
+ID/correlation ID, host/toolchain provenance, checksum, and TTL validate. The
+preflight and staging JSON label reused artifacts with `source_kind=cache` or
+`evidence_source=cache`; rejected cache entries stay visible in
+`rejected_evidence_cache_entries`. Use `PI_PERF_EVIDENCE_CACHE_TTL_HOURS` to
+shorten the maximum accepted cache lifetime.
+
 Run heavyweight checks with remote offload:
 
 ```bash

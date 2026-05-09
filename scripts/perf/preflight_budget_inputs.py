@@ -14,8 +14,10 @@ import glob
 import hashlib
 import json
 import os
+import platform
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -26,7 +28,10 @@ from typing import Any
 
 
 SCHEMA = "pi.perf.budget_preflight.v1"
+EVIDENCE_CACHE_SCHEMA = "pi.perf.evidence_cache.v1"
+EVIDENCE_CACHE_ENTRY_SCHEMA = "pi.perf.evidence_cache_entry.v1"
 DEFAULT_MAX_ARTIFACT_AGE_HOURS = 24.0
+DEFAULT_EVIDENCE_CACHE_TTL_HOURS = 168.0
 EXTENSION_BLOCKER_BEAD = "bd-2zcs5.51"
 
 
@@ -47,6 +52,16 @@ class ArtifactGroup:
     reason: str
     expected_outputs: tuple[Path, ...]
     blocker: str | None = None
+
+
+@dataclass(frozen=True)
+class EvidenceCacheContext:
+    repo_root: Path
+    target_dir: Path
+    cache_dir: Path
+    git_commit: str
+    build_profile: str
+    max_ttl_hours: float
 
 
 def utc_now() -> datetime:
@@ -88,6 +103,357 @@ def sha256_file(path: Path) -> str | None:
         return None
 
 
+def current_git_commit(repo_root: Path) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+    commit = result.stdout.strip()
+    return commit if result.returncode == 0 and commit else "unknown"
+
+
+def current_toolchain() -> str:
+    try:
+        result = subprocess.run(
+            ["rustc", "-Vv"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+    toolchain = result.stdout.strip()
+    return toolchain if result.returncode == 0 and toolchain else "unknown"
+
+
+def current_host_fingerprint() -> dict[str, Any]:
+    return {
+        "hostname": socket.gethostname(),
+        "machine": platform.machine(),
+        "platform": platform.platform(),
+        "processor": platform.processor() or "unknown",
+        "cpu_count": os.cpu_count(),
+    }
+
+
+def resolve_cache_dir(target_dir: Path, raw_cache_dir: str | None) -> Path:
+    if raw_cache_dir:
+        cache_dir = Path(raw_cache_dir).expanduser()
+        if cache_dir.is_absolute():
+            return cache_dir
+        return target_dir / cache_dir
+    return target_dir / "perf/evidence_cache"
+
+
+def parse_utc_timestamp(raw: Any) -> datetime | None:
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    text = raw.strip()
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def entry_string(entry: dict[str, Any], key: str) -> str | None:
+    value = entry.get(key)
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value or None
+
+
+def entry_float(entry: dict[str, Any], key: str) -> float | None:
+    value = entry.get(key)
+    if isinstance(value, int | float):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
+
+
+def resolve_entry_path(raw: str, base: Path) -> Path:
+    path = Path(raw).expanduser()
+    if path.is_absolute():
+        return path
+    return base / path
+
+
+def read_jsonl_schema(path: Path) -> str | None:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                payload = json.loads(line)
+                if isinstance(payload, dict) and isinstance(payload.get("schema"), str):
+                    return payload["schema"]
+                return None
+    except (OSError, json.JSONDecodeError):
+        return None
+    return None
+
+
+def artifact_schema(path: Path) -> str | None:
+    if path.suffix == ".json":
+        payload = read_json(path)
+        value = payload.get("schema") if payload else None
+        return value if isinstance(value, str) else None
+    if path.suffix == ".jsonl":
+        return read_jsonl_schema(path)
+    return None
+
+
+def load_evidence_cache_entries(cache_dir: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    index_path = cache_dir / "index.json"
+    status: dict[str, Any] = {
+        "schema": EVIDENCE_CACHE_SCHEMA,
+        "cache_dir": str(cache_dir),
+        "index_path": str(index_path),
+        "enabled": True,
+        "index_exists": index_path.is_file(),
+        "index_valid": False,
+        "entry_count": 0,
+    }
+    if not index_path.is_file():
+        status["detail"] = "cache index not found"
+        return [], status
+
+    payload = read_json(index_path)
+    if payload is None:
+        status["detail"] = "cache index is missing or invalid JSON"
+        return [], status
+    if payload.get("schema") != EVIDENCE_CACHE_SCHEMA:
+        status["detail"] = "cache index schema mismatch"
+        status["observed_schema"] = payload.get("schema")
+        return [], status
+
+    raw_entries = payload.get("entries")
+    if not isinstance(raw_entries, list):
+        status["detail"] = "cache index entries must be an array"
+        return [], status
+
+    entries = [entry for entry in raw_entries if isinstance(entry, dict)]
+    status["index_valid"] = True
+    status["entry_count"] = len(entries)
+    return entries, status
+
+
+def validate_evidence_cache_entry(
+    entry: dict[str, Any],
+    group: ArtifactGroup,
+    context: EvidenceCacheContext,
+    now: datetime,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    contract_id = entry_string(entry, "contract_id")
+    rejection_base = {
+        "contract_id": contract_id,
+        "expected_contract_id": group.contract_id,
+        "cache_index_path": str(context.cache_dir / "index.json"),
+    }
+    if entry.get("schema") != EVIDENCE_CACHE_ENTRY_SCHEMA:
+        return None, {
+            **rejection_base,
+            "reason": "entry_schema_mismatch",
+            "observed_schema": entry.get("schema"),
+        }
+    if contract_id != group.contract_id:
+        return None, {
+            **rejection_base,
+            "reason": "contract_mismatch",
+        }
+
+    artifact_path_raw = entry_string(entry, "artifact_path")
+    cache_artifact_path_raw = entry_string(entry, "cache_artifact_path")
+    resolved_artifact_path = (
+        resolve_entry_path(artifact_path_raw, context.repo_root)
+        if artifact_path_raw
+        else None
+    )
+    resolved_cache_artifact_path = (
+        resolve_entry_path(cache_artifact_path_raw, context.cache_dir)
+        if cache_artifact_path_raw
+        else None
+    )
+    evidence_path = resolved_cache_artifact_path or resolved_artifact_path
+    if evidence_path is None:
+        return None, {
+            **rejection_base,
+            "reason": "missing_artifact_path",
+        }
+    if not evidence_path.is_file():
+        return None, {
+            **rejection_base,
+            "reason": "cache_artifact_missing",
+            "cache_artifact_path": str(evidence_path),
+        }
+
+    git_commit = entry_string(entry, "git_commit")
+    if git_commit != context.git_commit or git_commit == "unknown":
+        return None, {
+            **rejection_base,
+            "reason": "git_commit_mismatch",
+            "expected_git_commit": context.git_commit,
+            "observed_git_commit": git_commit,
+        }
+
+    build_profile = entry_string(entry, "build_profile")
+    if build_profile != context.build_profile:
+        return None, {
+            **rejection_base,
+            "reason": "build_profile_mismatch",
+            "expected_build_profile": context.build_profile,
+            "observed_build_profile": build_profile,
+        }
+
+    run_id = entry_string(entry, "run_id")
+    correlation_id = entry_string(entry, "correlation_id")
+    if run_id is None or correlation_id is None:
+        return None, {
+            **rejection_base,
+            "reason": "missing_lineage",
+            "run_id_present": run_id is not None,
+            "correlation_id_present": correlation_id is not None,
+        }
+
+    if entry_string(entry, "command") is None:
+        return None, {
+            **rejection_base,
+            "reason": "missing_command",
+        }
+    if entry_string(entry, "toolchain") is None:
+        return None, {
+            **rejection_base,
+            "reason": "missing_toolchain",
+        }
+    host_fingerprint = entry.get("host_fingerprint")
+    if not isinstance(host_fingerprint, dict) or not host_fingerprint:
+        return None, {
+            **rejection_base,
+            "reason": "missing_host_fingerprint",
+        }
+    if "artifact_schema" not in entry:
+        return None, {
+            **rejection_base,
+            "reason": "missing_artifact_schema_field",
+        }
+
+    created_at = parse_utc_timestamp(entry.get("created_at"))
+    if created_at is None:
+        return None, {
+            **rejection_base,
+            "reason": "missing_or_invalid_created_at",
+        }
+    ttl_hours = entry_float(entry, "ttl_hours")
+    if ttl_hours is None or ttl_hours <= 0.0:
+        return None, {
+            **rejection_base,
+            "reason": "missing_or_invalid_ttl",
+            "observed_ttl_hours": entry.get("ttl_hours"),
+        }
+    effective_ttl_hours = min(ttl_hours, context.max_ttl_hours)
+    age_hours = (now - created_at).total_seconds() / 3600.0
+    if age_hours > effective_ttl_hours:
+        return None, {
+            **rejection_base,
+            "reason": "cache_entry_expired",
+            "age_hours": age_hours,
+            "ttl_hours": ttl_hours,
+            "effective_ttl_hours": effective_ttl_hours,
+        }
+    expires_at = parse_utc_timestamp(entry.get("expires_at"))
+    if expires_at is not None and now >= expires_at:
+        return None, {
+            **rejection_base,
+            "reason": "cache_entry_expired_at",
+            "expires_at": entry.get("expires_at"),
+        }
+
+    expected_sha = entry_string(entry, "sha256")
+    actual_sha = sha256_file(evidence_path)
+    if expected_sha is None or actual_sha != expected_sha:
+        return None, {
+            **rejection_base,
+            "reason": "checksum_mismatch",
+            "expected_sha256": expected_sha,
+            "actual_sha256": actual_sha,
+            "cache_artifact_path": str(evidence_path),
+        }
+
+    detected_schema = artifact_schema(evidence_path)
+    recorded_schema = entry.get("artifact_schema")
+    if detected_schema is not None and recorded_schema != detected_schema:
+        return None, {
+            **rejection_base,
+            "reason": "artifact_schema_mismatch",
+            "expected_artifact_schema": detected_schema,
+            "observed_artifact_schema": recorded_schema,
+        }
+
+    accepted = {
+        "source_kind": "cache",
+        "path": str(evidence_path),
+        "artifact_path": str(resolved_artifact_path) if resolved_artifact_path else None,
+        "cache_artifact_path": str(evidence_path),
+        "cache_index_path": str(context.cache_dir / "index.json"),
+        "age_hours": age_hours,
+        "max_age_hours": effective_ttl_hours,
+        "size_bytes": evidence_path.stat().st_size,
+        "sha256": actual_sha,
+        "schema": EVIDENCE_CACHE_ENTRY_SCHEMA,
+        "artifact_schema": recorded_schema,
+        "git_commit": git_commit,
+        "build_profile": build_profile,
+        "run_id": run_id,
+        "correlation_id": correlation_id,
+        "command": entry_string(entry, "command"),
+        "toolchain": entry_string(entry, "toolchain"),
+        "host_fingerprint": host_fingerprint,
+        "created_at": entry.get("created_at"),
+        "ttl_hours": ttl_hours,
+        "expires_at": entry.get("expires_at"),
+        "reused_evidence": True,
+    }
+    return accepted, None
+
+
+def evidence_cache_for_group(
+    entries: list[dict[str, Any]],
+    group: ArtifactGroup,
+    context: EvidenceCacheContext,
+    now: datetime,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    accepted: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    for entry in entries:
+        if entry.get("contract_id") != group.contract_id:
+            continue
+        accepted_entry, rejected_entry = validate_evidence_cache_entry(entry, group, context, now)
+        if accepted_entry is not None:
+            accepted.append(accepted_entry)
+        if rejected_entry is not None:
+            rejected.append(rejected_entry)
+    return accepted, rejected
+
+
 def parse_budget_contracts(perf_budgets_rs: Path) -> list[BudgetContract]:
     text = perf_budgets_rs.read_text(encoding="utf-8")
     contracts: list[BudgetContract] = []
@@ -127,11 +493,13 @@ def existing_fresh_candidates(
             continue
         age = file_age_hours(path, now)
         artifact = {
+            "source_kind": "direct",
             "path": str(path),
             "age_hours": age,
             "max_age_hours": max_age_hours,
             "size_bytes": path.stat().st_size,
             "sha256": sha256_file(path),
+            "reused_evidence": False,
         }
         if age is not None and age <= max_age_hours:
             fresh.append(artifact)
@@ -365,12 +733,31 @@ def build_report(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     now = utc_now()
     target_dir = resolve_target_dir(repo_root, args.cargo_target_dir or os.environ.get("CARGO_TARGET_DIR"))
     max_age_hours = args.max_age_hours
+    cache_dir = resolve_cache_dir(
+        target_dir,
+        args.evidence_cache_dir or os.environ.get("PI_PERF_EVIDENCE_CACHE_DIR"),
+    )
+    cache_context = EvidenceCacheContext(
+        repo_root=repo_root,
+        target_dir=target_dir,
+        cache_dir=cache_dir,
+        git_commit=args.cache_git_commit
+        or os.environ.get("PI_PERF_GIT_COMMIT")
+        or current_git_commit(repo_root),
+        build_profile=args.cache_profile
+        or os.environ.get("PERF_PROFILE")
+        or os.environ.get("CARGO_PROFILE")
+        or "perf",
+        max_ttl_hours=args.cache_ttl_hours,
+    )
+    cache_entries, cache_status = load_evidence_cache_entries(cache_dir)
     contracts = parse_budget_contracts(repo_root / "tests/perf_budgets.rs")
     ci_contracts = [contract for contract in contracts if contract.ci_enforced]
 
     missing: list[dict[str, Any]] = []
     stale: list[dict[str, Any]] = []
     fresh: list[dict[str, Any]] = []
+    rejected_cache_entries: list[dict[str, Any]] = []
     suggestions: list[str] = []
     expected_outputs: list[str] = []
     recognized_blockers: list[dict[str, Any]] = []
@@ -378,13 +765,31 @@ def build_report(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     groups = artifact_groups(repo_root, target_dir)
     for group in groups:
         group_fresh, group_stale = existing_fresh_candidates(group.candidates, max_age_hours, now)
+        cache_fresh, cache_rejected = evidence_cache_for_group(
+            cache_entries,
+            group,
+            cache_context,
+            now,
+        )
+        rejected_cache_entries.extend(cache_rejected)
         expected_outputs.extend(str(path) for path in group.expected_outputs)
         if group_fresh:
             fresh.append(
                 {
                     "contract_id": group.contract_id,
                     "budget_names": list(group.budget_names),
+                    "evidence_source": "direct",
                     "artifacts": group_fresh,
+                }
+            )
+            continue
+        if cache_fresh:
+            fresh.append(
+                {
+                    "contract_id": group.contract_id,
+                    "budget_names": list(group.budget_names),
+                    "evidence_source": "cache",
+                    "artifacts": cache_fresh,
                 }
             )
             continue
@@ -423,6 +828,20 @@ def build_report(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     dedup_suggestions = list(dict.fromkeys(suggestions))
     dedup_expected = list(dict.fromkeys(expected_outputs))
     ready = not missing and not stale and not report_blockers
+    cache_status.update(
+        {
+            "expected_git_commit": cache_context.git_commit,
+            "expected_build_profile": cache_context.build_profile,
+            "max_ttl_hours": cache_context.max_ttl_hours,
+            "accepted_entry_count": sum(
+                1
+                for item in fresh
+                if item.get("evidence_source") == "cache"
+                for _artifact in item.get("artifacts", [])
+            ),
+            "rejected_entry_count": len(rejected_cache_entries),
+        }
+    )
     payload: dict[str, Any] = {
         "schema": SCHEMA,
         "generated_at": iso_now(),
@@ -435,18 +854,21 @@ def build_report(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         },
         "cargo_target_dir": str(target_dir),
         "max_artifact_age_hours": max_age_hours,
+        "evidence_cache": cache_status,
         "rch": rch_status(args.skip_rch_check),
         "current_report": report,
         "readiness": "ready" if ready else "blocked",
         "missing_budget_artifacts": missing,
         "stale_artifacts": stale,
         "fresh_artifacts": fresh,
+        "rejected_evidence_cache_entries": rejected_cache_entries,
         "recognized_blockers": recognized_blockers,
         "suggested_commands": dedup_suggestions,
         "expected_output_paths": dedup_expected,
         "safety_notes": [
             "All CPU-intensive cargo refresh commands must be run through rch exec -- ...",
             "Set CARGO_TARGET_DIR and TMPDIR to /data/tmp/pi_agent_rust_cargo/${USER:-agent}/... before refreshing evidence.",
+            "Cached perf evidence is reusable only when commit, build profile, TTL, lineage, schema, and checksum validation pass; reused entries are labeled source_kind=cache.",
             "Do not refresh tests/perf/reports/budget_summary.json until missing_budget_artifacts and stale_artifacts are empty.",
         ],
         "report_blockers": report_blockers,
@@ -459,6 +881,69 @@ def write_json(payload: dict[str, Any]) -> None:
 
 
 def run_self_test() -> int:
+    def build_args(
+        root: Path,
+        *,
+        cache_dir: Path | None = None,
+        cache_git_commit: str = "test-commit",
+        cache_profile: str = "perf",
+        cache_ttl_hours: float = 24.0,
+    ) -> argparse.Namespace:
+        return argparse.Namespace(
+            repo_root=str(root),
+            cargo_target_dir=str(root / "target"),
+            max_age_hours=24.0,
+            evidence_cache_dir=str(cache_dir) if cache_dir else None,
+            cache_ttl_hours=cache_ttl_hours,
+            cache_profile=cache_profile,
+            cache_git_commit=cache_git_commit,
+            skip_rch_check=True,
+        )
+
+    def write_cache_index(
+        root: Path,
+        *,
+        contract_id: str = "extension_criterion_policy",
+        cache_git_commit: str = "test-commit",
+        cache_profile: str = "perf",
+        created_at: str | None = None,
+        ttl_hours: float = 24.0,
+        run_id: str | None = "run-123",
+        correlation_id: str | None = "corr-123",
+    ) -> Path:
+        cache_dir = root / "target/perf/evidence_cache"
+        artifact_path = cache_dir / "artifacts" / contract_id / "estimates.json"
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        artifact_path.write_text('{"mean":{"point_estimate":1000.0}}\n', encoding="utf-8")
+        entry = {
+            "schema": EVIDENCE_CACHE_ENTRY_SCHEMA,
+            "contract_id": contract_id,
+            "artifact_path": str(root / "target/criterion/ext_policy/evaluate/safe/new/estimates.json"),
+            "cache_artifact_path": str(artifact_path),
+            "command": "rch exec -- cargo bench --bench extension_budget_inputs --profile perf ext_policy",
+            "git_commit": cache_git_commit,
+            "toolchain": "rustc 1.85.0-test",
+            "host_fingerprint": {"hostname": "self-test", "cpu_count": 1},
+            "build_profile": cache_profile,
+            "run_id": run_id,
+            "correlation_id": correlation_id,
+            "sha256": sha256_file(artifact_path),
+            "artifact_schema": None,
+            "created_at": created_at or iso_now(),
+            "ttl_hours": ttl_hours,
+        }
+        (cache_dir / "index.json").write_text(
+            json.dumps(
+                {
+                    "schema": EVIDENCE_CACHE_SCHEMA,
+                    "generated_at": iso_now(),
+                    "entries": [entry],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return cache_dir
+
     def write_fixture(root: Path, include_policy: bool) -> None:
         (root / "tests/perf/reports").mkdir(parents=True)
         (root / "target/criterion/ext_load_init/load_init_cold/hello/new").mkdir(parents=True)
@@ -522,27 +1007,13 @@ def run_self_test() -> int:
 
     ok_root = Path(tempfile.mkdtemp(prefix="pi-perf-preflight-ok-"))
     write_fixture(ok_root, include_policy=True)
-    ok_code, ok_payload = build_report(
-        argparse.Namespace(
-            repo_root=str(ok_root),
-            cargo_target_dir=str(ok_root / "target"),
-            max_age_hours=24.0,
-            skip_rch_check=True,
-        )
-    )
+    ok_code, ok_payload = build_report(build_args(ok_root))
     assert ok_code == 0, ok_payload
     assert ok_payload["readiness"] == "ready", ok_payload
 
     blocked_root = Path(tempfile.mkdtemp(prefix="pi-perf-preflight-blocked-"))
     write_fixture(blocked_root, include_policy=False)
-    blocked_code, blocked_payload = build_report(
-        argparse.Namespace(
-            repo_root=str(blocked_root),
-            cargo_target_dir=str(blocked_root / "target"),
-            max_age_hours=24.0,
-            skip_rch_check=True,
-        )
-    )
+    blocked_code, blocked_payload = build_report(build_args(blocked_root))
     assert blocked_code == 1, blocked_payload
     assert blocked_payload["readiness"] == "blocked", blocked_payload
     assert any(
@@ -568,6 +1039,81 @@ def run_self_test() -> int:
         blocked_payload,
         extension_commands,
     )
+
+    cached_root = Path(tempfile.mkdtemp(prefix="pi-perf-preflight-cache-ok-"))
+    write_fixture(cached_root, include_policy=False)
+    cache_dir = write_cache_index(cached_root)
+    cached_code, cached_payload = build_report(build_args(cached_root, cache_dir=cache_dir))
+    assert cached_code == 0, cached_payload
+    assert cached_payload["readiness"] == "ready", cached_payload
+    assert cached_payload["evidence_cache"]["accepted_entry_count"] == 1, cached_payload
+    assert any(
+        item["contract_id"] == "extension_criterion_policy"
+        and item["evidence_source"] == "cache"
+        for item in cached_payload["fresh_artifacts"]
+    ), cached_payload
+
+    stale_cache_root = Path(tempfile.mkdtemp(prefix="pi-perf-preflight-cache-stale-"))
+    write_fixture(stale_cache_root, include_policy=False)
+    stale_cache_dir = write_cache_index(
+        stale_cache_root,
+        created_at="2000-01-01T00:00:00Z",
+        ttl_hours=1.0,
+    )
+    stale_code, stale_payload = build_report(
+        build_args(stale_cache_root, cache_dir=stale_cache_dir)
+    )
+    assert stale_code == 1, stale_payload
+    assert any(
+        entry["reason"] == "cache_entry_expired"
+        for entry in stale_payload["rejected_evidence_cache_entries"]
+    ), stale_payload
+
+    wrong_commit_root = Path(tempfile.mkdtemp(prefix="pi-perf-preflight-cache-commit-"))
+    write_fixture(wrong_commit_root, include_policy=False)
+    wrong_commit_cache_dir = write_cache_index(
+        wrong_commit_root,
+        cache_git_commit="other-commit",
+    )
+    wrong_commit_code, wrong_commit_payload = build_report(
+        build_args(wrong_commit_root, cache_dir=wrong_commit_cache_dir)
+    )
+    assert wrong_commit_code == 1, wrong_commit_payload
+    assert any(
+        entry["reason"] == "git_commit_mismatch"
+        for entry in wrong_commit_payload["rejected_evidence_cache_entries"]
+    ), wrong_commit_payload
+
+    wrong_profile_root = Path(tempfile.mkdtemp(prefix="pi-perf-preflight-cache-profile-"))
+    write_fixture(wrong_profile_root, include_policy=False)
+    wrong_profile_cache_dir = write_cache_index(
+        wrong_profile_root,
+        cache_profile="release",
+    )
+    wrong_profile_code, wrong_profile_payload = build_report(
+        build_args(wrong_profile_root, cache_dir=wrong_profile_cache_dir)
+    )
+    assert wrong_profile_code == 1, wrong_profile_payload
+    assert any(
+        entry["reason"] == "build_profile_mismatch"
+        for entry in wrong_profile_payload["rejected_evidence_cache_entries"]
+    ), wrong_profile_payload
+
+    missing_lineage_root = Path(tempfile.mkdtemp(prefix="pi-perf-preflight-cache-lineage-"))
+    write_fixture(missing_lineage_root, include_policy=False)
+    missing_lineage_cache_dir = write_cache_index(
+        missing_lineage_root,
+        run_id=None,
+        correlation_id="",
+    )
+    missing_lineage_code, missing_lineage_payload = build_report(
+        build_args(missing_lineage_root, cache_dir=missing_lineage_cache_dir)
+    )
+    assert missing_lineage_code == 1, missing_lineage_payload
+    assert any(
+        entry["reason"] == "missing_lineage"
+        for entry in missing_lineage_payload["rejected_evidence_cache_entries"]
+    ), missing_lineage_payload
     return 0
 
 
@@ -583,6 +1129,26 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         type=float,
         default=float(os.environ.get("PI_PERF_MAX_ARTIFACT_AGE_HOURS", DEFAULT_MAX_ARTIFACT_AGE_HOURS)),
         help="Maximum accepted artifact age in hours.",
+    )
+    parser.add_argument(
+        "--evidence-cache-dir",
+        help="Perf evidence cache directory. Defaults to PI_PERF_EVIDENCE_CACHE_DIR or target/perf/evidence_cache.",
+    )
+    parser.add_argument(
+        "--cache-ttl-hours",
+        type=float,
+        default=float(
+            os.environ.get("PI_PERF_EVIDENCE_CACHE_TTL_HOURS", DEFAULT_EVIDENCE_CACHE_TTL_HOURS)
+        ),
+        help="Maximum reusable cache TTL in hours; entry ttl_hours is capped by this value.",
+    )
+    parser.add_argument(
+        "--cache-profile",
+        help="Expected cached evidence build profile. Defaults to PERF_PROFILE, CARGO_PROFILE, or perf.",
+    )
+    parser.add_argument(
+        "--cache-git-commit",
+        help="Expected cached evidence git commit. Defaults to PI_PERF_GIT_COMMIT or current HEAD.",
     )
     parser.add_argument(
         "--skip-rch-check",

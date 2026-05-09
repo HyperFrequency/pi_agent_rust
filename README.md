@@ -1843,6 +1843,15 @@ Current checked-in performance evidence state:
   path, RCH remote-source prefix when supplied via `PERF_REMOTE_TARGET_DIR`,
   retrieved local path, schema, size, mtime, checksum, and explicit blocker
   status.
+- Perf evidence cache entries live under
+  `PERF_EVIDENCE_CACHE_DIR` (default:
+  `$CARGO_TARGET_DIR/perf/evidence_cache`) with schema
+  `pi.perf.evidence_cache.v1`. Preflight and staging may reuse cached evidence
+  only when the entry's schema, command, git commit, build profile, run
+  ID/correlation ID, host/toolchain provenance, checksum, and TTL validate; reused
+  artifacts are labeled `source_kind=cache`/`evidence_source=cache` in the JSON
+  outputs. Override the cache lifetime with
+  `PI_PERF_EVIDENCE_CACHE_TTL_HOURS`.
 - Regenerate the perf evidence bundle before adding release-facing speed,
   throughput, memory, or startup numbers to this README.
 
