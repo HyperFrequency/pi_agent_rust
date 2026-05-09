@@ -92,6 +92,8 @@ The report emits schema `pi.swarm.claim_readiness_report.v1` and groups artifact
 
 The same JSON also includes `stale_claims` with schema `pi.swarm.stale_claim_report.v1`. This section is report-only: it never reopens, reassigns, or edits Beads. It classifies `in_progress` beads from `.beads/issues.jsonl` using `--stale-claim-after-hours` and can treat fresher coordination evidence from `--stale-claim-activity-jsonl` rows as active owner evidence within `--stale-claim-activity-fresh-hours`. Each item names the bead ID, assignee, last update, evidence source, classification, and exact recommended operator action so operators can message the owner or manually reopen only after confirmation.
 
+The JSON also includes `hostcall_queue_telemetry` with schema `pi.swarm.hostcall_queue_readiness.v1`. It reads hostcall queue evidence from `tests/perf/reports/stress_triage.json` and `docs/evidence/ext-stress-reactor-queue-coverage.json`, then reports stable counters for `s3fifo_fallback_transitions`, `s3fifo_fairness_rejected_total`, `s3fifo_lane_overflow_rejected_total`, `queue_overflow_rejected_total`, `safe_reclamation_fallback_transitions`, `bravo_transitions_total`, and `bravo_rollbacks_total`. Missing S3-FIFO or BRAVO telemetry is listed in `missing_required_fields` rather than treated as zero; non-zero fallback, fairness-rejection, lane-overflow, or BRAVO rollback totals make the section `fallback_heavy` so operators know not to present the run as contention-clean without more triage.
+
 Use gate mode only when a release path must fail on stale or unsupported evidence:
 
 ```bash

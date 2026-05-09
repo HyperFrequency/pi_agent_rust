@@ -24,6 +24,7 @@ from typing import Any
 
 REPORT_SCHEMA = "pi.swarm.claim_readiness_report.v1"
 STALE_CLAIM_REPORT_SCHEMA = "pi.swarm.stale_claim_report.v1"
+HOSTCALL_QUEUE_REPORT_SCHEMA = "pi.swarm.hostcall_queue_readiness.v1"
 DEFAULT_MAX_AGE_DAYS = 14
 DEFAULT_STALE_CLAIM_AFTER_HOURS = 24
 DEFAULT_STALE_CLAIM_ACTIVITY_FRESH_HOURS = 6
@@ -135,6 +136,110 @@ class ClaimActivityEvidence:
     timestamp: datetime
     source: str
     agent_name: str | None
+
+
+@dataclass(frozen=True)
+class HostcallQueueSourceSpec:
+    id: str
+    path: str
+    reactor_paths: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class HostcallQueueMetricSpec:
+    name: str
+    paths: tuple[str, ...]
+    required: bool = True
+
+
+HOSTCALL_QUEUE_SOURCES = (
+    HostcallQueueSourceSpec(
+        id="perf_stress_triage",
+        path="tests/perf/reports/stress_triage.json",
+        reactor_paths=("results.reactor", "reactor"),
+    ),
+    HostcallQueueSourceSpec(
+        id="extension_reactor_queue_coverage",
+        path="docs/evidence/ext-stress-reactor-queue-coverage.json",
+        reactor_paths=("captured_report_metrics.reactor", "results.reactor", "reactor"),
+    ),
+)
+
+HOSTCALL_QUEUE_METRICS = (
+    HostcallQueueMetricSpec(
+        name="s3fifo_mode",
+        paths=("s3fifo.mode", "s3fifo_mode"),
+        required=False,
+    ),
+    HostcallQueueMetricSpec(
+        name="s3fifo_fallback_reason",
+        paths=("s3fifo.fallback_reason", "s3fifo_fallback_reason"),
+        required=False,
+    ),
+    HostcallQueueMetricSpec(
+        name="s3fifo_fallback_transitions",
+        paths=(
+            "s3fifo.fallback_event_total",
+            "s3fifo.fallback_transitions",
+            "s3fifo_fallback_transitions",
+        ),
+    ),
+    HostcallQueueMetricSpec(
+        name="s3fifo_fairness_rejected_total",
+        paths=(
+            "s3fifo.fairness_budget_rejections",
+            "s3fifo.fairness_rejected_total",
+            "s3fifo_fairness_rejected_total",
+            "stall_reasons.fairness_budget",
+        ),
+    ),
+    HostcallQueueMetricSpec(
+        name="s3fifo_lane_overflow_rejected_total",
+        paths=(
+            "s3fifo.lane_overflow_rejections",
+            "stall_reasons.lane_overflow",
+            "rejected_enqueues",
+            "overflow_rejected_total",
+        ),
+    ),
+    HostcallQueueMetricSpec(
+        name="s3fifo_ghost_hits_total",
+        paths=("s3fifo.ghost_hits_total", "s3fifo_ghost_hits_total"),
+        required=False,
+    ),
+    HostcallQueueMetricSpec(
+        name="queue_overflow_rejected_total",
+        paths=("overflow_rejected_total", "rejected_enqueues"),
+        required=False,
+    ),
+    HostcallQueueMetricSpec(
+        name="safe_reclamation_fallback_transitions",
+        paths=("fallback_transitions", "safe_reclamation_fallback_transitions"),
+        required=False,
+    ),
+    HostcallQueueMetricSpec(
+        name="bravo_mode",
+        paths=("bravo.mode", "bravo_mode"),
+    ),
+    HostcallQueueMetricSpec(
+        name="bravo_transitions_total",
+        paths=("bravo.transitions", "bravo_transitions"),
+    ),
+    HostcallQueueMetricSpec(
+        name="bravo_rollbacks_total",
+        paths=("bravo.rollbacks", "bravo_rollbacks"),
+    ),
+    HostcallQueueMetricSpec(
+        name="bravo_writer_recovery_remaining",
+        paths=("bravo.writer_recovery_remaining", "bravo_writer_recovery_remaining"),
+        required=False,
+    ),
+    HostcallQueueMetricSpec(
+        name="bravo_last_signature",
+        paths=("bravo.last_signature", "bravo_last_signature"),
+        required=False,
+    ),
+)
 
 
 EVIDENCE_SPECS = (
@@ -691,6 +796,212 @@ def build_stale_claim_report(
     }
 
 
+def as_counter(value: Any) -> int:
+    if isinstance(value, bool) or value is None:
+        return 0
+    if isinstance(value, int):
+        return max(0, value)
+    if isinstance(value, float):
+        return max(0, int(value))
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.isdigit():
+            return max(0, int(stripped))
+    return 0
+
+
+def read_hostcall_metric(
+    reactor: dict[str, Any],
+    spec: HostcallQueueMetricSpec,
+) -> dict[str, Any]:
+    source_path, value = first_path(reactor, spec.paths)
+    return {
+        "value": value,
+        "present": value is not None,
+        "source_path": source_path,
+        "required": spec.required,
+    }
+
+
+def hostcall_metric_counter(source: dict[str, Any], name: str) -> int:
+    metric = source.get("metrics", {}).get(name, {})
+    return as_counter(metric.get("value"))
+
+
+def build_hostcall_source_report(
+    repo_root: Path,
+    spec: HostcallQueueSourceSpec,
+) -> dict[str, Any]:
+    full_path = repo_root / spec.path
+    base: dict[str, Any] = {
+        "id": spec.id,
+        "path": spec.path,
+        "reactor_path": None,
+        "status": "missing_source",
+        "metrics": {
+            metric.name: {
+                "value": None,
+                "present": False,
+                "source_path": None,
+                "required": metric.required,
+            }
+            for metric in HOSTCALL_QUEUE_METRICS
+        },
+        "missing_required_fields": [
+            metric.name for metric in HOSTCALL_QUEUE_METRICS if metric.required
+        ],
+        "warnings": [],
+        "recommended_operator_action": (
+            f"Regenerate {spec.path} before judging hostcall queue fallback behavior."
+        ),
+    }
+
+    if not full_path.exists():
+        return base
+
+    payload, error = load_json(full_path)
+    if error is not None:
+        base["status"] = "invalid_source"
+        base["warnings"] = [error]
+        base["recommended_operator_action"] = (
+            f"Fix invalid JSON in {spec.path}; hostcall queue telemetry cannot be read."
+        )
+        return base
+    assert payload is not None
+
+    reactor_path, reactor_value = first_path(payload, spec.reactor_paths)
+    if not isinstance(reactor_value, dict):
+        base["status"] = "missing_telemetry"
+        base["recommended_operator_action"] = (
+            f"Regenerate {spec.path} with one of {spec.reactor_paths!r}; missing telemetry "
+            "is reported explicitly and is not treated as zero fallback pressure."
+        )
+        return base
+
+    metrics = {
+        metric.name: read_hostcall_metric(reactor_value, metric)
+        for metric in HOSTCALL_QUEUE_METRICS
+    }
+    missing_required = [
+        metric.name
+        for metric in HOSTCALL_QUEUE_METRICS
+        if metric.required and not metrics[metric.name]["present"]
+    ]
+    source_report = {
+        **base,
+        "reactor_path": reactor_path,
+        "metrics": metrics,
+        "missing_required_fields": missing_required,
+        "warnings": [],
+    }
+
+    fallback_total = (
+        hostcall_metric_counter(source_report, "s3fifo_fallback_transitions")
+        + hostcall_metric_counter(source_report, "s3fifo_fairness_rejected_total")
+        + hostcall_metric_counter(source_report, "s3fifo_lane_overflow_rejected_total")
+        + hostcall_metric_counter(source_report, "bravo_rollbacks_total")
+        + hostcall_metric_counter(source_report, "safe_reclamation_fallback_transitions")
+    )
+    if missing_required:
+        source_report["status"] = "missing_fields"
+        source_report["recommended_operator_action"] = (
+            f"Regenerate {spec.path} with stable hostcall queue fields: "
+            f"{', '.join(missing_required)}."
+        )
+    elif fallback_total:
+        source_report["status"] = "fallback_heavy"
+        source_report["recommended_operator_action"] = (
+            "Inspect S3-FIFO fairness, lane overflow, safe-fallback, and BRAVO rollback "
+            "counters before presenting this run as swarm-ready."
+        )
+    else:
+        source_report["status"] = "ready"
+        source_report["recommended_operator_action"] = (
+            "No hostcall queue fallback pressure is visible in this source."
+        )
+    return source_report
+
+
+def build_hostcall_queue_report(repo_root: Path) -> dict[str, Any]:
+    sources = [
+        build_hostcall_source_report(repo_root, source_spec)
+        for source_spec in HOSTCALL_QUEUE_SOURCES
+    ]
+    status_counts: dict[str, int] = {}
+    for source in sources:
+        status = source["status"]
+        status_counts[status] = status_counts.get(status, 0) + 1
+
+    missing_required_count = sum(
+        len(source["missing_required_fields"]) for source in sources
+    )
+    summary = {
+        "sources_checked": len(sources),
+        "sources_with_hostcall_queue_telemetry": sum(
+            1 for source in sources if source["reactor_path"] is not None
+        ),
+        "missing_required_field_count": missing_required_count,
+        "s3fifo_fallback_transitions": sum(
+            hostcall_metric_counter(source, "s3fifo_fallback_transitions")
+            for source in sources
+        ),
+        "s3fifo_fairness_rejected_total": sum(
+            hostcall_metric_counter(source, "s3fifo_fairness_rejected_total")
+            for source in sources
+        ),
+        "s3fifo_lane_overflow_rejected_total": sum(
+            hostcall_metric_counter(source, "s3fifo_lane_overflow_rejected_total")
+            for source in sources
+        ),
+        "queue_overflow_rejected_total": sum(
+            hostcall_metric_counter(source, "queue_overflow_rejected_total")
+            for source in sources
+        ),
+        "safe_reclamation_fallback_transitions": sum(
+            hostcall_metric_counter(source, "safe_reclamation_fallback_transitions")
+            for source in sources
+        ),
+        "bravo_transitions_total": sum(
+            hostcall_metric_counter(source, "bravo_transitions_total")
+            for source in sources
+        ),
+        "bravo_rollbacks_total": sum(
+            hostcall_metric_counter(source, "bravo_rollbacks_total")
+            for source in sources
+        ),
+        "status_counts": status_counts,
+    }
+    fallback_heavy = any(
+        summary[key] > 0
+        for key in (
+            "s3fifo_fallback_transitions",
+            "s3fifo_fairness_rejected_total",
+            "s3fifo_lane_overflow_rejected_total",
+            "safe_reclamation_fallback_transitions",
+            "bravo_rollbacks_total",
+        )
+    )
+
+    if missing_required_count or status_counts.get("missing_source") or status_counts.get("invalid_source"):
+        status = "needs_telemetry"
+    elif fallback_heavy:
+        status = "fallback_heavy"
+    else:
+        status = "ready"
+
+    return {
+        "schema": HOSTCALL_QUEUE_REPORT_SCHEMA,
+        "status": status,
+        "policy": "read_only_no_gate_side_effect",
+        "source_paths": [source.path for source in HOSTCALL_QUEUE_SOURCES],
+        "required_fields": [
+            metric.name for metric in HOSTCALL_QUEUE_METRICS if metric.required
+        ],
+        "summary": summary,
+        "sources": sources,
+    }
+
+
 def check_spec(
     repo_root: Path,
     spec: EvidenceSpec,
@@ -853,6 +1164,7 @@ def build_report(
         activity_fresh_after_hours=stale_claim_activity_fresh_hours,
         activity_paths=stale_claim_activity_paths,
     )
+    hostcall_queue_telemetry = build_hostcall_queue_report(repo_root)
 
     blocking_issues = [
         {
@@ -877,6 +1189,7 @@ def build_report(
         "categories": category_summary(checks),
         "artifacts": [check.to_json() for check in checks],
         "stale_claims": stale_claims,
+        "hostcall_queue_telemetry": hostcall_queue_telemetry,
         "blocking_issues": blocking_issues,
     }
 
@@ -922,6 +1235,42 @@ def print_text_report(report: dict[str, Any]) -> None:
             f"source={item['evidence_source']}"
         )
         print(f"    action: {item['recommended_operator_action']}")
+    hostcall_queue = report["hostcall_queue_telemetry"]
+    print("")
+    print("hostcall queue telemetry:")
+    print(
+        f"  {hostcall_queue['status']}: "
+        f"{hostcall_queue['summary']['sources_with_hostcall_queue_telemetry']}/"
+        f"{hostcall_queue['summary']['sources_checked']} sources with telemetry, "
+        f"{hostcall_queue['summary']['missing_required_field_count']} missing required fields"
+    )
+    summary = hostcall_queue["summary"]
+    print(
+        "  totals: "
+        f"s3fifo_fallback_transitions={summary['s3fifo_fallback_transitions']}, "
+        f"s3fifo_fairness_rejected_total={summary['s3fifo_fairness_rejected_total']}, "
+        f"s3fifo_lane_overflow_rejected_total={summary['s3fifo_lane_overflow_rejected_total']}, "
+        f"bravo_rollbacks_total={summary['bravo_rollbacks_total']}"
+    )
+    for source in hostcall_queue["sources"]:
+        metrics = source["metrics"]
+        print(
+            f"  {source['status']}: {source['path']} "
+            f"reactor={source['reactor_path'] or 'missing'}"
+        )
+        print(
+            "    "
+            f"s3fifo_fallback_transitions={metrics['s3fifo_fallback_transitions']['value']!r}, "
+            f"s3fifo_fairness_rejected_total="
+            f"{metrics['s3fifo_fairness_rejected_total']['value']!r}, "
+            f"s3fifo_lane_overflow_rejected_total="
+            f"{metrics['s3fifo_lane_overflow_rejected_total']['value']!r}, "
+            f"bravo_transitions_total={metrics['bravo_transitions_total']['value']!r}, "
+            f"bravo_rollbacks_total={metrics['bravo_rollbacks_total']['value']!r}"
+        )
+        if source["missing_required_fields"]:
+            print(f"    missing: {', '.join(source['missing_required_fields'])}")
+        print(f"    action: {source['recommended_operator_action']}")
     if report["blocking_issues"]:
         print("")
         print("release-facing claim blockers:")
@@ -975,6 +1324,32 @@ def fixture_payload(
         payload.pop("generated_at", None)
         payload["effective_date_utc"] = format_datetime(now)
         payload["status"] = "active_blocking_policy"
+    if spec.id == "perf_stress_triage":
+        assign_path(payload, "results.reactor.enabled", True)
+        assign_path(payload, "results.reactor.rejected_enqueues", 0)
+        assign_path(payload, "results.reactor.s3fifo.fairness_budget_rejections", 0)
+        assign_path(payload, "results.reactor.s3fifo.lane_overflow_rejections", 0)
+        assign_path(payload, "results.reactor.s3fifo.fallback_event_total", 0)
+        assign_path(payload, "results.reactor.bravo.mode", "Balanced")
+        assign_path(payload, "results.reactor.bravo.transitions", 0)
+        assign_path(payload, "results.reactor.bravo.rollbacks", 0)
+    if spec.id == "extension_reactor_queue_coverage":
+        assign_path(payload, "captured_report_metrics.reactor.enabled", True)
+        assign_path(payload, "captured_report_metrics.reactor.rejected_enqueues", 0)
+        assign_path(
+            payload,
+            "captured_report_metrics.reactor.s3fifo.fairness_budget_rejections",
+            0,
+        )
+        assign_path(
+            payload,
+            "captured_report_metrics.reactor.s3fifo.lane_overflow_rejections",
+            0,
+        )
+        assign_path(payload, "captured_report_metrics.reactor.s3fifo.fallback_event_total", 0)
+        assign_path(payload, "captured_report_metrics.reactor.bravo.mode", "Balanced")
+        assign_path(payload, "captured_report_metrics.reactor.bravo.transitions", 0)
+        assign_path(payload, "captured_report_metrics.reactor.bravo.rollbacks", 0)
     return payload
 
 
@@ -1036,6 +1411,13 @@ def stale_claim_item(report: dict[str, Any], bead_id: str) -> dict[str, Any]:
     raise AssertionError(f"missing stale claim item for {bead_id}")
 
 
+def hostcall_source(report: dict[str, Any], source_id: str) -> dict[str, Any]:
+    for source in report["hostcall_queue_telemetry"]["sources"]:
+        if source["id"] == source_id:
+            return source
+    raise AssertionError(f"missing hostcall queue source for {source_id}")
+
+
 def assert_condition(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
@@ -1050,6 +1432,20 @@ def run_self_test() -> int:
         make_complete_fixture(repo_root, now)
         report = build_report(repo_root, now=now)
         assert_condition(report["overall_status"] == "ready", "fresh fixture should be ready")
+        hostcall = report["hostcall_queue_telemetry"]
+        assert_condition(
+            hostcall["status"] == "ready",
+            "complete fixture hostcall telemetry should be ready",
+        )
+        stress_source = hostcall_source(report, "perf_stress_triage")
+        assert_condition(
+            stress_source["metrics"]["s3fifo_fairness_rejected_total"]["present"],
+            "S3-FIFO fairness rejection counter should be present",
+        )
+        assert_condition(
+            stress_source["metrics"]["bravo_rollbacks_total"]["present"],
+            "BRAVO rollback counter should be present",
+        )
 
         repo_root = fixture_root()
         make_complete_fixture(repo_root, now)
@@ -1101,6 +1497,51 @@ def run_self_test() -> int:
         assert_condition(
             historical_path not in blocker_paths,
             "historical snapshots should not block release-facing gate status",
+        )
+
+        repo_root = fixture_root()
+        make_complete_fixture(repo_root, now)
+        stress_payload = fixture_payload(EVIDENCE_SPECS[1], now, "fixture-run")
+        assert stress_payload is not None
+        assign_path(stress_payload, "results.reactor.s3fifo.fairness_budget_rejections", 5)
+        assign_path(stress_payload, "results.reactor.s3fifo.lane_overflow_rejections", 2)
+        assign_path(stress_payload, "results.reactor.s3fifo.fallback_event_total", 1)
+        assign_path(stress_payload, "results.reactor.bravo.rollbacks", 3)
+        write_artifact(repo_root, EVIDENCE_SPECS[1].path, stress_payload, mtime=now)
+        report = build_report(repo_root, now=now)
+        hostcall = report["hostcall_queue_telemetry"]
+        assert_condition(
+            hostcall["status"] == "fallback_heavy",
+            "non-zero hostcall fallback counters should mark the run fallback-heavy",
+        )
+        assert_condition(
+            hostcall["summary"]["s3fifo_fairness_rejected_total"] == 5,
+            "hostcall summary should include S3-FIFO fairness rejections",
+        )
+        assert_condition(
+            hostcall["summary"]["bravo_rollbacks_total"] == 3,
+            "hostcall summary should include BRAVO rollbacks",
+        )
+
+        repo_root = fixture_root()
+        make_complete_fixture(repo_root, now)
+        stress_payload = fixture_payload(EVIDENCE_SPECS[1], now, "fixture-run")
+        assert stress_payload is not None
+        stress_payload["results"] = {}
+        write_artifact(repo_root, EVIDENCE_SPECS[1].path, stress_payload, mtime=now)
+        report = build_report(repo_root, now=now)
+        missing_source = hostcall_source(report, "perf_stress_triage")
+        assert_condition(
+            missing_source["status"] == "missing_telemetry",
+            "missing reactor telemetry should be explicit",
+        )
+        assert_condition(
+            "s3fifo_fairness_rejected_total" in missing_source["missing_required_fields"],
+            "missing source should list absent S3-FIFO counters",
+        )
+        assert_condition(
+            "bravo_rollbacks_total" in missing_source["missing_required_fields"],
+            "missing source should list absent BRAVO counters",
         )
 
         repo_root = fixture_root()
