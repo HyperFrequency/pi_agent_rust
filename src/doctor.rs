@@ -35,6 +35,7 @@ const SWARM_DOCTOR_ADMISSION_SCHEMA: &str = "pi.doctor.swarm_admission.v1";
 const SWARM_DOCTOR_RCH_FAILURE_SCHEMA: &str = "pi.doctor.rch_failure.v1";
 const SWARM_DOCTOR_TEMP_DIR_SCHEMA: &str = "pi.doctor.swarm_temp_dir.v1";
 const SWARM_DOCTOR_BUILD_SLOT_SCHEMA: &str = "pi.doctor.agent_mail_build_slots.v1";
+const SWARM_DOCTOR_CONTACTS_SCHEMA: &str = "pi.doctor.agent_mail_contacts.v1";
 const SWARM_CARGO_SCRATCH_ROOT: &str = "/data/tmp/pi_agent_rust_cargo";
 const SWARM_BUILD_SLOT_SOON_EXPIRING_MINUTES: i64 = 30;
 const MIB_BYTES: u64 = 1024 * 1024;
@@ -1688,48 +1689,7 @@ fn check_swarm_agent_mail(cwd: &Path, findings: &mut Vec<Finding>) {
             cat,
             format!("Agent Mail agent identity: {agent}"),
         ));
-        let status_args = [
-            "robot",
-            "status",
-            "--format",
-            "json",
-            "--project",
-            project.as_str(),
-            "--agent",
-            agent,
-        ];
-        probe_agent_mail_json(
-            SwarmProbeCommand::Am,
-            &status_args,
-            cwd,
-            "Agent Mail status",
-            classify_agent_mail_status,
-            "Retry after active Agent Mail maintenance finishes; if it stays busy, inspect `am robot health --format json`",
-            findings,
-        );
-
-        let inbox_args = [
-            "robot",
-            "inbox",
-            "--format",
-            "json",
-            "--project",
-            project.as_str(),
-            "--agent",
-            agent,
-            "--unread",
-            "--limit",
-            "20",
-        ];
-        probe_agent_mail_json(
-            SwarmProbeCommand::Am,
-            &inbox_args,
-            cwd,
-            "Agent Mail inbox",
-            classify_agent_mail_inbox,
-            "Run `am robot inbox --unread --format json` or fetch inbox through MCP before claiming more files",
-            findings,
-        );
+        check_swarm_agent_mail_agent_probes(cwd, project.as_str(), agent, findings);
     } else {
         findings.push(
             Finding::warn(cat, "Agent Mail agent identity not set")
@@ -1762,6 +1722,76 @@ fn check_swarm_agent_mail(cwd: &Path, findings: &mut Vec<Finding>) {
     );
 
     check_swarm_agent_mail_build_slots(cwd, agent_name.as_deref(), findings);
+}
+
+fn check_swarm_agent_mail_agent_probes(
+    cwd: &Path,
+    project: &str,
+    agent: &str,
+    findings: &mut Vec<Finding>,
+) {
+    let status_args = [
+        "robot",
+        "status",
+        "--format",
+        "json",
+        "--project",
+        project,
+        "--agent",
+        agent,
+    ];
+    probe_agent_mail_json(
+        SwarmProbeCommand::Am,
+        &status_args,
+        cwd,
+        "Agent Mail status",
+        classify_agent_mail_status,
+        "Retry after active Agent Mail maintenance finishes; if it stays busy, inspect `am robot health --format json`",
+        findings,
+    );
+
+    let inbox_args = [
+        "robot",
+        "inbox",
+        "--format",
+        "json",
+        "--project",
+        project,
+        "--agent",
+        agent,
+        "--unread",
+        "--limit",
+        "20",
+    ];
+    probe_agent_mail_json(
+        SwarmProbeCommand::Am,
+        &inbox_args,
+        cwd,
+        "Agent Mail inbox",
+        classify_agent_mail_inbox,
+        "Run `am robot inbox --unread --format json` or fetch inbox through MCP before claiming more files",
+        findings,
+    );
+
+    let contacts_args = [
+        "robot",
+        "contacts",
+        "--format",
+        "json",
+        "--project",
+        project,
+        "--agent",
+        agent,
+    ];
+    probe_agent_mail_json(
+        SwarmProbeCommand::Am,
+        &contacts_args,
+        cwd,
+        "Agent Mail contacts",
+        classify_agent_mail_contacts,
+        "Run `am robot contacts --format json` and resolve pending or degraded contact links before relying on coordination mail",
+        findings,
+    );
 }
 
 fn probe_agent_mail_json<F>(
@@ -1868,6 +1898,137 @@ fn classify_agent_mail_reservations(value: &serde_json::Value) -> Finding {
     }
 }
 
+#[derive(Debug, Default)]
+struct AgentMailContactCounts {
+    total: usize,
+    pending: usize,
+    approved: usize,
+    blocked: usize,
+    degraded: usize,
+    unknown_status: usize,
+}
+
+fn classify_agent_mail_contacts(value: &serde_json::Value) -> Finding {
+    let mut counts = AgentMailContactCounts::default();
+    count_agent_mail_contact_rows(value, &mut counts);
+    let detail = format!(
+        "contacts={}, pending={}, approved={}, blocked={}, degraded={}, unknown_status={}",
+        counts.total,
+        counts.pending,
+        counts.approved,
+        counts.blocked,
+        counts.degraded,
+        counts.unknown_status
+    );
+    let data = serde_json::json!({
+        "schema": SWARM_DOCTOR_CONTACTS_SCHEMA,
+        "contact_count": counts.total,
+        "pending_count": counts.pending,
+        "approved_count": counts.approved,
+        "blocked_count": counts.blocked,
+        "degraded_count": counts.degraded,
+        "unknown_status_count": counts.unknown_status,
+    });
+
+    if counts.pending > 0 {
+        return Finding::warn(CheckCategory::Swarm, "Agent Mail contact requests pending")
+            .with_detail(detail)
+            .with_remediation(
+                "Run `am robot contacts --format json` and approve, deny, or refresh pending contact requests before relying on contact-gated mail",
+            )
+            .with_data(data);
+    }
+    if counts.degraded > 0 {
+        return Finding::warn(CheckCategory::Swarm, "Agent Mail contact graph has degraded rows")
+            .with_detail(detail)
+            .with_remediation(
+                "Inspect Agent Mail contact links for unknown agents, unknown policies, or unrecognized statuses before depending on contact-gated routing",
+            )
+            .with_data(data);
+    }
+
+    Finding::pass(CheckCategory::Swarm, "Agent Mail contacts reachable")
+        .with_detail(detail)
+        .with_data(data)
+}
+
+fn count_agent_mail_contact_rows(value: &serde_json::Value, counts: &mut AgentMailContactCounts) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if map.contains_key("from") && map.contains_key("to") && map.contains_key("status") {
+                classify_agent_mail_contact_row(map, counts);
+                return;
+            }
+            for child in map.values() {
+                count_agent_mail_contact_rows(child, counts);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                count_agent_mail_contact_rows(child, counts);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn classify_agent_mail_contact_row(
+    row: &serde_json::Map<String, serde_json::Value>,
+    counts: &mut AgentMailContactCounts,
+) {
+    counts.total += 1;
+
+    let status = row
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let from = row
+        .get("from")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    let to = row
+        .get("to")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    let policy = row
+        .get("policy")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+
+    let recognized_status = match status.as_str() {
+        "pending" | "requested" => {
+            counts.pending += 1;
+            true
+        }
+        "approved" | "accepted" => {
+            counts.approved += 1;
+            true
+        }
+        "blocked" | "denied" | "rejected" => {
+            counts.blocked += 1;
+            true
+        }
+        _ => {
+            counts.unknown_status += 1;
+            false
+        }
+    };
+
+    let unknown_agent = [from, to]
+        .iter()
+        .any(|agent| agent.is_empty() || agent.starts_with("[unknown-agent-"));
+    let unknown_policy = policy.is_empty() || policy == "unknown";
+    if unknown_agent || unknown_policy || !recognized_status {
+        counts.degraded += 1;
+    }
+}
+
 fn check_swarm_agent_mail_build_slots(
     cwd: &Path,
     agent_name: Option<&str>,
@@ -1969,7 +2130,7 @@ fn read_agent_mail_build_slot_dir(path: &Path, archive: &mut AgentMailBuildSlotA
             continue;
         };
         let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+        if !matches!(path.extension().and_then(|ext| ext.to_str()), Some("json")) {
             continue;
         }
         match std::fs::read_to_string(&path)
@@ -3586,6 +3747,104 @@ not-json
         let finding = classify_agent_mail_reservations(&value);
 
         assert_eq!(finding.severity, Severity::Pass);
+    }
+
+    #[test]
+    fn swarm_agent_mail_contacts_warns_on_pending_requests() {
+        let value = serde_json::json!({
+            "data": {
+                "count": 2,
+                "contacts": [
+                    {
+                        "from": "SunnyBeacon",
+                        "to": "MagentaOak",
+                        "status": "pending",
+                        "policy": "auto",
+                        "reason": "coordination",
+                        "updated": "1h"
+                    },
+                    {
+                        "from": "MagentaOak",
+                        "to": "RusticGorge",
+                        "status": "approved",
+                        "policy": "auto",
+                        "reason": "coordination",
+                        "updated": "2h"
+                    }
+                ]
+            }
+        });
+
+        let finding = classify_agent_mail_contacts(&value);
+
+        assert_eq!(finding.severity, Severity::Warn);
+        assert!(finding.title.contains("pending"));
+        let data = finding_data(&finding);
+        assert_eq!(data["pending_count"], serde_json::json!(1));
+        assert_eq!(data["approved_count"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn swarm_agent_mail_contacts_warns_on_degraded_rows() {
+        let value = serde_json::json!({
+            "contacts": [
+                {
+                    "from": "[unknown-agent-1218]",
+                    "to": "MagentaOak",
+                    "status": "approved",
+                    "policy": "unknown",
+                    "reason": "coordination",
+                    "updated": "4m"
+                },
+                {
+                    "from": "MagentaOak",
+                    "to": "SunnyBeacon",
+                    "status": "mystery",
+                    "policy": "auto",
+                    "reason": "coordination",
+                    "updated": "5m"
+                }
+            ]
+        });
+
+        let finding = classify_agent_mail_contacts(&value);
+
+        assert_eq!(finding.severity, Severity::Warn);
+        assert!(finding.title.contains("degraded"));
+        let data = finding_data(&finding);
+        assert_eq!(data["degraded_count"], serde_json::json!(2));
+        assert_eq!(data["unknown_status_count"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn swarm_agent_mail_contacts_passes_when_links_are_settled() {
+        let value = serde_json::json!({
+            "contacts": [
+                {
+                    "from": "MagentaOak",
+                    "to": "SunnyBeacon",
+                    "status": "approved",
+                    "policy": "auto",
+                    "reason": "coordination",
+                    "updated": "3m"
+                },
+                {
+                    "from": "CopperOx",
+                    "to": "MagentaOak",
+                    "status": "blocked",
+                    "policy": "contacts_only",
+                    "reason": "not needed",
+                    "updated": "10m"
+                }
+            ]
+        });
+
+        let finding = classify_agent_mail_contacts(&value);
+
+        assert_eq!(finding.severity, Severity::Pass);
+        let data = finding_data(&finding);
+        assert_eq!(data["contact_count"], serde_json::json!(2));
+        assert_eq!(data["blocked_count"], serde_json::json!(1));
     }
 
     #[test]
