@@ -790,6 +790,28 @@ def run_self_test(args: argparse.Namespace) -> int:
         )
         for artifact_path in summary["artifacts"].values():
             assert_condition(Path(artifact_path).exists(), f"missing artifact: {artifact_path}")
+        artifact_dir = Path(summary["artifacts"]["summary_json"]).parent
+        overwrite_probe = SwarmSmokeHarness(
+            HarnessConfig(
+                repo_root=args.repo_root.resolve(),
+                out_dir=artifact_dir,
+                correlation_id="selftest-swarm-smoke-overwrite-probe",
+                mcp_url=args.mcp_url,
+                command_timeout_seconds=args.command_timeout_seconds,
+                stale_after_seconds=0,
+                fixed_start_ms=1778286001000,
+            )
+        )
+        try:
+            overwrite_probe.write_artifacts()
+        except HarnessError as exc:
+            message = str(exc)
+            assert_condition(
+                "events.jsonl" in message and "summary.json" in message,
+                "overwrite guard should name both existing artifact files",
+            )
+        else:
+            raise AssertionError("existing smoke-harness artifacts should be refused")
     except (AssertionError, HarnessError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
         print(f"SELF-TEST FAIL: {exc}")
         return 2
