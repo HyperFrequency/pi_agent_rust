@@ -5411,7 +5411,71 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    #[ignore = "bd-8t27h.11: flaky timing-sensitive 500ms exec timeout with futures::executor"]
+    fn dispatcher_exec_stream_cancel_enqueues_final_sentinel_without_wall_clock() {
+        futures::executor::block_on(async {
+            let runtime = Rc::new(
+                PiJsRuntime::with_clock(DeterministicClock::new(0))
+                    .await
+                    .expect("runtime"),
+            );
+
+            runtime
+                .eval(
+                    r#"
+                    globalThis.timeoutChunks = [];
+                    globalThis.timeoutResult = "pending";
+                    globalThis.timeoutError = null;
+                    pi.exec("sh", ["-c", "sleep 5"], {
+                        stream: true,
+                        onChunk: (chunk, isFinal) => {
+                            globalThis.timeoutChunks.push({ chunk, isFinal });
+                        },
+                    })
+                        .then((r) => { globalThis.timeoutResult = r; })
+                        .catch((e) => { globalThis.timeoutError = e; });
+                "#,
+                )
+                .await
+                .expect("eval");
+
+            let requests = runtime.drain_hostcall_requests();
+            assert_eq!(requests.len(), 1);
+            let request = requests.into_iter().next().expect("request");
+
+            assert!(runtime.is_hostcall_active(&request.call_id));
+            assert!(runtime.cancel_hostcall(&request.call_id));
+            assert!(!runtime.is_hostcall_active(&request.call_id));
+
+            while runtime.has_pending() {
+                runtime.tick().await.expect("tick");
+                runtime.drain_microtasks().await.expect("microtasks");
+            }
+
+            runtime
+                .eval(
+                    r#"
+                    if (globalThis.timeoutError !== null) {
+                        throw new Error("Unexpected cancel error: " + JSON.stringify(globalThis.timeoutError));
+                    }
+                    if (globalThis.timeoutResult !== null) {
+                        throw new Error("Cancel sentinel should resolve stream promise with null: " + JSON.stringify(globalThis.timeoutResult));
+                    }
+                    const finalEntry = globalThis.timeoutChunks[globalThis.timeoutChunks.length - 1];
+                    if (!finalEntry || finalEntry.isFinal !== true || finalEntry.chunk !== null) {
+                        throw new Error("Missing deterministic final cancel sentinel: " + JSON.stringify(globalThis.timeoutChunks));
+                    }
+                "#,
+                )
+                .await
+                .expect("verify cancel stream result");
+
+            assert_eq!(runtime.pending_hostcall_count(), 0);
+        });
+    }
+
+    #[test]
+    #[cfg(all(unix, feature = "manual-timing-tests"))]
+    #[ignore = "bd-8t27h.11: opt-in wall-clock process timeout regression; run with --features manual-timing-tests -- --ignored"]
     fn dispatcher_exec_hostcall_streaming_timeout_marks_final_chunk_killed() {
         futures::executor::block_on(async {
             let runtime = Rc::new(
