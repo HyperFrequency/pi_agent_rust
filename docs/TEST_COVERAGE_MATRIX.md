@@ -19,7 +19,7 @@ This document is the current source-file coverage inventory for `src/**/*.rs`. I
 - Current `src/` inventory: 110 files.
 - Source-file rows below: 110.
 - Source files omitted from this document: 0.
-- Split modules, provider expansion modules, hostcall scheduling/queue modules, PiWasm, session v2/SQLite, resources, resource governor, and scheduler/admission surfaces are represented explicitly.
+- Split modules, provider expansion modules, hostcall scheduling/queue modules, PiWasm, session v2/SQLite, resources, resource governor, and scheduler/admission surfaces are represented explicitly and linked through the `resource_scheduler_admission` artifact-inventory lane.
 - Machine-readable traceability remains governed by `docs/traceability_matrix.json`, `tests/suite_classification.toml`, `docs/e2e_scenario_matrix.json`, and `scripts/check_traceability_matrix.py`.
 
 ### Legend
@@ -125,10 +125,10 @@ This document is the current source-file coverage inventory for `src/**/*.rs`. I
 | `src/providers/openai.rs` | OpenAI chat provider | Unit; `tests/provider_streaming/openai.rs`, provider error/path suites. |
 | `src/providers/openai_responses.rs` | OpenAI Responses provider | Unit; `tests/provider_streaming/openai_responses.rs`, provider error/path suites. |
 | `src/providers/vertex.rs` | Vertex provider | Unit; provider native/contract suites. |
-| `src/resource_governor.rs` | Resource governor | Unit; `tests/cargo_headroom_admission.rs`, `tests/resource_edge_cases.rs`; matrix expansion owner `bd-8t27h.15`. |
-| `src/resources.rs` | Resource loading | Unit; `tests/resource_loader.rs`, `tests/resource_edge_cases.rs`; matrix expansion owner `bd-8t27h.15`. |
+| `src/resource_governor.rs` | Resource governor | Unit; `tests/cargo_headroom_admission.rs`, `tests/resource_edge_cases.rs`; traceability lane `resource_scheduler_admission`. |
+| `src/resources.rs` | Resource loading | Unit; `tests/resource_loader.rs`, `tests/resource_edge_cases.rs`; traceability lane `resource_scheduler_admission`. |
 | `src/rpc.rs` | RPC/stdin mode | Unit; `tests/rpc_mode.rs`, `tests/rpc_protocol.rs`, `tests/rpc_edge_cases.rs`, `tests/e2e_rpc.rs`. |
-| `src/scheduler.rs` | Scheduler/admission | Unit; `tests/scheduler_repro.rs`, `tests/cargo_headroom_admission.rs`; matrix expansion owner `bd-8t27h.15`. |
+| `src/scheduler.rs` | Scheduler/admission | Unit; `tests/scheduler_repro.rs`, `tests/cargo_headroom_admission.rs`; traceability lane `resource_scheduler_admission`. |
 | `src/sdk.rs` | SDK API | Unit; `tests/sdk_api.rs`, `tests/sdk_integration.rs`, `tests/sdk_unit.rs`. |
 | `src/session.rs` | Session JSONL/tree | Unit; `tests/session_conformance.rs`, `tests/e2e_session_persistence.rs`; branch export baseline marks this as branch-SIGSEGV fallback. |
 | `src/session_index.rs` | Session index | Unit; `tests/session_index_tests.rs`, `tests/reproduce_index_gap.rs`. |
@@ -215,7 +215,6 @@ The active JSONL inventory gap is `bd-8t27h.9`.
 | `bd-8t27h.11` | Move extension dispatcher timing regression away from wall-clock flake. |
 | `bd-8t27h.12` | Normalize manual perf/report generators to tmpdir-aware smoke tests. |
 | `bd-8t27h.13` | Document and test PiWasm unsupported import fail-closed policy. |
-| `bd-8t27h.15` | Add resource/scheduler/admission replay coverage to machine-readable matrix. |
 | `bd-8t27h.16` | Bound extension random trials into deterministic smoke lane. |
 | `bd-8t27h.17` | Onboard unvendored extension conformance corpus. |
 | `bd-8t27h.18` | Normalize npm registry conformance diff ignore. |

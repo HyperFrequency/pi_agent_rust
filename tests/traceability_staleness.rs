@@ -18,6 +18,7 @@ const REQUIRED_ARTIFACT_INVENTORY_AREAS: &[&str] = &[
     "provider_streaming",
     "sessions",
     "extensions",
+    "resource_scheduler_admission",
     "rpc_tui_e2e",
     "perf_report_generators",
     "security_scenarios",

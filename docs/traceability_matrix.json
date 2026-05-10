@@ -898,6 +898,59 @@
       ]
     },
     {
+      "id": "bd-8t27h.15",
+      "title": "Resource, scheduler, and cargo headroom admission replay coverage",
+      "acceptance_criteria": "Resource loading, scheduler ordering, cargo headroom admission, and their replay artifacts are mapped to deterministic tests and machine-readable evidence.",
+      "unit_tests": [
+        {
+          "path": "tests/resource_loader.rs",
+          "justification": "Covers skill, prompt template, theme, and extension resource path loading, precedence, collisions, and diagnostics through realistic package-manager resolution inputs."
+        },
+        {
+          "path": "tests/resource_edge_cases.rs",
+          "justification": "Covers missing resource paths, no-default loading, explicit resource roots, prompt/theme dedupe, and loader edge cases for src/resources.rs."
+        },
+        {
+          "path": "tests/scheduler_repro.rs",
+          "justification": "Deterministic scheduler replay for timer/event ordering and observable seq invariants in src/scheduler.rs."
+        },
+        {
+          "path": "tests/cargo_headroom_admission.rs",
+          "justification": "Fixture-backed replay matrix for scripts/cargo_headroom.sh admission decisions, RCH queue forecasts, target/tmp remediation, and fail-closed local fallback behavior."
+        }
+      ],
+      "e2e_scripts": [
+        {
+          "path": "scripts/cargo_headroom.sh",
+          "justification": "Runtime admission wrapper exercised by the cargo_headroom_admission fixture replay suite."
+        },
+        {
+          "path": "scripts/run_swarm_smoke_harness.py",
+          "justification": "Swarm smoke harness records RCH admission/degraded decisions as redacted structured evidence for replayable resource-admission diagnostics."
+        }
+      ],
+      "evidence_logs": [
+        {
+          "path": "docs/evidence/high-value-suite-artifact-inventory.json",
+          "justification": "Machine-readable resource_scheduler_admission lane links suites, replay command, schema tags, and artifact refs."
+        },
+        {
+          "path": "tests/fixtures/cargo_headroom_admission/admission_cases.json",
+          "justification": "Deterministic admission fixture matrix for RCH availability, queue pressure, saturation, stale snapshots, malformed JSON, and local fallback decisions."
+        },
+        {
+          "path": "tests/e2e_results/**/unit/resource_edge_cases/test-log.jsonl",
+          "generated_by_ci": true,
+          "justification": "Structured resource edge-case replay logs emitted by governed test runs."
+        },
+        {
+          "path": "tests/e2e_results/**/unit/cargo_headroom_admission/test-log.jsonl",
+          "generated_by_ci": true,
+          "justification": "Structured cargo headroom admission replay logs emitted by governed test runs."
+        }
+      ]
+    },
+    {
       "id": "bd-k5q5.7.1",
       "title": "Traceability matrix linking requirements to unit tests, e2e scripts, and evidence logs",
       "acceptance_criteria": "Matrix is committed, machine-readable, and used by CI checks to detect uncovered requirements.",

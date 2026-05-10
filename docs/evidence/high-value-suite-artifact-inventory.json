@@ -8,6 +8,7 @@
       "provider_streaming",
       "sessions",
       "extensions",
+      "resource_scheduler_admission",
       "rpc_tui_e2e",
       "perf_report_generators",
       "security_scenarios"
@@ -145,6 +146,57 @@
       ],
       "deterministic_replay_command": "./scripts/ext_quality_pipeline.sh --require-rch",
       "tmpdir_policy": "Extension conformance writes reports under tests/ext_conformance/reports and per-case runtime state under harness temp directories."
+    },
+    {
+      "id": "resource-scheduler-admission-replay",
+      "coverage_area": "resource_scheduler_admission",
+      "suite_ids": [
+        "resource_loader",
+        "resource_edge_cases",
+        "scheduler_repro",
+        "cargo_headroom_admission"
+      ],
+      "test_paths": [
+        "tests/resource_loader.rs",
+        "tests/resource_edge_cases.rs",
+        "tests/scheduler_repro.rs",
+        "tests/cargo_headroom_admission.rs"
+      ],
+      "artifact_refs": [
+        {
+          "path": "tests/fixtures/cargo_headroom_admission/admission_cases.json",
+          "kind": "json",
+          "generated_by_ci": false
+        },
+        {
+          "path": "tests/e2e_results/**/unit/resource_edge_cases/test-log.jsonl",
+          "kind": "jsonl",
+          "generated_by_ci": true
+        },
+        {
+          "path": "tests/e2e_results/**/unit/resource_edge_cases/artifact-index.jsonl",
+          "kind": "jsonl",
+          "generated_by_ci": true
+        },
+        {
+          "path": "tests/e2e_results/**/unit/scheduler_repro/result.json",
+          "kind": "json",
+          "generated_by_ci": true
+        },
+        {
+          "path": "tests/e2e_results/**/unit/cargo_headroom_admission/test-log.jsonl",
+          "kind": "jsonl",
+          "generated_by_ci": true
+        }
+      ],
+      "schema_tags": [
+        "pi.cargo_headroom.admission.v1",
+        "pi.cargo_headroom.rch_queue_forecast.v1",
+        "pi.test.log.v2",
+        "pi.test.artifact.v1"
+      ],
+      "deterministic_replay_command": "./scripts/cargo_headroom.sh --runner auto test --test resource_loader --test resource_edge_cases --test scheduler_repro --test cargo_headroom_admission",
+      "tmpdir_policy": "Resource and scheduler suites use TestHarness temp roots; cargo_headroom admission requires explicit target/tmp roots and rejects unsafe repo-local build storage."
     },
     {
       "id": "rpc-tui-e2e-jsonl",
