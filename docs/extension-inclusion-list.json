@@ -3669,7 +3669,7 @@
         "ui_header"
       ],
       "category": "provider",
-      "risk_level": "minimal",
+      "risk_level": "low",
       "inclusion_rationale": "Third-party GitHub extension (MIT license, score=38); exercises diverse coding patterns"
     },
     {
@@ -3739,7 +3739,7 @@
         "ui_header"
       ],
       "category": "tool",
-      "risk_level": "minimal",
+      "risk_level": "low",
       "inclusion_rationale": "Third-party GitHub extension (MIT license, score=38); exercises diverse coding patterns"
     },
     {
@@ -3767,7 +3767,7 @@
         "ui_overlay"
       ],
       "category": "tool",
-      "risk_level": "minimal",
+      "risk_level": "low",
       "inclusion_rationale": "Third-party GitHub extension (MIT license, score=23); exercises diverse coding patterns"
     },
     {
