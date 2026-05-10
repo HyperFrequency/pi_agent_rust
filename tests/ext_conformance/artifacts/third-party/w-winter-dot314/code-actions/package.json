@@ -1,0 +1,9 @@
+{
+  "name": "w-winter-code-actions",
+  "version": "0.0.0",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}

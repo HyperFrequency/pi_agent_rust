@@ -237,8 +237,9 @@ export const DEFAULT_ARTIFACT_CONFIG: ArtifactConfig = {
 
 export const MAX_PARALLEL = 8;
 export const MAX_CONCURRENCY = 4;
-export const RESULTS_DIR = "/tmp/pi-async-subagent-results";
-export const ASYNC_DIR = "/tmp/pi-async-subagent-runs";
+const TMP_ROOT = ".pi-subagent-tmp";
+export const RESULTS_DIR = `${TMP_ROOT}/pi-async-subagent-results`;
+export const ASYNC_DIR = `${TMP_ROOT}/pi-async-subagent-runs`;
 export const WIDGET_KEY = "subagent-async";
 export const POLL_INTERVAL_MS = 250;
 export const MAX_WIDGET_JOBS = 4;

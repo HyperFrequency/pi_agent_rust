@@ -5,13 +5,13 @@
   "extension_conformance": {
     "manifest_count": 223,
     "tested": 223,
-    "passed": 206,
-    "failed": 17,
-    "pass_rate_pct": 92.4,
+    "passed": 209,
+    "failed": 14,
+    "pass_rate_pct": 93.7,
     "by_tier": {
       "1": { "pass": 38, "fail": 0, "total": 38, "rate_pct": 100.0 },
       "2": { "pass": 85, "fail": 2, "total": 87, "rate_pct": 97.7 },
-      "3": { "pass": 78, "fail": 12, "total": 90, "rate_pct": 86.7 },
+      "3": { "pass": 81, "fail": 9, "total": 90, "rate_pct": 90.0 },
       "4": { "pass": 2, "fail": 1, "total": 3, "rate_pct": 66.7 },
       "5": { "pass": 3, "fail": 2, "total": 5, "rate_pct": 60.0 }
     },
@@ -19,7 +19,7 @@
       "official-pi-mono": { "pass": 60, "fail": 1, "total": 61, "rate_pct": 98.4, "note": "1 failure is base_fixtures (test fixture)" },
       "community": { "pass": 53, "fail": 5, "total": 58, "rate_pct": 91.4 },
       "npm-registry": { "pass": 60, "fail": 15, "total": 75, "rate_pct": 80.0 },
-      "third-party-github": { "pass": 21, "fail": 2, "total": 23, "rate_pct": 91.3 },
+      "third-party-github": { "pass": 24, "fail": 0, "total": 24, "rate_pct": 100.0 },
       "agents": { "pass": 1, "fail": 0, "total": 1, "rate_pct": 100.0 }
     }
   },
@@ -51,13 +51,9 @@
   },
   "failure_classification": {
     "manifest_mismatch": {
-      "count": 3,
+      "count": 0,
       "description": "Extension loads but registers different commands/tools than manifest expects.",
-      "extensions": [
-        "third-party/aliou-pi-extensions",
-        "third-party/marckrenn-pi-sub",
-        "third-party/w-winter-dot314"
-      ]
+      "extensions": []
     },
     "missing_npm_package": {
       "count": 5,
@@ -116,15 +112,11 @@
       "scenarios": ["scn-status-line-001", "scn-git-checkpoint-001", "scn-antigravity-image-gen-002"]
     },
     "missing_fixture": {
-      "count": 3,
+      "count": 0,
       "description": "No test fixture (manifest/expected-output snapshot) matches actual registrations.",
       "remediation": "Audit manifests and author correct expected-output fixture files.",
-      "cause_codes": ["manifest_mismatch"],
-      "extensions": [
-        "third-party/aliou-pi-extensions",
-        "third-party/marckrenn-pi-sub",
-        "third-party/w-winter-dot314"
-      ]
+      "cause_codes": [],
+      "extensions": []
     },
     "missing_runtime_api": {
       "count": 9,
@@ -165,18 +157,13 @@
       ]
     },
     "summary": {
-      "total_classified": 17,
-      "actionable": 15,
+      "total_classified": 14,
+      "actionable": 12,
       "non_actionable": 5,
-      "note": "3 scenario failures overlap with extension failures. 17 = 3 + 9 + 5 extension failures; 3 scenario failures are all harness_gap."
+      "note": "3 scenario failures overlap with extension failures. 14 = 9 + 5 extension failures; 3 scenario failures are all harness_gap."
     }
   },
   "actionable_improvements": [
-    {
-      "category": "manifest_mismatch",
-      "action": "Audit manifests for 3 extensions where expected registrations don't match actual.",
-      "impact": "Would improve ext pass rate from 92.4% to 93.7%"
-    },
     {
       "category": "missing_npm_package",
       "action": "Add virtual module stubs for openai, adm-zip, linkedom, @sourcegraph/scip-typescript",
@@ -419,39 +406,6 @@
         "owner": "pi-parity-runtime",
         "review_by": "2026-06-30",
         "tracking_issue": "bd-k5q5.3.9"
-      },
-      {
-        "id": "third-party/aliou-pi-extensions",
-        "kind": "extension",
-        "status": "temporary",
-        "cause_code": "manifest_mismatch",
-        "rationale": "Registered command set diverges from manifest expectation in current fixture corpus.",
-        "mitigation": "Audit fixture expectations and extension registrations to restore parity.",
-        "owner": "pi-conformance-team",
-        "review_by": "2026-06-30",
-        "tracking_issue": "bd-8t27h.19"
-      },
-      {
-        "id": "third-party/marckrenn-pi-sub",
-        "kind": "extension",
-        "status": "temporary",
-        "cause_code": "manifest_mismatch",
-        "rationale": "Registered command set diverges from manifest expectation in current fixture corpus.",
-        "mitigation": "Audit fixture expectations and extension registrations to restore parity.",
-        "owner": "pi-conformance-team",
-        "review_by": "2026-06-30",
-        "tracking_issue": "bd-8t27h.19"
-      },
-      {
-        "id": "third-party/w-winter-dot314",
-        "kind": "extension",
-        "status": "temporary",
-        "cause_code": "manifest_mismatch",
-        "rationale": "Registered command set diverges from manifest expectation in current fixture corpus.",
-        "mitigation": "Audit fixture expectations and extension registrations to restore parity.",
-        "owner": "pi-conformance-team",
-        "review_by": "2026-06-30",
-        "tracking_issue": "bd-8t27h.19"
       }
     ]
   }

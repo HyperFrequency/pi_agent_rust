@@ -7491,7 +7491,17 @@ export function homedir() {{
       : undefined;
   return env_home || _homedir;
 }}
-export function tmpdir() {{ return _tmpdir; }}
+export function tmpdir() {{
+  const env_tmp =
+    globalThis.pi && globalThis.pi.env && typeof globalThis.pi.env.get === "function"
+      ? globalThis.pi.env.get("TMPDIR")
+      : undefined;
+  const process_tmp =
+    globalThis.process && globalThis.process.env
+      ? globalThis.process.env.TMPDIR || globalThis.process.env.TEMP || globalThis.process.env.TMP
+      : undefined;
+  return env_tmp || process_tmp || _tmpdir;
+}}
 export function hostname() {{ return _hostname; }}
 export function platform() {{ return _platform; }}
 export function arch() {{ return _arch; }}
@@ -8273,6 +8283,34 @@ export function createGrepTool(_cwd, _opts = {}) {
   };
 }
 
+export function createFindTool(_cwd, _opts = {}) {
+  return {
+    name: "find",
+    label: "find",
+    description: "Find files and directories by glob or name pattern.",
+    parameters: {
+      type: "object",
+      properties: {
+        pattern: { type: "string", description: "The file name or glob pattern to match" },
+        path: { type: "string", description: "The path to search in" },
+      },
+      required: ["pattern"],
+    },
+    async execute(_id, _params) {
+      return { content: [{ type: "text", text: "" }], details: {} };
+    },
+  };
+}
+
+export function createReadOnlyTools(cwd, opts = {}) {
+  return [
+    createGrepTool(cwd, opts),
+    createFindTool(cwd, opts),
+    createReadTool(cwd, opts),
+    createLsTool(cwd, opts),
+  ];
+}
+
 export function createWriteTool(_cwd, _opts = {}) {
   return {
     name: "write",
@@ -8504,6 +8542,8 @@ export default {
   createReadTool,
   createLsTool,
   createGrepTool,
+  createFindTool,
+  createReadOnlyTools,
   createWriteTool,
   createEditTool,
   copyToClipboard,

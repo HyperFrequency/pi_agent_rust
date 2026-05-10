@@ -30,13 +30,11 @@ import {
 	type Details,
 	type ExtensionConfig,
 	type SingleResult,
-	ASYNC_DIR,
 	DEFAULT_ARTIFACT_CONFIG,
 	DEFAULT_MAX_OUTPUT,
 	MAX_CONCURRENCY,
 	MAX_PARALLEL,
 	POLL_INTERVAL_MS,
-	RESULTS_DIR,
 	WIDGET_KEY,
 } from "./types.js";
 import { formatDuration } from "./formatters.js";
@@ -60,9 +58,12 @@ function loadConfig(): ExtensionConfig {
 	return {};
 }
 
+const RESULTS_ROOT = ".pi-subagent-tmp/pi-async-subagent-results";
+const ASYNC_ROOT = ".pi-subagent-tmp/pi-async-subagent-runs";
+
 export default function registerSubagentExtension(pi: ExtensionAPI): void {
-	fs.mkdirSync(RESULTS_DIR, { recursive: true });
-	fs.mkdirSync(ASYNC_DIR, { recursive: true });
+	fs.mkdirSync(RESULTS_ROOT, { recursive: true });
+	fs.mkdirSync(ASYNC_ROOT, { recursive: true });
 
 	// Cleanup old chain directories on startup (after 24h)
 	cleanupOldChainDirs();
@@ -122,7 +123,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	};
 
 	const handleResult = (file: string) => {
-		const p = path.join(RESULTS_DIR, file);
+		const p = path.join(RESULTS_ROOT, file);
 		if (!fs.existsSync(p)) return;
 		try {
 			const data = JSON.parse(fs.readFileSync(p, "utf-8"));
@@ -134,10 +135,10 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		} catch {}
 	};
 
-	const watcher = fs.watch(RESULTS_DIR, (ev, file) => {
+	const watcher = fs.watch(RESULTS_ROOT, (ev, file) => {
 		if (ev === "rename" && file?.toString().endsWith(".json")) setTimeout(() => handleResult(file.toString()), 50);
 	});
-	fs.readdirSync(RESULTS_DIR)
+	fs.readdirSync(RESULTS_ROOT)
 		.filter((f) => f.endsWith(".json"))
 		.forEach(handleResult);
 
@@ -530,7 +531,7 @@ Example: { chain: [{agent:"scout", task:"Analyze {task}"}, {agent:"planner", tas
 				// Compute output path at runtime (uses effectiveOutput which may be TUI-modified)
 				let outputPath: string | undefined;
 				if (typeof effectiveOutput === 'string' && effectiveOutput) {
-					const outputDir = `/tmp/pi-${agentConfig.name}-${runId}`;
+					const outputDir = path.join(".pi-subagent-tmp", `pi-${agentConfig.name}-${runId}`);
 					fs.mkdirSync(outputDir, { recursive: true });
 					outputPath = `${outputDir}/${effectiveOutput}`;
 
@@ -639,11 +640,11 @@ Example: { chain: [{agent:"scout", task:"Analyze {task}"}, {agent:"planner", tas
 			if (params.dir) {
 				asyncDir = path.resolve(params.dir);
 			} else if (params.id) {
-				const direct = path.join(ASYNC_DIR, params.id);
+				const direct = path.join(ASYNC_ROOT, params.id);
 				if (fs.existsSync(direct)) {
 					asyncDir = direct;
 				} else {
-					const match = findByPrefix(ASYNC_DIR, params.id);
+					const match = findByPrefix(ASYNC_ROOT, params.id);
 					if (match) {
 						asyncDir = match;
 						resolvedId = path.basename(match);
@@ -652,7 +653,7 @@ Example: { chain: [{agent:"scout", task:"Analyze {task}"}, {agent:"planner", tas
 			}
 
 			const resultPath =
-				params.id && !asyncDir ? findByPrefix(RESULTS_DIR, params.id, ".json") : null;
+				params.id && !asyncDir ? findByPrefix(RESULTS_ROOT, params.id, ".json") : null;
 
 			if (!asyncDir && !resultPath) {
 				return {
@@ -722,7 +723,7 @@ Example: { chain: [{agent:"scout", task:"Analyze {task}"}, {agent:"planner", tas
 			chain?: string[];
 		};
 		if (!info.id) return;
-		const asyncDir = info.asyncDir ?? path.join(ASYNC_DIR, info.id);
+		const asyncDir = info.asyncDir ?? path.join(ASYNC_ROOT, info.id);
 		const agents = info.chain && info.chain.length > 0 ? info.chain : info.agent ? [info.agent] : undefined;
 		const now = Date.now();
 		asyncJobs.set(info.id, {
