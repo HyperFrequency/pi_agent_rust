@@ -85,6 +85,29 @@ fn load_inline_extension(
     })
 }
 
+fn load_inline_extensions<I, P>(
+    harness: &common::TestHarness,
+    manager: &ExtensionManager,
+    entries: I,
+) -> bool
+where
+    I: IntoIterator<Item = (P, String)>,
+    P: AsRef<std::path::Path>,
+{
+    let specs = entries
+        .into_iter()
+        .map(|(filename, source)| {
+            let ext_path = harness.create_file(filename, source.as_bytes());
+            JsExtensionLoadSpec::from_entry_path(&ext_path).expect("load spec")
+        })
+        .collect::<Vec<_>>();
+
+    common::run_async({
+        let manager = manager.clone();
+        async move { manager.load_js_extensions(specs).await.is_ok() }
+    })
+}
+
 fn shutdown(manager: &ExtensionManager) {
     let _ = common::run_async({
         let manager = manager.clone();
@@ -175,16 +198,16 @@ fn tool_registrations_from_multiple_extensions_are_namespaced() {
 
     // Load 5 stateful extensions with unique tool names.
     let ext_ids = ["alpha", "beta", "gamma", "delta", "epsilon"];
-    for (i, ext_id) in ext_ids.iter().enumerate() {
-        let source = stateful_extension_source(ext_id);
-        let ok = load_inline_extension(
-            &harness,
-            &manager,
+    let entries = ext_ids.iter().enumerate().map(|(i, ext_id)| {
+        (
             format!("extensions/ext_{i}.mjs"),
-            &source,
-        );
-        assert!(ok, "extension {ext_id} should load");
-    }
+            stateful_extension_source(ext_id),
+        )
+    });
+    assert!(
+        load_inline_extensions(&harness, &manager, entries),
+        "extensions should load"
+    );
 
     // Verify all tools are registered with distinct names.
     let runtime = manager.js_runtime().expect("js runtime");
@@ -304,16 +327,16 @@ fn stateful_extensions_maintain_isolated_call_counts() {
     };
 
     let ext_ids = ["iso_a", "iso_b", "iso_c"];
-    for (i, ext_id) in ext_ids.iter().enumerate() {
-        let source = stateful_extension_source(ext_id);
-        let ok = load_inline_extension(
-            &harness,
-            &manager,
+    let entries = ext_ids.iter().enumerate().map(|(i, ext_id)| {
+        (
             format!("extensions/iso_{i}.mjs"),
-            &source,
-        );
-        assert!(ok, "extension {ext_id} should load");
-    }
+            stateful_extension_source(ext_id),
+        )
+    });
+    assert!(
+        load_inline_extensions(&harness, &manager, entries),
+        "extensions should load"
+    );
 
     let ctx = json!({ "hasUI": false, "cwd": cwd.display().to_string() });
 
@@ -395,15 +418,16 @@ fn multi_thread_dispatch_completes_without_deadlock() {
 
     // Load a few extensions.
     let ext_ids = ["mt_a", "mt_b", "mt_c"];
-    for (i, ext_id) in ext_ids.iter().enumerate() {
-        let source = stateful_extension_source(ext_id);
-        load_inline_extension(
-            &harness,
-            &manager,
+    let entries = ext_ids.iter().enumerate().map(|(i, ext_id)| {
+        (
             format!("extensions/mt_{i}.mjs"),
-            &source,
-        );
-    }
+            stateful_extension_source(ext_id),
+        )
+    });
+    assert!(
+        load_inline_extensions(&harness, &manager, entries),
+        "extensions should load"
+    );
 
     // Spawn threads that each dispatch events.
     let n_threads = 4;

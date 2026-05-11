@@ -133,14 +133,14 @@ fn e2e_quantile_harden_flow_with_evidence() {
             let _ = dispatch_host_call_shared(&ctx, call).await;
         }
 
-        // Phase 2: Exec calls -> should be hardened/denied
+        // Phase 2: Dangerous exec calls -> should be hardened/denied
         let mut harden_count = 0usize;
         for idx in 0..4 {
             let call = HostCallPayload {
                 call_id: format!("harden-exec-{idx}"),
                 capability: "exec".to_string(),
                 method: "exec".to_string(),
-                params: json!({ "cmd": "echo", "args": [idx.to_string()] }),
+                params: json!({ "cmd": "git", "args": ["reset", "--hard", format!("HEAD~{idx}")] }),
                 timeout_ms: None,
                 cancel_token: None,
                 context: None,

@@ -190,9 +190,9 @@ fn vfs_write_does_not_create_real_file() {
     let result = eval_fs(
         r"(() => {
         // Write to VFS
-        fs.writeFileSync('/tmp/vfs_escape_test_canary.txt', 'escape attempt');
+        fs.writeFileSync('tmp/vfs_escape_test_canary.txt', 'escape attempt');
         // Verify it exists in VFS
-        const exists_vfs = fs.existsSync('/tmp/vfs_escape_test_canary.txt');
+        const exists_vfs = fs.existsSync('tmp/vfs_escape_test_canary.txt');
         return String(exists_vfs);
     })()",
     );
@@ -206,15 +206,22 @@ fn vfs_write_does_not_create_real_file() {
 }
 
 #[test]
-fn vfs_write_with_traversal_stays_in_vfs() {
+fn vfs_write_with_traversal_is_denied() {
     let result = eval_fs(
         r"(() => {
-        // Attempt path traversal write
-        fs.writeFileSync('../../tmp/vfs_traversal_canary.txt', 'escape');
-        return 'wrote';
+        try {
+            // Attempt path traversal write
+            fs.writeFileSync('../../../../../../../../tmp/vfs_traversal_canary.txt', 'escape');
+            return 'wrote';
+        } catch (e) {
+            return 'ERROR:' + e.message;
+        }
     })()",
     );
-    assert_eq!(result, "wrote");
+    assert!(
+        result.contains("host write denied"),
+        "expected traversal write denial, got: {result}"
+    );
 
     // Verify no real file was created
     assert!(
@@ -224,14 +231,21 @@ fn vfs_write_with_traversal_stays_in_vfs() {
 }
 
 #[test]
-fn vfs_mkdir_does_not_create_real_dir() {
+fn vfs_mkdir_outside_workspace_is_denied() {
     let result = eval_fs(
         r"(() => {
-        fs.mkdirSync('/tmp/vfs_escape_test_dir', { recursive: true });
-        return String(fs.existsSync('/tmp/vfs_escape_test_dir'));
+        try {
+            fs.mkdirSync('/tmp/vfs_escape_test_dir', { recursive: true });
+            return 'created';
+        } catch (e) {
+            return 'ERROR:' + e.message;
+        }
     })()",
     );
-    assert_eq!(result, "true");
+    assert!(
+        result.contains("host write denied"),
+        "expected mkdir denial, got: {result}"
+    );
 
     assert!(
         !std::path::Path::new("/tmp/vfs_escape_test_dir").exists(),
@@ -293,8 +307,8 @@ fn host_read_fallback_allows_workspace_file() {
 fn vfs_write_then_read_roundtrips_without_host_fs() {
     let result = eval_fs(
         r"(() => {
-        const testPath = '/vfs_only/test_file.txt';
-        fs.mkdirSync('/vfs_only', { recursive: true });
+        const testPath = 'vfs_only/test_file.txt';
+        fs.mkdirSync('vfs_only', { recursive: true });
         fs.writeFileSync(testPath, 'VFS content only');
         const content = fs.readFileSync(testPath, 'utf8');
         return content;
@@ -368,15 +382,22 @@ fn exists_sync_traversal_probe() {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn write_file_absolute_path_stays_in_vfs() {
+fn write_file_absolute_path_outside_workspace_is_denied() {
     let unique_name = format!("/tmp/vfs_escape_abs_{}", std::process::id());
     let result = eval_fs(&format!(
         r#"(() => {{
-        fs.writeFileSync("{unique_name}", "escape attempt");
-        return fs.readFileSync("{unique_name}", "utf8");
+        try {{
+            fs.writeFileSync("{unique_name}", "escape attempt");
+            return "wrote";
+        }} catch (e) {{
+            return "ERROR:" + e.message;
+        }}
     }})()"#,
     ));
-    assert_eq!(result, "escape attempt");
+    assert!(
+        result.contains("host write denied"),
+        "expected absolute write denial, got: {result}"
+    );
 
     // Critical: file must NOT exist on real FS
     assert!(
@@ -546,8 +567,8 @@ fn stat_sync_traversal_path() {
 fn stat_sync_vfs_only_file() {
     let result = eval_fs(
         r"(() => {
-        fs.writeFileSync('/vfs_stat_test.txt', 'hello');
-        const stat = fs.statSync('/vfs_stat_test.txt');
+        fs.writeFileSync('vfs_stat_test.txt', 'hello');
+        const stat = fs.statSync('vfs_stat_test.txt');
         return 'isFile:' + stat.isFile() + ',size:' + stat.size;
     })()",
     );
@@ -565,10 +586,10 @@ fn stat_sync_vfs_only_file() {
 fn readdir_sync_vfs_only() {
     let result = eval_fs(
         r"(() => {
-        fs.mkdirSync('/sandbox', { recursive: true });
-        fs.writeFileSync('/sandbox/a.txt', 'a');
-        fs.writeFileSync('/sandbox/b.txt', 'b');
-        const entries = fs.readdirSync('/sandbox');
+        fs.mkdirSync('sandbox', { recursive: true });
+        fs.writeFileSync('sandbox/a.txt', 'a');
+        fs.writeFileSync('sandbox/b.txt', 'b');
+        const entries = fs.readdirSync('sandbox');
         return entries.sort().join(',');
     })()",
     );
@@ -579,9 +600,6 @@ fn readdir_sync_vfs_only() {
 fn readdir_sync_root_only_shows_vfs_dirs() {
     let result = eval_fs(
         r"(() => {
-        // Create some VFS directories
-        fs.mkdirSync('/mydir', { recursive: true });
-        fs.writeFileSync('/myfile.txt', 'root file');
         const entries = fs.readdirSync('/');
         // Should only contain VFS entries, not real filesystem root entries
         return entries.join(',');
@@ -600,11 +618,11 @@ fn readdir_sync_root_only_shows_vfs_dirs() {
 
 #[test]
 fn copy_file_sync_stays_in_vfs() {
-    let unique_dest = format!("/tmp/vfs_copy_escape_{}", std::process::id());
+    let unique_dest = format!("vfs_copy_escape_{}", std::process::id());
     let result = eval_fs(&format!(
         r#"(() => {{
-        fs.writeFileSync("/src.txt", "original");
-        fs.copyFileSync("/src.txt", "{unique_dest}");
+        fs.writeFileSync("src.txt", "original");
+        fs.copyFileSync("src.txt", "{unique_dest}");
         return fs.readFileSync("{unique_dest}", "utf8");
     }})()"#,
     ));
@@ -622,11 +640,11 @@ fn copy_file_sync_stays_in_vfs() {
 
 #[test]
 fn rename_sync_stays_in_vfs() {
-    let unique_dest = format!("/tmp/vfs_rename_escape_{}", std::process::id());
+    let unique_dest = format!("vfs_rename_escape_{}", std::process::id());
     let result = eval_fs(&format!(
         r#"(() => {{
-        fs.writeFileSync("/rename_src.txt", "data");
-        fs.renameSync("/rename_src.txt", "{unique_dest}");
+        fs.writeFileSync("rename_src.txt", "data");
+        fs.renameSync("rename_src.txt", "{unique_dest}");
         return fs.readFileSync("{unique_dest}", "utf8");
     }})()"#,
     ));
@@ -646,9 +664,9 @@ fn rename_sync_stays_in_vfs() {
 fn access_sync_vfs_file() {
     let result = eval_fs(
         r"(() => {
-        fs.writeFileSync('/access_test.txt', 'content');
+        fs.writeFileSync('access_test.txt', 'content');
         try {
-            fs.accessSync('/access_test.txt');
+            fs.accessSync('access_test.txt');
             return 'accessible';
         } catch (e) {
             return 'ERROR:' + e.message;

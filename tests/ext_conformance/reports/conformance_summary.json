@@ -1,5 +1,5 @@
 {
-  "correlation_id": "conformance-summary-local-20260508T113613486Z",
+  "correlation_id": "conformance-summary-local-20260510T230855917Z",
   "counts": {
     "fail": 0,
     "na": 164,
@@ -14,7 +14,7 @@
     "parity_logs": 16,
     "smoke_logs": 16
   },
-  "generated_at": "2026-05-08T11:36:13Z",
+  "generated_at": "2026-05-10T23:08:55Z",
   "negative": {
     "fail": 0,
     "pass": 30
@@ -52,6 +52,6 @@
       "total": 23
     }
   },
-  "run_id": "local-20260508T113613486Z",
+  "run_id": "local-20260510T230855917Z",
   "schema": "pi.ext.conformance_summary.v2"
 }

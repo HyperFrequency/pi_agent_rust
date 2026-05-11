@@ -5019,6 +5019,33 @@ fn path_is_in_allowed_extension_root(
         .any(|root| path.starts_with(root))
 }
 
+fn path_is_in_registered_extension_root(
+    path: &Path,
+    module_state: &Rc<RefCell<PiJsModuleState>>,
+) -> bool {
+    module_state
+        .borrow()
+        .canonical_extension_roots
+        .iter()
+        .any(|root| path.starts_with(root))
+}
+
+fn path_is_in_leaf_allowed_extension_root(
+    path: &Path,
+    extension_id: Option<&str>,
+    module_state: &Rc<RefCell<PiJsModuleState>>,
+    fallback_roots: &Arc<std::sync::Mutex<Vec<PathBuf>>>,
+) -> bool {
+    let roots = extension_roots_for_fs_access(extension_id, module_state, fallback_roots);
+    let Some(nearest) = nearest_containing_root(path, &roots) else {
+        return false;
+    };
+
+    !roots
+        .iter()
+        .any(|root| root != nearest && root.starts_with(nearest))
+}
+
 #[derive(Clone, Debug)]
 struct PiJsResolver {
     state: Rc<RefCell<PiJsModuleState>>,
@@ -6333,6 +6360,14 @@ fn require_destructure_regex() -> &'static regex::Regex {
 
 /// Detect if a relative specifier resolves to a path outside all known
 /// extension roots.  Returns the resolved absolute path if it's an escape.
+fn nearest_containing_root<'a>(path: &Path, canonical_roots: &'a [PathBuf]) -> Option<&'a PathBuf> {
+    let canonical_path = crate::extensions::safe_canonicalize(path);
+    canonical_roots
+        .iter()
+        .filter(|root| canonical_path.starts_with(root))
+        .max_by_key(|root| root.components().count())
+}
+
 fn detect_monorepo_escape(
     base: &str,
     specifier: &str,
@@ -6348,9 +6383,16 @@ fn detect_monorepo_escape(
     // if the path doesn't exist on disk, avoiding path traversal bypasses.
     let effective = crate::extensions::safe_canonicalize(&resolved);
 
+    if let Some(base_root) = nearest_containing_root(Path::new(base), canonical_extension_roots) {
+        if effective.starts_with(base_root) {
+            return None;
+        }
+        return Some(resolved);
+    }
+
     for canonical_root in canonical_extension_roots {
         if effective.starts_with(canonical_root) {
-            return None; // Within an extension root — not an escape
+            return None;
         }
     }
 
@@ -10143,6 +10185,19 @@ const __pi_vfs = (() => {
     }
   }
 
+  function checkWorkspaceWriteAccess(resolved) {
+    const normalized = normalizePath(resolved);
+    const cwd = normalizePath(
+      globalThis.process && typeof globalThis.process.cwd === "function"
+        ? globalThis.process.cwd()
+        : "/"
+    );
+    if (normalized !== cwd && !normalized.startsWith(`${cwd}/`)) {
+      throw new Error("host write denied: path outside extension root");
+    }
+    checkWriteAccess(normalized);
+  }
+
   function normalizePath(input) {
     let raw = String(input ?? "").replace(/\\/g, "/");
     // Strip Windows UNC verbatim prefix that canonicalize() produces.
@@ -10422,36 +10477,35 @@ const __pi_vfs = (() => {
 
     const isDir = state.dirs.has(normalized);
     let bytes = state.files.get(normalized);
-    if (!isDir && bytes === undefined && typeof globalThis.__pi_host_read_file_sync === "function") {
+    let hostStat = null;
+    if (!isDir && bytes === undefined && typeof globalThis.__pi_host_stat_sync === "function") {
       try {
-        const content = globalThis.__pi_host_read_file_sync(normalized);
-        // Host read payload is base64-encoded to preserve binary file fidelity.
-        bytes = toBytes(content, "base64");
-        ensureDir(dirname(normalized));
-        state.files.set(normalized, bytes);
+        hostStat = JSON.parse(globalThis.__pi_host_stat_sync(normalized, !!followSymlinks));
       } catch (e) {
-        const message = String((e && e.message) ? e.message : e);
-        if (message.includes("host read denied")) {
-          throw e;
-        }
         /* not on host FS */
       }
     }
-    const isFile = bytes !== undefined;
-    if (!isDir && !isFile) {
+    const hostKind = hostStat && typeof hostStat.kind === "string" ? hostStat.kind : "";
+    const isHostDir = hostKind === "dir";
+    const isHostFile = hostKind === "file";
+    const isHostSymlink = hostKind === "symlink";
+    const isHostOther = hostKind === "other";
+    const isFile = bytes !== undefined || isHostFile;
+    if (!isDir && !isHostDir && !isFile && !isHostSymlink && !isHostOther) {
       throw new Error(`ENOENT: no such file or directory, stat '${String(path ?? "")}'`);
     }
-    const size = isFile ? bytes.byteLength : 0;
+    const hostSize = hostStat && Number.isFinite(Number(hostStat.size)) ? Number(hostStat.size) : 0;
+    const size = bytes !== undefined ? bytes.byteLength : hostSize;
     return {
       isFile() { return isFile; },
-      isDirectory() { return isDir; },
-      isSymbolicLink() { return false; },
+      isDirectory() { return isDir || isHostDir; },
+      isSymbolicLink() { return isHostSymlink; },
       isBlockDevice() { return false; },
       isCharacterDevice() { return false; },
       isFIFO() { return false; },
       isSocket() { return false; },
       size,
-      mode: isDir ? 0o755 : 0o644,
+      mode: (isDir || isHostDir) ? 0o755 : isHostSymlink ? 0o777 : 0o644,
       uid: 0,
       gid: 0,
       atimeMs: 0,
@@ -10480,6 +10534,7 @@ const __pi_vfs = (() => {
   state.makeStat = makeStat;
   state.resolvePath = resolvePath;
   state.checkWriteAccess = checkWriteAccess;
+  state.checkWorkspaceWriteAccess = checkWorkspaceWriteAccess;
   state.parseOpenFlags = parseOpenFlags;
   state.getFdEntry = getFdEntry;
   state.toWritableView = toWritableView;
@@ -10569,7 +10624,7 @@ export function lstatSync(path) { return __pi_vfs.makeStat(path, false); }
 export function mkdtempSync(prefix, _opts) {
   const p = String(prefix ?? "/tmp/tmp-");
   const out = `${p}${Date.now().toString(36)}`;
-  __pi_vfs.checkWriteAccess(__pi_vfs.normalizePath(out));
+  __pi_vfs.checkWorkspaceWriteAccess(__pi_vfs.normalizePath(out));
   __pi_vfs.ensureDir(out);
   return out;
 }
@@ -16416,7 +16471,8 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                             } else {
                                 workspace_root.join(requested)
                             };
-                            let checked_path = crate::extensions::safe_canonicalize(&requested_abs);
+                            let checked_path =
+                                crate::extensions::safe_canonicalize(&requested_abs);
 
                             let in_ext_root = path_is_in_allowed_extension_root(
                                 &checked_path,
@@ -16425,7 +16481,8 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                                 &allowed_read_roots,
                             );
 
-                            let allowed = checked_path.starts_with(&workspace_root) || in_ext_root;
+                            let allowed =
+                                checked_path.starts_with(&workspace_root) || in_ext_root;
 
                             if allowed {
                                 Ok(())
@@ -16435,6 +16492,81 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                                     "host write denied: path outside extension root".to_string(),
                                 ))
                             }
+                        }
+                    }),
+                )?;
+
+                // __pi_host_stat_sync(path, follow_symlinks) -> JSON string (throws on error)
+                // Synchronous real-filesystem stat fallback for node:fs statSync/lstatSync.
+                // Like host reads, stats are confined to the workspace root and registered
+                // extension roots so existence checks cannot probe arbitrary host paths.
+                global.set(
+                    "__pi_host_stat_sync",
+                    Func::from({
+                        let process_cwd = process_cwd.clone();
+                        let allowed_read_roots = Arc::clone(&allowed_read_roots);
+                        let module_state = Rc::clone(&module_state);
+                        move |ctx: Ctx<'_>,
+                              path: String,
+                              follow_symlinks: bool|
+                              -> rquickjs::Result<String> {
+                            let extension_id = current_extension_id(&ctx);
+                            let workspace_root =
+                                crate::extensions::safe_canonicalize(Path::new(&process_cwd));
+
+                            let requested = PathBuf::from(&path);
+                            let requested_abs = if requested.is_absolute() {
+                                requested
+                            } else {
+                                workspace_root.join(requested)
+                            };
+                            let checked_path =
+                                crate::extensions::safe_canonicalize(&requested_abs);
+
+                            let in_ext_root = path_is_in_allowed_extension_root(
+                                &checked_path,
+                                extension_id.as_deref(),
+                                &module_state,
+                                &allowed_read_roots,
+                            );
+                            let allowed =
+                                checked_path.starts_with(&workspace_root) || in_ext_root;
+
+                            if !allowed {
+                                return Err(rquickjs::Error::new_loading_message(
+                                    &path,
+                                    "host stat denied: path outside extension root".to_string(),
+                                ));
+                            }
+
+                            let metadata = if follow_symlinks {
+                                std::fs::metadata(&requested_abs)
+                            } else {
+                                std::fs::symlink_metadata(&requested_abs)
+                            }
+                            .map_err(|err| {
+                                rquickjs::Error::new_loading_message(
+                                    &path,
+                                    format!("host stat: {err}"),
+                                )
+                            })?;
+
+                            let file_type = metadata.file_type();
+                            let kind = if file_type.is_symlink() {
+                                "symlink"
+                            } else if file_type.is_dir() {
+                                "dir"
+                            } else if file_type.is_file() {
+                                "file"
+                            } else {
+                                "other"
+                            };
+
+                            Ok(serde_json::json!({
+                                "kind": kind,
+                                "size": metadata.len(),
+                            })
+                            .to_string())
                         }
                     }),
                 )?;
@@ -16467,7 +16599,7 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                             };
 
                             let apply_missing_asset_fallback = |checked_path: &Path, error_msg: &str| -> rquickjs::Result<String> {
-                                let in_ext_root = path_is_in_allowed_extension_root(
+                                let in_ext_root = path_is_in_leaf_allowed_extension_root(
                                     checked_path,
                                     extension_id.as_deref(),
                                     &module_state,
@@ -22216,6 +22348,34 @@ import { isIPv4 as netIsIpv4 } from "node:net";
             &canonical_roots,
         );
         assert_eq!(resolved, Some(inside));
+    }
+
+    #[test]
+    fn detect_monorepo_escape_uses_nearest_base_root() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp_dir.path();
+        let extension_root = workspace_root.join("community").join("extension");
+        std::fs::create_dir_all(&extension_root).expect("mkdir extension");
+
+        let base = extension_root.join("index.ts");
+        std::fs::write(&base, "export {};\n").expect("write base");
+
+        let canonical_roots = [workspace_root, extension_root.as_path()]
+            .into_iter()
+            .map(crate::extensions::safe_canonicalize)
+            .collect::<Vec<_>>();
+
+        let escaped = detect_monorepo_escape(
+            base.to_string_lossy().as_ref(),
+            "../../shared",
+            &canonical_roots,
+        )
+        .expect("workspace sibling should escape nearest extension root");
+        assert!(crate::extensions::safe_canonicalize(&escaped).ends_with(Path::new("shared")));
+
+        let inside =
+            detect_monorepo_escape(base.to_string_lossy().as_ref(), "./local", &canonical_roots);
+        assert!(inside.is_none(), "same-extension import should not escape");
     }
 
     #[test]

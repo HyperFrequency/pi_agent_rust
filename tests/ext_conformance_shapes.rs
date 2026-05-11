@@ -14,6 +14,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -26,22 +27,42 @@ fn base_fixtures_dir() -> PathBuf {
     repo_root().join("tests/ext_conformance/artifacts/base_fixtures")
 }
 
-fn deterministic_env() -> HashMap<String, String> {
+static SHAPE_TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn sanitize_fixture_id(fixture_name: &str) -> String {
+    fixture_name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn shape_test_root(fixture_name: &str) -> PathBuf {
+    let sequence = SHAPE_TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "pi-ext-shape-test-{}-{sequence}-{}",
+        std::process::id(),
+        sanitize_fixture_id(fixture_name)
+    ))
+}
+
+fn deterministic_env(cwd: &Path, home: &Path) -> HashMap<String, String> {
+    let cwd = cwd.to_string_lossy().into_owned();
+    let home = home.to_string_lossy().into_owned();
     let mut env = HashMap::new();
     env.insert(
         "PI_DETERMINISTIC_TIME_MS".to_string(),
         "1700000000000".to_string(),
     );
     env.insert("PI_DETERMINISTIC_TIME_STEP_MS".to_string(), "1".to_string());
-    env.insert(
-        "PI_DETERMINISTIC_CWD".to_string(),
-        "/tmp/ext-shape-test".to_string(),
-    );
-    env.insert(
-        "PI_DETERMINISTIC_HOME".to_string(),
-        "/tmp/ext-shape-test-home".to_string(),
-    );
-    env.insert("HOME".to_string(), "/tmp/ext-shape-test-home".to_string());
+    env.insert("PI_DETERMINISTIC_CWD".to_string(), cwd);
+    env.insert("PI_DETERMINISTIC_HOME".to_string(), home.clone());
+    env.insert("HOME".to_string(), home);
     env.insert("PI_DETERMINISTIC_RANDOM".to_string(), "0.5".to_string());
     env
 }
@@ -49,6 +70,7 @@ fn deterministic_env() -> HashMap<String, String> {
 /// Load an extension and return manager + runtime + registration snapshot.
 fn load_and_snapshot(
     fixture_path: &Path,
+    fixture_name: &str,
 ) -> Result<
     (
         ExtensionManager,
@@ -57,18 +79,31 @@ fn load_and_snapshot(
     ),
     String,
 > {
-    let spec = JsExtensionLoadSpec::from_entry_path(fixture_path)
+    let manager = ExtensionManager::new();
+    let root = shape_test_root(fixture_name);
+    let cwd = root.join("cwd");
+    let home = root.join("home");
+    let module_cache = root.join("module-cache");
+    let fixture_dir = root.join("fixture").join(fixture_name);
+    std::fs::create_dir_all(&cwd).map_err(|e| format!("create cwd: {e}"))?;
+    std::fs::create_dir_all(&home).map_err(|e| format!("create home: {e}"))?;
+    std::fs::create_dir_all(&module_cache).map_err(|e| format!("create module cache: {e}"))?;
+    std::fs::create_dir_all(&fixture_dir).map_err(|e| format!("create fixture dir: {e}"))?;
+
+    // The production loader auto-discovers sibling entrypoints, so copy the
+    // selected fixture into a one-fixture root before loading this harness case.
+    let isolated_entry = fixture_dir.join("index.ts");
+    let _ = std::fs::copy(fixture_path, &isolated_entry)
+        .map_err(|e| format!("copy fixture into isolated root: {e}"))?;
+    let spec = JsExtensionLoadSpec::from_entry_path(&isolated_entry)
         .map_err(|e| format!("load spec: {e}"))?;
 
-    let manager = ExtensionManager::new();
-    let cwd = PathBuf::from("/tmp/ext-shape-test");
-    let _ = std::fs::create_dir_all(&cwd);
-    let _ = std::fs::create_dir_all("/tmp/ext-shape-test-home");
     let tools = Arc::new(ToolRegistry::new(&[], &cwd, None));
 
     let js_config = PiJsRuntimeConfig {
-        cwd: "/tmp/ext-shape-test".to_string(),
-        env: deterministic_env(),
+        cwd: cwd.to_string_lossy().into_owned(),
+        env: deterministic_env(&cwd, &home),
+        disk_cache_dir: Some(module_cache),
         ..Default::default()
     };
 
@@ -122,7 +157,7 @@ fn run_shape_test(shape: ExtensionShape, fixture_name: &str) -> ShapeTestResult 
     let mut load_event =
         ShapeEvent::new(&correlation_id, fixture_name, shape, LifecyclePhase::Load);
 
-    let load_result = load_and_snapshot(&fixture_path);
+    let load_result = load_and_snapshot(&fixture_path, fixture_name);
     load_event.duration_ms = load_start.elapsed().as_millis() as u64;
 
     let (manager, runtime, snapshot) = match load_result {
@@ -568,7 +603,7 @@ fn shape_harness_nonexistent_fixture_reports_load_error() {
     let mut load_event =
         ShapeEvent::new(correlation_id, "nonexistent", shape, LifecyclePhase::Load);
 
-    let result = load_and_snapshot(&fixture_path);
+    let result = load_and_snapshot(&fixture_path, "nonexistent");
     #[allow(clippy::cast_possible_truncation)]
     {
         load_event.duration_ms = load_start.elapsed().as_millis() as u64;

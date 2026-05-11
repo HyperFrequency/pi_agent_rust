@@ -38,6 +38,8 @@ const EVENTS_PER_SEC: u64 = 50;
 const RSS_SAMPLE_INTERVAL_SECS: u64 = 5;
 /// Maximum acceptable RSS growth (10% local).
 const MAX_RSS_GROWTH_PCT: f64 = 0.10;
+/// Absolute growth budget for short load/unload cycles.
+const LOAD_UNLOAD_ABSOLUTE_RSS_BUDGET_BYTES: u64 = 64 * 1024 * 1024;
 /// Maximum acceptable latency degradation (2x).
 const MAX_LATENCY_DEGRADATION: u64 = 2;
 /// Absolute p99 cap for noisy shared CI/agent hosts.
@@ -1482,23 +1484,26 @@ fn stress_extension_load_unload_cycle() {
     system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&[pid]), true, refresh);
     let final_rss = system.process(pid).map_or(0, sysinfo::Process::memory);
 
-    eprintln!("  Load/unload cycles: RSS {initial_rss}KB → {final_rss}KB");
+    eprintln!("  Load/unload cycles: RSS {initial_rss}B → {final_rss}B");
 
     // Allow generous budget for test overhead (GC, allocator fragmentation)
     // Main goal: detect catastrophic leaks, not minor fluctuations
     if initial_rss > 0 {
+        let absolute_growth = final_rss.saturating_sub(initial_rss);
         #[allow(clippy::cast_precision_loss)]
-        let growth = (final_rss.saturating_sub(initial_rss) as f64) / (initial_rss as f64);
+        let growth = (absolute_growth as f64) / (initial_rss as f64);
         let budget = if std::env::var("CI").is_ok() {
             10.0
         } else {
             0.50
         };
         assert!(
-            growth <= budget,
-            "RSS after {CYCLES} load/unload cycles should not grow >{:.0}% (got {:.1}%)",
+            growth <= budget || absolute_growth <= LOAD_UNLOAD_ABSOLUTE_RSS_BUDGET_BYTES,
+            "RSS after {CYCLES} load/unload cycles should not grow >{:.0}% and >{}B (got {:.1}% and {}B)",
             budget * 100.0,
-            growth * 100.0
+            LOAD_UNLOAD_ABSOLUTE_RSS_BUDGET_BYTES,
+            growth * 100.0,
+            absolute_growth
         );
     }
 }

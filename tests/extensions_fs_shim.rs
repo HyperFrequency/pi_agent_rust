@@ -915,7 +915,7 @@ fn fs_mkdtemp() {
             .eval(
                 r#"
                 import('node:fs').then((fs) => {
-                    const dir = fs.mkdtempSync('/tmp/test-');
+                    const dir = fs.mkdtempSync('tmp/test-');
                     globalThis.mkdtempResult = dir;
                     globalThis.mkdtempIsDir = fs.statSync(dir).isDirectory();
                 });
@@ -927,7 +927,7 @@ fn fs_mkdtemp() {
         runtime.drain_microtasks().await.expect("drain");
 
         let dir: serde_json::Value = runtime.read_global_json("mkdtempResult").await.unwrap();
-        assert!(dir.as_str().unwrap().starts_with("/tmp/test-"));
+        assert!(dir.as_str().unwrap().starts_with("tmp/test-"));
 
         let is_dir: serde_json::Value = runtime.read_global_json("mkdtempIsDir").await.unwrap();
         assert_eq!(is_dir, true);
@@ -1251,7 +1251,10 @@ fn fs_stat_host_fallback() {
         let is_file: serde_json::Value = runtime.read_global_json("hostStatIsFile").await.unwrap();
         assert_eq!(is_file, true);
         let size: serde_json::Value = runtime.read_global_json("hostStatSize").await.unwrap();
-        assert!(size.as_u64().unwrap() > 0);
+        assert_eq!(
+            size.as_f64().expect("numeric hostStatSize"),
+            "host-fallback".len() as f64
+        );
 
         let outside_exists: serde_json::Value =
             runtime.read_global_json("outsideExists").await.unwrap();

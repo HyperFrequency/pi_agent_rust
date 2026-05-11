@@ -4566,8 +4566,10 @@ pub fn redact_command_for_logging(policy: &SecretBrokerPolicy, cmd: &str) -> Str
     // 2. Redact KEY=VALUE patterns
     // Handles: KEY=value, KEY='value with spaces', KEY="value with spaces"
     let env_regex = ENV_RE.get_or_init(|| {
-        Regex::new(r#"([A-Za-z_][A-Za-z0-9_]*)=('(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|[^\s]+)"#)
-            .expect("regex")
+        Regex::new(
+            r#"([A-Za-z_][A-Za-z0-9_]*)=((?:'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|[^\s'"]+)+)"#,
+        )
+        .expect("regex")
     });
     redacted = env_regex
         .replace_all(&redacted, |caps: &regex::Captures| {
@@ -6204,7 +6206,42 @@ impl From<&RuntimeRiskLedgerArtifactEntry> for RuntimeRiskLedgerEntry {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static RUNTIME_RISK_TEST_NOW_MS: std::cell::Cell<Option<i64>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+struct RuntimeRiskTestClockGuard {
+    previous: Option<i64>,
+}
+
+#[cfg(test)]
+impl RuntimeRiskTestClockGuard {
+    fn set(now_ms: i64) -> Self {
+        let previous = RUNTIME_RISK_TEST_NOW_MS.with(|slot| {
+            let previous = slot.get();
+            slot.set(Some(now_ms));
+            previous
+        });
+        Self { previous }
+    }
+}
+
+#[cfg(test)]
+impl Drop for RuntimeRiskTestClockGuard {
+    fn drop(&mut self) {
+        RUNTIME_RISK_TEST_NOW_MS.with(|slot| slot.set(self.previous));
+    }
+}
+
 fn runtime_risk_now_ms() -> i64 {
+    #[cfg(test)]
+    if let Some(now_ms) = RUNTIME_RISK_TEST_NOW_MS.with(std::cell::Cell::get) {
+        return now_ms;
+    }
+
     i64::try_from(wall_now().as_millis()).unwrap_or(i64::MAX)
 }
 
@@ -20106,26 +20143,6 @@ fn discover_sibling_index_entries(primary: &Path) -> Vec<PathBuf> {
     out
 }
 
-fn discover_extensions_dir_entries(primary: &Path) -> Vec<PathBuf> {
-    let canonical_primary = safe_canonicalize(primary);
-    let Some(parent_dir) = primary.parent() else {
-        return Vec::new();
-    };
-    if !parent_dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.eq_ignore_ascii_case("extensions"))
-    {
-        return Vec::new();
-    }
-
-    let entries = collect_extension_entries_from_dir(parent_dir);
-    if entries.len() < 2 || !entries.iter().any(|path| path == &canonical_primary) {
-        return Vec::new();
-    }
-    entries
-}
-
 fn discover_sibling_extension_entries(primary: &Path) -> Vec<PathBuf> {
     let canonical_primary = safe_canonicalize(primary);
     let Some(parent_dir) = primary.parent() else {
@@ -20263,11 +20280,6 @@ fn discover_related_extension_entries(primary: &Path) -> Result<Vec<PathBuf>> {
         }
     }
     for path in discover_sibling_index_entries(&canonical_primary) {
-        if seen.insert(path.clone()) {
-            out.push(path);
-        }
-    }
-    for path in discover_extensions_dir_entries(&canonical_primary) {
         if seen.insert(path.clone()) {
             out.push(path);
         }
@@ -21706,9 +21718,12 @@ pub async fn dispatch_host_call_shared(
                 replay_outcome_attributes(&outcome, duration_ms, resource_target_class),
             );
 
+            let observed_micros = u64::try_from(started_at.elapsed().as_micros())
+                .unwrap_or(u64::MAX)
+                .max(1);
             let observation = crate::extension_replay::ReplayCaptureObservation {
-                baseline_micros: duration_ms.saturating_mul(1000),
-                captured_micros: duration_ms.saturating_mul(1000),
+                baseline_micros: observed_micros,
+                captured_micros: observed_micros,
                 trace_bytes: 0,
             };
             if let Ok(result) = recorder.finish(observation) {
@@ -30590,7 +30605,7 @@ mod tests {
     }
 
     #[test]
-    fn discover_extensions_dir_entries_keeps_primary_when_not_first() {
+    fn discover_related_extension_entries_keeps_shared_extensions_dir_entries_independent() {
         let temp = tempdir().expect("tempdir");
         let extensions_dir = temp.path().join("extensions");
         std::fs::create_dir_all(&extensions_dir).expect("mkdir extensions");
@@ -30599,10 +30614,9 @@ mod tests {
         std::fs::write(&alpha, "export default {};\n").expect("write alpha");
         std::fs::write(&beta, "export default {};\n").expect("write beta");
 
-        let discovered = discover_extensions_dir_entries(&beta);
-        assert_eq!(discovered.len(), 2);
-        assert!(discovered.contains(&safe_canonicalize(&alpha)));
-        assert!(discovered.contains(&safe_canonicalize(&beta)));
+        let discovered = discover_related_extension_entries(&beta)
+            .expect("discover should keep independent extension registry entries separate");
+        assert_eq!(discovered, vec![safe_canonicalize(&beta)]);
     }
 
     #[test]
@@ -31748,7 +31762,7 @@ mod tests {
     }
 
     #[test]
-    fn multi_entry_loader_skips_failing_non_primary_entrypoints() {
+    fn multi_entry_loader_fails_closed_on_failing_non_primary_entrypoints() {
         let manager = ExtensionManager::new();
         let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
             .build()
@@ -31801,12 +31815,16 @@ mod tests {
             manager.set_js_runtime(js_runtime);
 
             let spec = JsExtensionLoadSpec::from_entry_path(&primary_entry).expect("load spec");
-            manager
+            let err = manager
                 .load_js_extensions(vec![spec])
                 .await
-                .expect("primary entry should load despite secondary failure");
+                .expect_err("secondary entry failure should fail the whole extension load");
 
-            assert!(manager.has_command("primary-ok"));
+            assert!(
+                err.to_string().contains("secondary entry failed"),
+                "error should preserve the secondary failure context: {err}"
+            );
+            assert!(!manager.has_command("primary-ok"));
             assert!(!manager.has_command("secondary-should-not-exist"));
         });
     }
@@ -39432,6 +39450,7 @@ mod tests {
     #[test]
     fn runtime_hostcall_feature_vectors_are_deterministic_for_identical_traces() {
         let run_trace = || {
+            let _clock = RuntimeRiskTestClockGuard::set(1_700_000_000_000);
             let dir = tempdir().expect("tempdir");
             let tools = ToolRegistry::new(&[], dir.path(), None);
             let http = HttpConnector::with_defaults();
@@ -43233,19 +43252,26 @@ mod tests {
                 bocpd_threshold: 0.3,
                 bocpd_max_run_length: 50,
             },
-            ..Default::default()
+            safety_envelope: SafetyEnvelopeConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            oco_tuner: OcoTunerConfig {
+                enabled: false,
+                ..OcoTunerConfig::for_tier(ExtensionBudgetTier::Strict)
+            },
         });
 
-        for _ in 0..5 {
+        for baseline_sample in 0..CusumState::MIN_BASELINE_OBS {
             manager.record_budget_overload_signal(Some("ext.regime"), "quota_exceeded", None, None);
             std::thread::sleep(std::time::Duration::from_millis(10));
+            assert!(
+                manager
+                    .hostcall_compat_kill_switch_reason(Some("ext.regime"))
+                    .is_none(),
+                "baseline sample {baseline_sample} should not enter fallback"
+            );
         }
-        assert!(
-            manager
-                .hostcall_compat_kill_switch_reason(Some("ext.regime"))
-                .is_none(),
-            "should not be in fallback with only 5 signals against threshold=100"
-        );
 
         let mut entered_fallback = false;
         for _ in 0..30 {
