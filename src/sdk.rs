@@ -1771,6 +1771,7 @@ pub async fn create_agent_session(options: SessionOptions) -> Result<AgentSessio
         !cli.no_session,
         compaction_settings,
     );
+    agent_session.set_api_key_override(options.api_key.clone());
 
     if !options.extension_paths.is_empty() {
         let extension_paths = options

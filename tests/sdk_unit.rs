@@ -24,6 +24,19 @@ use serde_json::json;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+const TEST_API_KEY: &str = "sk-test-sdk-unit";
+
+fn test_session_options(harness: &TestHarness) -> SessionOptions {
+    SessionOptions {
+        provider: Some("anthropic".to_string()),
+        model: Some("claude-opus-4-5".to_string()),
+        api_key: Some(TEST_API_KEY.to_string()),
+        working_directory: Some(harness.temp_dir().to_path_buf()),
+        no_session: true,
+        ..SessionOptions::default()
+    }
+}
+
 // ============================================================================
 // 1. Callback Ordering
 // ============================================================================
@@ -31,11 +44,7 @@ use std::sync::{Arc, Mutex};
 #[test]
 fn callback_ordering_tool_hooks_fire_before_generic_subscribers() {
     let harness = TestHarness::new("callback_ordering_tool_hooks_fire_before_generic_subscribers");
-    let options = SessionOptions {
-        working_directory: Some(harness.temp_dir().to_path_buf()),
-        no_session: true,
-        ..SessionOptions::default()
-    };
+    let options = test_session_options(&harness);
 
     let handle = run_async(create_agent_session(options)).expect("create session");
 
@@ -287,11 +296,7 @@ fn transport_rpc_options_default() {
 #[test]
 fn lifecycle_state_after_model_switch() {
     let harness = TestHarness::new("lifecycle_state_after_model_switch");
-    let options = SessionOptions {
-        working_directory: Some(harness.temp_dir().to_path_buf()),
-        no_session: true,
-        ..SessionOptions::default()
-    };
+    let options = test_session_options(&harness);
 
     let mut handle = run_async(create_agent_session(options)).expect("create session");
     let (state_before, state_after) = run_async(async move {
@@ -321,11 +326,7 @@ fn lifecycle_state_after_model_switch() {
 #[test]
 fn lifecycle_state_fresh_session_has_zero_messages() {
     let harness = TestHarness::new("lifecycle_state_fresh_session_has_zero_messages");
-    let options = SessionOptions {
-        working_directory: Some(harness.temp_dir().to_path_buf()),
-        no_session: true,
-        ..SessionOptions::default()
-    };
+    let options = test_session_options(&harness);
 
     let handle = run_async(create_agent_session(options)).expect("create session");
     let state = run_async(async move { handle.state().await }).expect("state");
@@ -353,9 +354,7 @@ fn lifecycle_state_with_thinking_level() {
     let harness = TestHarness::new("lifecycle_state_with_thinking_level");
     let options = SessionOptions {
         thinking: Some(ThinkingLevel::Medium),
-        working_directory: Some(harness.temp_dir().to_path_buf()),
-        no_session: true,
-        ..SessionOptions::default()
+        ..test_session_options(&harness)
     };
 
     let handle = run_async(create_agent_session(options)).expect("create session");
@@ -379,11 +378,7 @@ fn lifecycle_state_save_enabled_reflects_session_mode() {
     let harness = TestHarness::new("lifecycle_state_save_enabled_reflects_session_mode");
 
     // no_session = true => save_enabled = false
-    let options_no = SessionOptions {
-        working_directory: Some(harness.temp_dir().to_path_buf()),
-        no_session: true,
-        ..SessionOptions::default()
-    };
+    let options_no = test_session_options(&harness);
     let handle_no = run_async(create_agent_session(options_no)).expect("create no-session");
     let state_no = run_async(async move { handle_no.state().await }).expect("state no");
     assert!(
@@ -395,10 +390,9 @@ fn lifecycle_state_save_enabled_reflects_session_mode() {
     let session_dir = harness.temp_dir().join("sessions_enabled");
     std::fs::create_dir_all(&session_dir).expect("create session dir");
     let options_yes = SessionOptions {
-        working_directory: Some(harness.temp_dir().to_path_buf()),
         no_session: false,
         session_dir: Some(session_dir),
-        ..SessionOptions::default()
+        ..test_session_options(&harness)
     };
     let handle_yes = run_async(create_agent_session(options_yes)).expect("create with-session");
     let state_yes = run_async(async move { handle_yes.state().await }).expect("state yes");
@@ -1344,9 +1338,7 @@ fn session_options_with_custom_system_prompt() {
 
     let options = SessionOptions {
         system_prompt: Some("You are a test assistant.".to_string()),
-        working_directory: Some(harness.temp_dir().to_path_buf()),
-        no_session: true,
-        ..SessionOptions::default()
+        ..test_session_options(&harness)
     };
 
     let handle = run_async(create_agent_session(options)).expect("create session");
@@ -1367,9 +1359,7 @@ fn session_options_with_no_tools() {
 
     let options = SessionOptions {
         enabled_tools: Some(vec![]),
-        working_directory: Some(harness.temp_dir().to_path_buf()),
-        no_session: true,
-        ..SessionOptions::default()
+        ..test_session_options(&harness)
     };
 
     let handle = run_async(create_agent_session(options)).expect("create session");
@@ -1387,9 +1377,7 @@ fn session_options_with_selected_tools() {
 
     let options = SessionOptions {
         enabled_tools: Some(vec!["read".to_string(), "bash".to_string()]),
-        working_directory: Some(harness.temp_dir().to_path_buf()),
-        no_session: true,
-        ..SessionOptions::default()
+        ..test_session_options(&harness)
     };
 
     let handle = run_async(create_agent_session(options)).expect("create session");
@@ -1409,11 +1397,7 @@ fn session_options_with_selected_tools() {
 #[test]
 fn messages_api_empty_on_fresh_session() {
     let harness = TestHarness::new("messages_api_empty_on_fresh_session");
-    let options = SessionOptions {
-        working_directory: Some(harness.temp_dir().to_path_buf()),
-        no_session: true,
-        ..SessionOptions::default()
-    };
+    let options = test_session_options(&harness);
 
     let handle = run_async(create_agent_session(options)).expect("create session");
     let messages = run_async(async move { handle.messages().await }).expect("messages");
@@ -1437,9 +1421,7 @@ fn sdk_model_accessor_returns_correct_pair() {
     let options = SessionOptions {
         provider: Some("openai".to_string()),
         model: Some("gpt-4o".to_string()),
-        working_directory: Some(harness.temp_dir().to_path_buf()),
-        no_session: true,
-        ..SessionOptions::default()
+        ..test_session_options(&harness)
     };
 
     let handle = run_async(create_agent_session(options)).expect("create session");
@@ -1460,9 +1442,7 @@ fn sdk_thinking_accessor_returns_configured_level() {
     // Test with thinking level set.
     let options = SessionOptions {
         thinking: Some(ThinkingLevel::Low),
-        working_directory: Some(harness.temp_dir().to_path_buf()),
-        no_session: true,
-        ..SessionOptions::default()
+        ..test_session_options(&harness)
     };
     let handle = run_async(create_agent_session(options)).expect("create session");
     assert_eq!(handle.thinking(), Some(ThinkingLevel::Low));
@@ -1478,11 +1458,7 @@ fn sdk_thinking_accessor_returns_configured_level() {
 #[test]
 fn sdk_session_mut_accessor() {
     let harness = TestHarness::new("sdk_session_mut_accessor");
-    let options = SessionOptions {
-        working_directory: Some(harness.temp_dir().to_path_buf()),
-        no_session: true,
-        ..SessionOptions::default()
-    };
+    let options = test_session_options(&harness);
 
     let mut handle = run_async(create_agent_session(options)).expect("create session");
 
@@ -1500,11 +1476,7 @@ fn sdk_session_mut_accessor() {
 #[test]
 fn sdk_listeners_mut_can_update_hooks() {
     let harness = TestHarness::new("sdk_listeners_mut_can_update_hooks");
-    let options = SessionOptions {
-        working_directory: Some(harness.temp_dir().to_path_buf()),
-        no_session: true,
-        ..SessionOptions::default()
-    };
+    let options = test_session_options(&harness);
 
     let mut handle = run_async(create_agent_session(options)).expect("create session");
 
@@ -1529,11 +1501,7 @@ fn sdk_listeners_mut_can_update_hooks() {
 #[test]
 fn sdk_extension_methods_without_extensions() {
     let harness = TestHarness::new("sdk_extension_methods_without_extensions");
-    let options = SessionOptions {
-        working_directory: Some(harness.temp_dir().to_path_buf()),
-        no_session: true,
-        ..SessionOptions::default()
-    };
+    let options = test_session_options(&harness);
 
     let handle = run_async(create_agent_session(options)).expect("create session");
     assert!(!handle.has_extensions());

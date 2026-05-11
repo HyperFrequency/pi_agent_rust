@@ -1339,6 +1339,7 @@ async fn run(
         compaction_settings,
     )
     .with_runtime_handle(runtime_handle.clone());
+    agent_session.set_api_key_override(cli.api_key.clone());
     let mut extension_model_entries = Vec::new();
 
     if !resources.extensions().is_empty() {

@@ -155,8 +155,13 @@ impl Provider for ScriptedProvider {
 // Helpers
 // ============================================================================
 
+const TEST_API_KEY: &str = "test-key";
+
 fn default_session_options(harness: &TestHarness) -> SessionOptions {
     SessionOptions {
+        provider: Some("anthropic".to_string()),
+        model: Some("claude-opus-4-5".to_string()),
+        api_key: Some(TEST_API_KEY.to_string()),
         working_directory: Some(harness.temp_dir().to_path_buf()),
         no_session: true,
         ..SessionOptions::default()
@@ -246,6 +251,7 @@ fn sdk_custom_model_selection() {
     let options = SessionOptions {
         provider: Some("openai".to_string()),
         model: Some("gpt-4o".to_string()),
+        api_key: Some(TEST_API_KEY.to_string()),
         working_directory: Some(harness.temp_dir().to_path_buf()),
         no_session: true,
         ..SessionOptions::default()
@@ -398,6 +404,7 @@ fn sdk_session_persistence() {
 
     let options = SessionOptions {
         working_directory: Some(harness.temp_dir().to_path_buf()),
+        api_key: Some(TEST_API_KEY.to_string()),
         no_session: false,
         session_dir: Some(session_dir.clone()),
         ..SessionOptions::default()
@@ -483,6 +490,7 @@ fn sdk_no_session_mode() {
     let harness = TestHarness::new("sdk_no_session_mode");
     let options = SessionOptions {
         working_directory: Some(harness.temp_dir().to_path_buf()),
+        api_key: Some(TEST_API_KEY.to_string()),
         no_session: true,
         ..SessionOptions::default()
     };
@@ -629,6 +637,7 @@ fn sdk_model_switching() {
 fn sdk_thinking_level() {
     let harness = TestHarness::new("sdk_thinking_level");
     let options = SessionOptions {
+        api_key: Some(TEST_API_KEY.to_string()),
         thinking: Some(pi::model::ThinkingLevel::High),
         working_directory: Some(harness.temp_dir().to_path_buf()),
         no_session: true,
@@ -671,6 +680,7 @@ fn sdk_extensions_load_and_expose_registration_surface() {
 
     let options = SessionOptions {
         working_directory: Some(harness.temp_dir().to_path_buf()),
+        api_key: Some(TEST_API_KEY.to_string()),
         extension_paths: vec![extension_path],
         extension_policy: Some("safe".to_string()),
         no_session: true,
@@ -740,6 +750,7 @@ fn sdk_extension_policy_safe_denies_exec_and_records_hostcall_telemetry() {
 
     let options = SessionOptions {
         working_directory: Some(harness.temp_dir().to_path_buf()),
+        api_key: Some(TEST_API_KEY.to_string()),
         extension_paths: vec![extension_path],
         extension_policy: Some("safe".to_string()),
         no_session: true,

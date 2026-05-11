@@ -37,7 +37,9 @@ use crate::model::{
     StopReason, StreamEvent, TextContent, ThinkingContent, ToolCall, ToolResultMessage, Usage,
     UserContent, UserMessage,
 };
-use crate::models::{ModelEntry, ModelRegistry, model_requires_configured_credential};
+use crate::models::{
+    ModelEntry, ModelRegistry, model_requires_configured_credential, normalize_api_key_opt,
+};
 use crate::provider::{Context, Provider, StreamOptions, ToolDef};
 use crate::session::{AutosaveFlushTrigger, Session, SessionHandle};
 use crate::tools::{Tool, ToolEffects, ToolOutput, ToolRegistry, ToolUpdate};
@@ -2966,6 +2968,7 @@ pub struct AgentSession {
     compaction_worker: CompactionWorkerState,
     model_registry: Option<ModelRegistry>,
     auth_storage: Option<AuthStorage>,
+    api_key_override: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -6870,6 +6873,7 @@ impl AgentSession {
             compaction_worker: CompactionWorkerState::new(CompactionQuota::default()),
             model_registry: None,
             auth_storage: None,
+            api_key_override: None,
         }
     }
 
@@ -6902,6 +6906,16 @@ impl AgentSession {
 
     pub fn set_auth_storage(&mut self, auth: AuthStorage) {
         self.auth_storage = Some(auth);
+    }
+
+    #[must_use]
+    pub fn with_api_key_override(mut self, api_key: Option<String>) -> Self {
+        self.set_api_key_override(api_key);
+        self
+    }
+
+    pub fn set_api_key_override(&mut self, api_key: Option<String>) {
+        self.api_key_override = normalize_api_key_opt(api_key);
     }
 
     pub fn set_queue_modes(&mut self, steering_mode: QueueMode, follow_up_mode: QueueMode) {
@@ -7015,9 +7029,12 @@ impl AgentSession {
             })
         };
 
-        self.auth_storage
-            .as_ref()
-            .and_then(|auth| normalize(auth.resolve_api_key(&entry.model.provider, None)))
+        normalize(self.api_key_override.clone())
+            .or_else(|| {
+                self.auth_storage
+                    .as_ref()
+                    .and_then(|auth| normalize(auth.resolve_api_key(&entry.model.provider, None)))
+            })
             .or_else(|| normalize(entry.api_key.clone()))
     }
 
