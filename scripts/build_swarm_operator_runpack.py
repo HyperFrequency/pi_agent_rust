@@ -2153,7 +2153,12 @@ def build_autopilot_input_pack(args: argparse.Namespace) -> dict[str, Any]:
                 stale_after_hours=args.stale_after_hours,
                 max_items=args.max_items,
             ),
-            "agent_mail": summarize_agent_mail_autopilot(capture_summary, args.max_items),
+            "agent_mail": summarize_agent_mail_autopilot(
+                by_id["agent_mail_status"],
+                by_id["agent_mail_reservations"],
+                capture_summary,
+                args.max_items,
+            ),
             "git_state": summarize_git_status(by_id["git_status"], args.max_items),
             "activity_digest": summarize_activity_digest(
                 by_id["activity_digest"],
@@ -2165,6 +2170,13 @@ def build_autopilot_input_pack(args: argparse.Namespace) -> dict[str, Any]:
             ),
         },
         "redaction_summary": redaction.to_json(),
+        "planner_guards": {
+            "dry_run_only": True,
+            "source_of_truth": "upstream_source_artifacts",
+            "no_prose_scraping": True,
+            "requires_command_provenance": True,
+            "forbidden_actions": list(AUTOPILOT_FORBIDDEN_ACTIONS),
+        },
         "degraded_reasons": [],
     }
     status, reasons = derive_autopilot_input_pack_status(pack)
@@ -3551,6 +3563,16 @@ def parse_args() -> argparse.Namespace:
         "--beads-json",
         type=Path,
         help="JSON from `br list --json` or `br list --status=in_progress --json`",
+    )
+    parser.add_argument(
+        "--agent-mail-status-json",
+        type=Path,
+        help="optional Agent Mail robot status JSON for the autopilot input pack",
+    )
+    parser.add_argument(
+        "--agent-mail-reservations-json",
+        type=Path,
+        help="optional Agent Mail robot reservations JSON for the autopilot input pack",
     )
     parser.add_argument(
         "--git-status-file",
