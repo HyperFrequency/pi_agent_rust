@@ -385,6 +385,199 @@ fn snapshot_registrations(manager: &ExtensionManager) -> Value {
     })
 }
 
+fn load_extension_runtime_for_journey(
+    ext_id: &str,
+) -> (ManifestEntry, ExtensionManager, JsExtensionRuntimeHandle) {
+    let manifest = load_manifest();
+    let entry = manifest
+        .find(ext_id)
+        .unwrap_or_else(|| panic!("Extension '{ext_id}' not found in VALIDATED_MANIFEST.json"))
+        .clone();
+
+    let cwd = conformance_work_dir(format!(
+        "pi-journey-regression-{}",
+        ext_id.replace('/', "_")
+    ));
+    let entry_file = artifacts_dir().join(&entry.entry_path);
+    assert!(
+        entry_file.exists(),
+        "Extension '{ext_id}' artifact must exist at {}",
+        entry_file.display()
+    );
+
+    let spec = JsExtensionLoadSpec::from_entry_path(&entry_file).unwrap_or_else(|e| {
+        panic!(
+            "Failed to create JsExtensionLoadSpec for '{ext_id}' at {}: {e}",
+            entry_file.display()
+        )
+    });
+
+    let manager = ExtensionManager::new();
+    let tools = Arc::new(ToolRegistry::new(&[], &cwd, None));
+    let js_config = PiJsRuntimeConfig {
+        cwd: cwd.display().to_string(),
+        env: hermetic_conformance_env(&cwd),
+        deny_env: false,
+        ..Default::default()
+    };
+
+    let runtime = common::run_async({
+        let manager = manager.clone();
+        let tools = Arc::clone(&tools);
+        async move {
+            JsExtensionRuntimeHandle::start(js_config, tools, manager)
+                .await
+                .expect("start JS runtime")
+        }
+    });
+    manager.set_js_runtime(runtime.clone());
+
+    let ext_id_owned = ext_id.to_string();
+    common::run_async({
+        let manager = manager.clone();
+        async move {
+            manager
+                .load_js_extensions(vec![spec])
+                .await
+                .unwrap_or_else(|e| panic!("Failed to load extension '{ext_id_owned}': {e}"));
+        }
+    });
+
+    (entry, manager, runtime)
+}
+
+fn string_array_field(value: &Value, field: &str) -> Vec<String> {
+    value
+        .get(field)
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("registration snapshot missing array field '{field}'"))
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .unwrap_or_else(|| {
+                    panic!("registration snapshot field '{field}' contains non-string item: {item}")
+                })
+                .to_string()
+        })
+        .collect()
+}
+
+fn assert_event_registration_evidence(ext_id: &str, expected_hooks: &[&str], regs: &Value) {
+    assert!(
+        !expected_hooks.is_empty(),
+        "test fixture '{ext_id}' must name expected runtime event hooks"
+    );
+
+    let mut actual_handlers = string_array_field(regs, "event_handlers");
+    let mut actual_hooks = string_array_field(regs, "event_hooks");
+    actual_handlers.sort();
+    actual_hooks.sort();
+
+    assert_eq!(
+        actual_hooks, actual_handlers,
+        "Extension '{ext_id}' event_hooks evidence must mirror event_handlers"
+    );
+    assert!(
+        !actual_handlers.is_empty(),
+        "Extension '{ext_id}' must expose concrete runtime event registrations"
+    );
+    for expected_hook in expected_hooks {
+        assert!(
+            actual_handlers.iter().any(|hook| hook == expected_hook),
+            "Extension '{ext_id}' runtime event evidence missing expected hook '{expected_hook}': {actual_handlers:?}"
+        );
+    }
+}
+
+#[test]
+fn event_subscriber_journeys_record_concrete_registration_evidence() {
+    let representative_ids: [(&str, &[&str]); 4] = [
+        ("auto-commit-on-exit", &["session_shutdown"]),
+        (
+            "community/prateekmedia-token-rate",
+            &[
+                "session_start",
+                "session_switch",
+                "tool_call",
+                "turn_end",
+                "turn_start",
+            ],
+        ),
+        ("npm/pi-notify", &["agent_end"]),
+        (
+            "third-party/rytswd-direnv",
+            &["session_start", "tool_result"],
+        ),
+    ];
+
+    for (ext_id, expected_hooks) in representative_ids {
+        let (entry, manager, _runtime) = load_extension_runtime_for_journey(ext_id);
+        assert_eq!(
+            JourneyCategory::classify(&entry),
+            JourneyCategory::EventSubscriber,
+            "representative '{ext_id}' must exercise the event-subscriber journey lane"
+        );
+        let regs = snapshot_registrations(&manager);
+        assert_event_registration_evidence(ext_id, expected_hooks, &regs);
+
+        let (failure, completed, journey_regs) =
+            run_category_journey(ext_id, &entry, JourneyCategory::EventSubscriber);
+        assert!(
+            failure.is_none(),
+            "event subscriber journey for '{ext_id}' failed: {failure:?}"
+        );
+        assert_eq!(
+            completed, 2,
+            "journey for '{ext_id}' should complete both event steps"
+        );
+        assert_event_registration_evidence(ext_id, expected_hooks, &journey_regs);
+    }
+}
+
+#[test]
+fn denied_capability_event_hook_keeps_registration_but_blocks_exec() {
+    let (_entry, manager, runtime) = load_extension_runtime_for_journey("negative-denied-caps");
+    let regs = snapshot_registrations(&manager);
+    assert_event_registration_evidence("negative-denied-caps", &["session:start"], &regs);
+
+    let ctx = Arc::new(serde_json::json!({
+        "hasUI": false,
+        "cwd": "/tmp/negative-event-regression",
+        "sessionEntries": [],
+        "sessionBranch": [],
+        "sessionLeafEntry": null,
+        "modelRegistry": {},
+    }));
+    let result = common::run_async({
+        let runtime = runtime.clone();
+        async move {
+            runtime
+                .dispatch_event(
+                    "session:start".to_string(),
+                    serde_json::json!({}),
+                    Arc::clone(&ctx),
+                    10_000,
+                )
+                .await
+        }
+    });
+
+    let value = result.expect("negative-denied-caps event handler should return denial evidence");
+    assert_eq!(
+        value.get("blocked").and_then(Value::as_bool),
+        Some(true),
+        "exec in negative-denied-caps event hook should be blocked: {value}"
+    );
+    let error = value
+        .get("error")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    assert!(
+        error.to_lowercase().contains("denied") || error.to_lowercase().contains("exec"),
+        "denial evidence should mention exec policy denial, got: {error}"
+    );
+}
+
 // ─── Report generator (bd-31j) ──────────────────────────────────────────────
 
 /// Result of a single extension conformance check.
