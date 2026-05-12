@@ -12,6 +12,7 @@ rustc-ice-*.txt
 # br local history backups and quarantine
 .beads/.br_history/
 .beads/.br_history_quarantine/
+.beads/beads.db.rebuild_*
 
 # local Pi agent config (may contain API keys)
 .pi/
@@ -49,6 +50,7 @@ storage.sqlite3
 # Agent probe/scratch files and temp directories
 .codex_space_probe
 .space_probe_bytes
+.rch-tmp/
 .tmp-*/
 .tmp-*
 .tmp_*
