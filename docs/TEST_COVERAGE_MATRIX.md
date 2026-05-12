@@ -7,17 +7,17 @@ This document is the current source-file coverage inventory for `src/**/*.rs`. I
 
 ### Regeneration Evidence
 
-- `rg --files src -g '*.rs' | sort` -> 110 current source files.
-- `rg --files tests -g '*.rs' | wc -l` -> 302 Rust test files under `tests/`.
+- `rg --files src -g '*.rs' | sort` -> 111 current source files.
+- `rg --files tests -g '*.rs' | wc -l` -> 304 Rust test files under `tests/`.
 - `rg -n '#\\[cfg\\(test\\)|mod tests' src -g '*.rs'` -> in-source unit-test inventory used for the `Unit` status below.
-- `python3 scripts/check_traceability_matrix.py` still fails on traceability/governance drift: 58.99% classified trace coverage, 57.89% E2E scenario coverage, and 114 classified-but-untraced test files. That broader repair is tracked by `bd-8t27h.3`.
-- `docs/coverage-baseline-map.json` is historical coverage evidence from 2026-02-14 and covers 107 source files; this markdown inventory now reflects the 110-file current tree.
+- `python3 scripts/check_traceability_matrix.py` passes with 100.00% classified trace coverage and 100.00% E2E scenario coverage after the `e2e_swarm_flight_recorder` and `rch_artifact_sync_preflight` inventory refresh. Broader semantic traceability expansion remains tracked by `bd-8t27h.3`.
+- `docs/coverage-baseline-map.json` is historical coverage evidence from 2026-02-14 and covers 107 source files; this markdown inventory now reflects the 111-file current tree.
 - Drift guard: `cargo test --test traceability_staleness source_coverage_matrix_matches_current_src_inventory`.
 
 ### Current Drift Check
 
-- Current `src/` inventory: 110 files.
-- Source-file rows below: 110.
+- Current `src/` inventory: 111 files.
+- Source-file rows below: 111.
 - Source files omitted from this document: 0.
 - Split modules, provider expansion modules, hostcall scheduling/queue modules, PiWasm, session v2/SQLite, resources, resource governor, and scheduler/admission surfaces are represented explicitly and linked through the `resource_scheduler_admission` artifact-inventory lane.
 - Machine-readable traceability remains governed by `docs/traceability_matrix.json`, `tests/suite_classification.toml`, `docs/e2e_scenario_matrix.json`, and `scripts/check_traceability_matrix.py`.
@@ -139,6 +139,7 @@ This document is the current source-file coverage inventory for `src/**/*.rs`. I
 | `src/session_test.rs` | Session test helpers | Waived test-support module; compiled by session tests. |
 | `src/sse.rs` | SSE parser | Unit; `tests/sse_strict_compliance.rs`, `tests/repro_sse_flush.rs`, `tests/repro_sse_newline.rs`. |
 | `src/swarm_activity_ledger.rs` | Swarm activity ledger | Unit; evidence docs in `docs/swarm-activity-ledger.md`, CI evidence bundle tests. |
+| `src/swarm_flight_recorder.rs` | Swarm flight recorder | Unit and E2E; `tests/e2e_swarm_flight_recorder.rs` covers deterministic multi-agent replay artifacts. |
 | `src/terminal_images.rs` | Terminal images | Unit; interactive/TUI rendering tests. |
 | `src/theme.rs` | Theme loading | Unit; `tests/tui_snapshot.rs`, interactive UI tests. |
 | `src/tools.rs` | Built-in tools | Unit; `tests/tools_conformance.rs`, `tests/e2e_tools.rs`, `tests/tools_hardened.rs`; branch export baseline marks this as branch-SIGSEGV fallback. |
@@ -154,11 +155,11 @@ The full Rust test inventory is too large for this markdown table to remain the 
 
 | Inventory | Count | Source of truth |
 |---|---:|---|
-| Source files | 110 | `rg --files src -g '*.rs' | sort` |
-| Rust test files | 302 | `rg --files tests -g '*.rs' | sort` |
-| Classified top-level test files | 278 | `tests/suite_classification.toml` |
-| Traceability-matrix referenced classified tests | 164 | `docs/traceability_matrix.json` via `scripts/check_traceability_matrix.py` |
-| Classified-but-untraced tests | 114 | `bd-8t27h.3` owns repair |
+| Source files | 111 | `rg --files src -g '*.rs' | sort` |
+| Rust test files | 304 | `rg --files tests -g '*.rs' | sort` |
+| Classified top-level test files | 280 | `tests/suite_classification.toml` |
+| Traceability-matrix referenced classified tests | 280 | `docs/traceability_matrix.json` via `scripts/check_traceability_matrix.py` |
+| Classified-but-untraced tests | 0 | `scripts/check_traceability_matrix.py` |
 
 Representative high-signal suites:
 

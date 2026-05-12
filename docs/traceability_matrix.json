@@ -74,6 +74,10 @@
           "justification": "Validates preflight workflow expectations before end-to-end runtime execution."
         },
         {
+          "path": "tests/e2e_swarm_flight_recorder.rs",
+          "justification": "Exercises deterministic multi-agent flight-recorder replay with real sessions, tools, extension hooks, and redacted JSONL/report artifacts."
+        },
+        {
           "path": "tests/bench_schema.rs",
           "justification": "Schema-level bench artifact shape checks for deterministic diagnostics output."
         },
@@ -917,6 +921,10 @@
         {
           "path": "tests/cargo_headroom_admission.rs",
           "justification": "Fixture-backed replay matrix for scripts/cargo_headroom.sh admission decisions, RCH queue forecasts, target/tmp remediation, and fail-closed local fallback behavior."
+        },
+        {
+          "path": "tests/rch_artifact_sync_preflight.rs",
+          "justification": "Guards RCH artifact-sync preflight so required nested test artifacts are not hidden by .rchignore rules before remote execution."
         }
       ],
       "e2e_scripts": [

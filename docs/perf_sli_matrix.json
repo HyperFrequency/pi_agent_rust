@@ -489,6 +489,13 @@
         ]
       },
       {
+        "workflow_id": "wf-swarm-flight-recorder-replay",
+        "required_partitions": [
+          "matched-state",
+          "realistic"
+        ]
+      },
+      {
         "workflow_id": "wf-dropin-differential-pack",
         "required_partitions": [
           "matched-state",
@@ -667,6 +674,14 @@
       "user_outcome": "Doctor and golden-corpus governance checks replay deterministically."
     },
     {
+      "scenario_id": "wf-swarm-flight-recorder-replay",
+      "sli_ids": [
+        "sli_e2e_turn_latency_p95_ms",
+        "sli_extension_action_p95_ms"
+      ],
+      "user_outcome": "Swarm flight recording and replay keep diagnostic capture bounded and policy decisions responsive."
+    },
+    {
       "scenario_id": "wf-dropin-differential-pack",
       "sli_ids": [
         "sli_e2e_turn_latency_p95_ms",
@@ -820,6 +835,13 @@
       ]
     },
     {
+      "workflow_id": "wf-swarm-flight-recorder-replay",
+      "sli_ids": [
+        "sli_e2e_turn_latency_p95_ms",
+        "sli_extension_action_p95_ms"
+      ]
+    },
+    {
       "workflow_id": "wf-dropin-differential-pack",
       "sli_ids": [
         "sli_e2e_turn_latency_p95_ms",
@@ -932,6 +954,7 @@
       "wf-failure-injection-and-recovery-pack",
       "wf-interruption-resume-replay-pack",
       "wf-doctor-and-golden-corpus-governance",
+      "wf-swarm-flight-recorder-replay",
       "wf-dropin-differential-pack",
       "wf-extension-lifecycle-contention-and-persistence",
       "wf-provider-failure-injection-pack",
@@ -1068,6 +1091,14 @@
       },
       {
         "workflow_id": "wf-doctor-and-golden-corpus-governance",
+        "required_absolute_metrics": true,
+        "required_relative_ratios": [
+          "rust_vs_node_ratio",
+          "rust_vs_bun_ratio"
+        ]
+      },
+      {
+        "workflow_id": "wf-swarm-flight-recorder-replay",
         "required_absolute_metrics": true,
         "required_relative_ratios": [
           "rust_vs_node_ratio",
@@ -1218,6 +1249,13 @@
       },
       {
         "workflow_id": "wf-doctor-and-golden-corpus-governance",
+        "required_partitions": [
+          "matched-state",
+          "realistic"
+        ]
+      },
+      {
+        "workflow_id": "wf-swarm-flight-recorder-replay",
         "required_partitions": [
           "matched-state",
           "realistic"

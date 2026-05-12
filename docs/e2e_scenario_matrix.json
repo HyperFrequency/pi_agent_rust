@@ -518,6 +518,40 @@
       "replay_command": "./scripts/e2e/run_all.sh --profile ci --suite doctor_swarm_temp_dir_json --suite e2e_golden_corpus"
     },
     {
+      "workflow_id": "wf-swarm-flight-recorder-replay",
+      "workflow_class": "diagnostic_replay",
+      "workflow_title": "Deterministic swarm flight recorder replay and artifact redaction",
+      "status": "covered",
+      "vcr_mode": "vcr-only",
+      "vcr_mode_rationale": "The flight-recorder replay uses deterministic in-process providers plus real sessions, built-in tools, and extension hooks. No live provider credentials are required.",
+      "owner": "bd-kniej",
+      "provider_families": [
+        "core-runtime",
+        "extensions",
+        "tooling"
+      ],
+      "suite_ids": [
+        "e2e_swarm_flight_recorder"
+      ],
+      "test_paths": [
+        "tests/e2e_swarm_flight_recorder.rs"
+      ],
+      "sli_ids": [
+        "sli.agent.turn_completion_ms",
+        "sli.policy.preflight_decision_ms"
+      ],
+      "expected_artifacts": [
+        "output.log",
+        "result.json",
+        "test-log.jsonl",
+        "artifact-index.jsonl",
+        "summary.json",
+        "environment.json",
+        "evidence_contract.json"
+      ],
+      "replay_command": "./scripts/e2e/run_all.sh --profile ci --suite e2e_swarm_flight_recorder"
+    },
+    {
       "workflow_id": "wf-dropin-differential-pack",
       "workflow_class": "dropin_parity",
       "workflow_title": "Drop-in extension UI and RPC differential coverage",
