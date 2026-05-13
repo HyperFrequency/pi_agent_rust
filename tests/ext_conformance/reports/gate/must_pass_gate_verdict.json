@@ -1,8 +1,8 @@
 {
   "schema": "pi.ext.must_pass_gate.v1",
-  "generated_at": "2026-05-13T02:53:24.530Z",
-  "run_id": "bd-d7v9g.6-goldenglacier-20260513T0250Z",
-  "correlation_id": "bd-d7v9g.6-goldenglacier-20260513T0250Z",
+  "generated_at": "2026-05-13T03:56:06.472Z",
+  "run_id": "local-20260513T035606472Z",
+  "correlation_id": "must-pass-gate-local-20260513T035606472Z",
   "mode": "strict",
   "status": "pass",
   "thresholds": {
@@ -18,8 +18,8 @@
     "must_pass_pass_rate_pct": 100.0,
     "stretch_total": 101,
     "stretch_tested": 101,
-    "stretch_passed": 96,
-    "stretch_failed": 5,
+    "stretch_passed": 100,
+    "stretch_failed": 1,
     "stretch_skipped": 0
   },
   "checks": [
@@ -40,9 +40,9 @@
   ],
   "blocking_failures": [],
   "stretch_set_summary": {
-    "failed": 5,
+    "failed": 1,
     "note": "Stretch-set results are informational and non-blocking",
-    "passed": 96,
+    "passed": 100,
     "skipped": 0,
     "tested": 101,
     "total": 101

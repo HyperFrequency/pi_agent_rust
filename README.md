@@ -490,7 +490,7 @@ cargo run --example ext_full_validation --
 ### Latest run snapshot (extension refresh 2026-05-13)
 
 From:
-- `tests/ext_conformance/reports/gate/must_pass_gate_verdict.json` (generated `2026-05-13T02:53:24.530Z`, run `bd-d7v9g.6-goldenglacier-20260513T0250Z`)
+- `tests/ext_conformance/reports/gate/must_pass_gate_verdict.json` (generated `2026-05-13T03:56:06.472Z`, run `local-20260513T035606472Z`)
 - `tests/ext_conformance/reports/health_delta/health_delta_report.json` (generated `2026-05-13T03:37:59.568Z`)
 - `tests/ext_conformance/reports/journeys/journey_report.json` (generated `2026-05-13T02:59:58.302Z`)
 - `tests/evidence_bundle/index.json` (generated `2026-05-01T04:19:19.979Z`, run `local-20260501T0413`)
@@ -499,7 +499,7 @@ From:
 
 - Strict drop-in status: **20/20 certification gates PASS, 14/14 blocking gates PASS** - `CERTIFIED` *(from docs/evidence/dropin-certification-verdict.json; strict replacement wording is allowed only while this verdict remains `CERTIFIED` and the contract hard gates stay PASS)*
 - Unified evidence bundle: `28/28` sections present, `11/11` required sections present, `0` missing, `0` invalid *(from tests/evidence_bundle/index.json)*
-- Extension must-pass gate: `123/123` must-pass extensions passed; informational stretch set `96/101` passed *(from tests/ext_conformance/reports/gate/must_pass_gate_verdict.json)*
+- Extension must-pass gate: `123/123` must-pass extensions passed; informational stretch set `100/101` passed *(from tests/ext_conformance/reports/gate/must_pass_gate_verdict.json)*
 - Extension health delta: `223/223` tested extensions passed (`100.0%`), `0` regressions, `13` fixes vs the 2026-02-07 baseline, with `1` intentionally excluded test fixture disclosed in the report *(from tests/ext_conformance/reports/health_delta/health_delta_report.json)*
 - Remaining full-manifest non-pass extensions: `0`; `base_fixtures` is a test-only negative fixture excluded from release-facing pass-rate claims with disposition recorded in `docs/evidence/extension-health-delta-failure-disposition.json`.
 - Extension journey coverage: `123/123` journey scenarios passed (`100.0%`); command, event-subscriber, multi-capability, passive, and tool-provider categories are green *(from tests/ext_conformance/reports/journeys/journey_report.json)*
@@ -1868,7 +1868,7 @@ Latest certification/evidence refresh (`2026-05-13` extension reports; `2026-05-
 - Unified evidence bundle: `28/28` sections present, `11/11` required sections present, `0` missing, `0` invalid *(from tests/evidence_bundle/index.json)*
 - Full-suite gate: `20/20` gates passed, including `14/14` blocking gates *(from tests/full_suite_gate/full_suite_verdict.json)*
 - Drop-in certification: `20/20` certification gates passed, overall verdict `CERTIFIED` *(from docs/evidence/dropin-certification-verdict.json)*
-- Extension must-pass gate: `123/123` must-pass extensions passed; stretch set `96/101` passed *(from tests/ext_conformance/reports/gate/must_pass_gate_verdict.json)*
+- Extension must-pass gate: `123/123` must-pass extensions passed; stretch set `100/101` passed *(from tests/ext_conformance/reports/gate/must_pass_gate_verdict.json)*
 
 ### Fast Loop vs Definitive Benchmarks
 

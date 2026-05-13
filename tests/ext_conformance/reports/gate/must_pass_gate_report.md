@@ -1,8 +1,8 @@
 # Must-Pass Extension CI Gate Report
 
-> Generated: 2026-05-13T02:53:50Z
-> Run ID: bd-d7v9g.6-goldenglacier-20260513T0250Z
-> Correlation ID: bd-d7v9g.6-goldenglacier-20260513T0250Z
+> Generated: 2026-05-13T03:56:46Z
+> Run ID: local-20260513T035606472Z
+> Correlation ID: must-pass-gate-local-20260513T035606472Z
 > Mode: strict
 
 ## Gate Verdict
@@ -31,7 +31,7 @@
 |--------|-------|
 | Total | 101 |
 | Tested | 101 |
-| Passed | 96 |
-| Failed | 5 |
+| Passed | 100 |
+| Failed | 1 |
 | Skipped | 0 |
 
