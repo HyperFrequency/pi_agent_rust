@@ -8,21 +8,61 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use pi::swarm_replay::{
-    SWARM_REPLAY_POLICY_REPORT_SCHEMA, SWARM_REPLAY_REPORT_SCHEMA, SWARM_REPLAY_TRACE_SCHEMA,
-    SwarmReplayBaselinePolicy, SwarmReplayEvent, SwarmReplayEventUncertainty, SwarmReplayGuards,
-    SwarmReplayIngestRequest, SwarmReplayOrdering, SwarmReplayPolicyDecision,
-    SwarmReplayRedactionSummary, SwarmReplayTrace, SwarmReplayUncertaintySummary,
+    SWARM_REPLAY_PERFORMANCE_EVIDENCE_SCHEMA, SWARM_REPLAY_POLICY_REPORT_SCHEMA,
+    SWARM_REPLAY_REPORT_SCHEMA, SWARM_REPLAY_TRACE_SCHEMA, SwarmReplayBaselinePolicy,
+    SwarmReplayEvent, SwarmReplayEventUncertainty, SwarmReplayGuards, SwarmReplayIngestRequest,
+    SwarmReplayOrdering, SwarmReplayPerformanceBudget, SwarmReplayPerformanceObservation,
+    SwarmReplayPolicyDecision, SwarmReplayRedactionSummary, SwarmReplayTrace,
+    SwarmReplayUncertaintySummary, build_swarm_replay_performance_evidence,
     build_swarm_replay_trace, default_swarm_replay_baseline_policies,
-    evaluate_swarm_replay_baseline_policies, replay_swarm_trace,
+    evaluate_swarm_replay_baseline_policies, replay_swarm_trace, swarm_replay_ordering_cost_units,
 };
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 const GENERATED_AT: &str = "2026-05-13T18:40:00Z";
 const GOLDEN_TRACE: &str = "tests/golden_corpus/swarm_replay_trace/normalized_trace.json";
+const FAULT_INJECTION_CORPUS: &str =
+    "tests/golden_corpus/swarm_replay_trace/fault_injection_corpus.json";
 
 type TestResult = Result<(), Box<dyn Error>>;
 
 static WORKSPACE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Deserialize)]
+struct FaultInjectionCorpus {
+    schema: String,
+    generated_at: String,
+    scenarios: Vec<FaultInjectionScenario>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FaultInjectionScenario {
+    scenario_id: String,
+    title: String,
+    event_log_path: String,
+    artifact_manifest: Vec<FaultInjectionArtifact>,
+    expected_diagnostics: Vec<String>,
+    expected_decisions: Vec<ExpectedPolicyDecision>,
+    expected_reservation_conflict_count: u64,
+    expected_saturation_reasons: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FaultInjectionArtifact {
+    path: String,
+    artifact_schema: String,
+    evidence_kind: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExpectedPolicyDecision {
+    policy_id: String,
+    action: String,
+    target_id: String,
+    reason_codes: Vec<String>,
+    would_require_live_mutation: bool,
+}
 
 fn test_workspace(name: &str) -> Result<PathBuf, Box<dyn Error>> {
     let nonce = WORKSPACE_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -53,6 +93,25 @@ fn load_json(rel: &str) -> Result<Value, Box<dyn Error>> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
     let raw = fs::read_to_string(&path)?;
     Ok(serde_json::from_str(&raw)?)
+}
+
+fn load_jsonl_events(rel: &str) -> Result<Vec<SwarmReplayEvent>, Box<dyn Error>> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
+    let raw = fs::read_to_string(&path)?;
+    let mut events = Vec::new();
+    for (line_index, line) in raw.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let event = serde_json::from_str::<SwarmReplayEvent>(line).map_err(|err| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{rel}:{} invalid replay event: {err}", line_index + 1),
+            )
+        })?;
+        events.push(event);
+    }
+    Ok(events)
 }
 
 fn base_request(root: &Path) -> SwarmReplayIngestRequest {
@@ -627,6 +686,133 @@ fn checked_in_golden_trace_fixture_is_downstream_consumable() -> TestResult {
             .any(|event| event.event_type == "validation_artifact")
     );
     assert_monotonic_sequence(&trace)
+}
+
+#[test]
+fn fault_injection_corpus_replays_coordination_failures() -> TestResult {
+    let corpus_value = load_json(FAULT_INJECTION_CORPUS)?;
+    let corpus: FaultInjectionCorpus = serde_json::from_value(corpus_value)?;
+
+    assert_eq!(corpus.schema, "pi.swarm.replay_fault_injection_corpus.v1");
+    assert_eq!(corpus.generated_at, GENERATED_AT);
+    assert!(corpus.scenarios.len() >= 3);
+
+    let policies = default_swarm_replay_baseline_policies();
+    let mut observed_scenarios = BTreeSet::new();
+    for scenario in &corpus.scenarios {
+        assert!(
+            observed_scenarios.insert(scenario.scenario_id.as_str()),
+            "duplicate scenario {}",
+            scenario.scenario_id
+        );
+        assert!(!scenario.title.trim().is_empty());
+        assert!(
+            scenario.artifact_manifest.iter().any(|artifact| {
+                artifact.path == scenario.event_log_path
+                    && artifact.artifact_schema == "pi.swarm.replay_events_jsonl.v1"
+                    && artifact.evidence_kind == "jsonl_event_log"
+            }),
+            "scenario {} must manifest its replay JSONL log",
+            scenario.scenario_id
+        );
+
+        for artifact in &scenario.artifact_manifest {
+            assert!(!artifact.artifact_schema.trim().is_empty());
+            assert!(!artifact.evidence_kind.trim().is_empty());
+            let artifact_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(&artifact.path);
+            assert!(
+                artifact_path.exists(),
+                "scenario {} references missing artifact {}",
+                scenario.scenario_id,
+                artifact.path
+            );
+        }
+
+        let raw_log = fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join(&scenario.event_log_path),
+        )?;
+        assert!(!raw_log.contains("SECRET"));
+        assert!(!raw_log.contains("Bearer "));
+
+        let mut trace = trace_from_events(load_jsonl_events(&scenario.event_log_path)?);
+        trace.trace_id = format!("fault-injection-{}", scenario.scenario_id);
+        trace.generated_at = corpus.generated_at.clone();
+        assert_monotonic_sequence(&trace)?;
+
+        let replay = replay_swarm_trace(&trace)?;
+        assert!(replay.replay_guards.consumed_trace_only);
+        assert_eq!(
+            replay.final_state.coordination.reservation_conflict_count,
+            scenario.expected_reservation_conflict_count,
+            "scenario {} reservation conflict count mismatch",
+            scenario.scenario_id
+        );
+
+        let diagnostics = diagnostic_codes(&replay);
+        for expected in &scenario.expected_diagnostics {
+            assert!(
+                diagnostics.contains(expected),
+                "scenario {} missing diagnostic {expected}",
+                scenario.scenario_id
+            );
+        }
+
+        let report = evaluate_swarm_replay_baseline_policies(&replay, &policies)?;
+        assert!(report.policy_guards.advisory_only);
+        assert!(report.policy_guards.no_live_mutation);
+        for expected in &scenario.expected_decisions {
+            let actual = decision(&report.decisions, &expected.policy_id, &expected.action)
+                .map_err(|err| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!("scenario {}: {err}", scenario.scenario_id),
+                    )
+                })?;
+            assert_eq!(
+                actual.target_id, expected.target_id,
+                "scenario {} decision target mismatch for {}/{}",
+                scenario.scenario_id, expected.policy_id, expected.action
+            );
+            assert_eq!(
+                actual.would_require_live_mutation, expected.would_require_live_mutation,
+                "scenario {} decision mutation flag mismatch for {}/{}",
+                scenario.scenario_id, expected.policy_id, expected.action
+            );
+            for reason in &expected.reason_codes {
+                assert!(
+                    actual.reason_codes.contains(reason),
+                    "scenario {} decision {}/{} missing reason {reason}",
+                    scenario.scenario_id,
+                    expected.policy_id,
+                    expected.action
+                );
+            }
+        }
+
+        let peak_pressure = replay
+            .resource_pressure_timeline
+            .last()
+            .ok_or("missing replay resource pressure snapshot")?;
+        for expected in &scenario.expected_saturation_reasons {
+            assert!(
+                peak_pressure.saturation_reasons.contains(expected),
+                "scenario {} missing saturation reason {expected}",
+                scenario.scenario_id
+            );
+        }
+    }
+
+    for required in [
+        "agent_mail_unavailable_continue_via_beads",
+        "rch_scratch_saturated_stop_cargo",
+        "reservation_conflict_dirty_stale_bead",
+    ] {
+        assert!(
+            observed_scenarios.contains(required),
+            "missing required fault scenario {required}"
+        );
+    }
+    Ok(())
 }
 
 #[test]
@@ -1248,6 +1434,153 @@ fn pressure_trace_for_profile(profile: Value) -> SwarmReplayTrace {
     ])
 }
 
+fn push_large_trace_event(
+    events: &mut Vec<SwarmReplayEvent>,
+    sequence: &mut u64,
+    actor: &str,
+    event_id: impl Into<String>,
+    event_type: &str,
+    source_ref: &str,
+    payload: Value,
+) {
+    let event_id = event_id.into();
+    events.push(replay_event_with_actor(
+        actor,
+        &event_id,
+        *sequence,
+        "2026-05-13T19:00:00Z",
+        event_type,
+        source_ref,
+        payload,
+    ));
+    *sequence = sequence.saturating_add(1);
+}
+
+fn large_replay_performance_trace() -> SwarmReplayTrace {
+    let mut events = Vec::new();
+    let mut sequence = 1_u64;
+
+    push_large_trace_event(
+        &mut events,
+        &mut sequence,
+        "doctor",
+        "large-resource-profile",
+        "host_resource_profile",
+        "synthetic_host_profile",
+        resource_profile_payload(ResourceProfileFixture {
+            profile_id: "large-trace-ci-host",
+            cpu_cores: 64,
+            memory_gib: 256,
+            target_free_gib: 512,
+            tmpdir_free_gib: 512,
+            extension_hostcall_lanes: 96,
+            rch_worker_slots: 96,
+            numa_hint: "pin_rch_workers_by_socket",
+        }),
+    );
+
+    for index in 0_u64..64 {
+        let agent = format!("Agent{index:03}");
+        push_large_trace_event(
+            &mut events,
+            &mut sequence,
+            &agent,
+            format!("large-agent-message-{index:03}"),
+            "agent_message",
+            "agent_mail_archive",
+            json!({
+                "thread_id": "bd-large-trace",
+                "sender": agent,
+                "recipients": ["Coordinator"],
+                "importance": "normal",
+                "ack_required": false
+            }),
+        );
+    }
+
+    for bead_index in 0_u64..120 {
+        let priority = i64::try_from(bead_index % 5).unwrap_or(0);
+        for (status, step) in [
+            ("open", "ready"),
+            ("in_progress", "claimed"),
+            ("closed", "closed"),
+        ] {
+            push_large_trace_event(
+                &mut events,
+                &mut sequence,
+                "Beads",
+                format!("large-bead-{bead_index:03}-{step}"),
+                "bead_lifecycle",
+                "beads_jsonl",
+                json!({
+                    "bead_id": format!("bd-large-{bead_index:03}"),
+                    "to_status": status,
+                    "priority": priority,
+                    "assignee": format!("Agent{:03}", bead_index % 64)
+                }),
+            );
+        }
+    }
+
+    for job_index in 0_u64..64 {
+        push_large_trace_event(
+            &mut events,
+            &mut sequence,
+            "rch",
+            format!("large-rch-job-{job_index:03}"),
+            "rch_job_state",
+            "rch_queue_status",
+            json!({
+                "job_id": format!("rch-large-{job_index:03}"),
+                "state": "queued",
+                "worker": format!("worker-{}", job_index % 8),
+                "command": "rch exec -- cargo test --test swarm_replay_ingestor",
+                "queue_position": (job_index % 4) + 1
+            }),
+        );
+    }
+
+    for reservation_index in 0_u64..48 {
+        let reservation_id = format!("res-large-{reservation_index:03}");
+        push_large_trace_event(
+            &mut events,
+            &mut sequence,
+            "AgentMail",
+            format!("large-reservation-{reservation_index:03}-active"),
+            "reservation_intent",
+            "agent_mail_archive",
+            json!({
+                "reservation_id": reservation_id,
+                "path_patterns": [format!("src/replay_surface_{reservation_index:03}.rs")],
+                "exclusive": true,
+                "ttl_seconds": 3600,
+                "reason": "bd-in57w.10",
+                "holder": format!("Agent{:03}", reservation_index % 64),
+                "state": "active"
+            }),
+        );
+        push_large_trace_event(
+            &mut events,
+            &mut sequence,
+            "AgentMail",
+            format!("large-reservation-{reservation_index:03}-released"),
+            "reservation_intent",
+            "agent_mail_archive",
+            json!({
+                "reservation_id": reservation_id,
+                "path_patterns": [format!("src/replay_surface_{reservation_index:03}.rs")],
+                "exclusive": true,
+                "ttl_seconds": 3600,
+                "reason": "bd-in57w.10",
+                "holder": format!("Agent{:03}", reservation_index % 64),
+                "state": "released"
+            }),
+        );
+    }
+
+    trace_from_events(events)
+}
+
 #[test]
 fn resource_budget_profiles_model_small_ci_large_hosts() -> TestResult {
     let small = replay_swarm_trace(&pressure_trace_for_profile(resource_profile_payload(
@@ -1344,6 +1677,128 @@ fn resource_budget_profiles_model_small_ci_large_hosts() -> TestResult {
         huge.resource_pressure_timeline
             .iter()
             .all(|snapshot| snapshot.saturation_reasons.is_empty())
+    );
+    Ok(())
+}
+
+#[test]
+fn large_trace_performance_evidence_passes_ci_budget() -> TestResult {
+    let trace = large_replay_performance_trace();
+    let replay = replay_swarm_trace(&trace)?;
+    assert!(replay.replayed_event_count >= 500);
+
+    let policy_report = evaluate_swarm_replay_baseline_policies(
+        &replay,
+        &default_swarm_replay_baseline_policies(),
+    )?;
+    let budget = SwarmReplayPerformanceBudget {
+        budget_id: "ci-large-trace-smoke".to_string(),
+        min_replayed_events: 500,
+        max_wall_time_ms: 5_000,
+        max_peak_rss_gib: 256,
+        max_report_size_bytes: 256 * 1024 * 1024,
+        max_ordering_cost_units: swarm_replay_ordering_cost_units(replay.replayed_event_count)
+            .saturating_add(10),
+    };
+    let observation = SwarmReplayPerformanceObservation {
+        command: "rch exec -- cargo test --test swarm_replay_ingestor large_trace_performance_evidence_passes_ci_budget".to_string(),
+        runner: "rch".to_string(),
+        host_profile_id: Some("large-trace-ci-host".to_string()),
+        wall_time_ms: Some(900),
+        peak_rss_gib: Some(32),
+        caveats: vec!["ci_smoke_not_release_certification".to_string()],
+    };
+
+    let evidence = build_swarm_replay_performance_evidence(
+        &replay,
+        Some(&policy_report),
+        budget,
+        observation,
+    )?;
+    assert_eq!(evidence.schema, SWARM_REPLAY_PERFORMANCE_EVIDENCE_SCHEMA);
+    assert_eq!(evidence.verdict, "pass");
+    assert_eq!(
+        evidence.observed.replayed_event_count,
+        u64::try_from(trace.events.len())?
+    );
+    assert_eq!(
+        evidence.observed.policy_decision_count,
+        policy_report.decision_count
+    );
+    assert!(evidence.observed.report_size_bytes.unwrap_or_default() > 0);
+    assert!(evidence.checks.iter().all(|check| check.status == "pass"));
+    assert!(
+        evidence
+            .caveats
+            .contains(&"ci_smoke_not_release_certification".to_string())
+    );
+    assert!(evidence.guards.evidence_only);
+    assert!(evidence.guards.release_claims_suppressed);
+
+    let evidence_json = serde_json::to_value(&evidence)?;
+    assert_eq!(
+        evidence_json["schema"],
+        json!(SWARM_REPLAY_PERFORMANCE_EVIDENCE_SCHEMA)
+    );
+    assert_eq!(evidence_json["budget"]["budget_id"], "ci-large-trace-smoke");
+    Ok(())
+}
+
+#[test]
+fn performance_evidence_fails_closed_without_wall_time_or_rss() -> TestResult {
+    let replay = replay_swarm_trace(&pressure_trace_for_profile(resource_profile_payload(
+        ResourceProfileFixture {
+            profile_id: "default-ci",
+            cpu_cores: 8,
+            memory_gib: 16,
+            target_free_gib: 64,
+            tmpdir_free_gib: 64,
+            extension_hostcall_lanes: 4,
+            rch_worker_slots: 4,
+            numa_hint: "shared_runner",
+        },
+    )))?;
+    let budget = SwarmReplayPerformanceBudget {
+        budget_id: "ci-missing-observation".to_string(),
+        min_replayed_events: 1,
+        max_wall_time_ms: 1_000,
+        max_peak_rss_gib: 64,
+        max_report_size_bytes: 64 * 1024 * 1024,
+        max_ordering_cost_units: 1_000,
+    };
+    let observation = SwarmReplayPerformanceObservation {
+        command: "rch exec -- cargo test --test swarm_replay_ingestor".to_string(),
+        runner: "rch".to_string(),
+        host_profile_id: Some("default-ci".to_string()),
+        wall_time_ms: None,
+        peak_rss_gib: None,
+        caveats: Vec::new(),
+    };
+
+    let evidence = build_swarm_replay_performance_evidence(&replay, None, budget, observation)?;
+    assert_eq!(evidence.verdict, "fail");
+    assert!(
+        evidence
+            .checks
+            .iter()
+            .any(|check| { check.metric == "wall_time_ms" && check.status == "missing" })
+    );
+    assert!(
+        evidence
+            .checks
+            .iter()
+            .any(|check| { check.metric == "peak_rss_gib" && check.status == "missing" })
+    );
+    assert!(
+        evidence
+            .missing_data
+            .iter()
+            .any(|reason| reason.contains("wall_time_ms observation missing"))
+    );
+    assert!(
+        evidence
+            .caveats
+            .contains(&"policy_report_not_supplied".to_string())
     );
     Ok(())
 }

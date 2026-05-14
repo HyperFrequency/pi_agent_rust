@@ -617,6 +617,81 @@ pub struct SwarmReplayPolicyResourceMetrics {
     pub numa_hint: String,
 }
 
+/// Schema emitted by replay performance-budget evidence.
+pub const SWARM_REPLAY_PERFORMANCE_EVIDENCE_SCHEMA: &str =
+    "pi.swarm.replay_performance_evidence.v1";
+
+/// CI-friendly performance budget for replay and policy-report generation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmReplayPerformanceBudget {
+    pub budget_id: String,
+    pub min_replayed_events: u64,
+    pub max_wall_time_ms: u64,
+    pub max_peak_rss_gib: u64,
+    pub max_report_size_bytes: u64,
+    pub max_ordering_cost_units: u64,
+}
+
+/// Host and runner observations supplied by the measurement harness.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmReplayPerformanceObservation {
+    pub command: String,
+    pub runner: String,
+    pub host_profile_id: Option<String>,
+    pub wall_time_ms: Option<u64>,
+    pub peak_rss_gib: Option<u64>,
+    pub caveats: Vec<String>,
+}
+
+/// Deterministic metrics derived from replay outputs plus harness observations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmReplayPerformanceObservedMetrics {
+    pub replayed_event_count: u64,
+    pub policy_decision_count: u64,
+    pub snapshot_count: u64,
+    pub wall_time_ms: Option<u64>,
+    pub peak_rss_gib: Option<u64>,
+    pub report_size_bytes: Option<u64>,
+    pub ordering_cost_units: Option<u64>,
+}
+
+/// One pass/fail/missing performance-budget check.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmReplayPerformanceCheck {
+    pub metric: String,
+    pub comparator: String,
+    pub threshold: u64,
+    pub observed: Option<u64>,
+    pub status: String,
+    pub reason: String,
+}
+
+/// Guards proving performance evidence remains advisory and claim-gated.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmReplayPerformanceEvidenceGuards {
+    pub read_only: bool,
+    pub no_live_mutation: bool,
+    pub no_network_required: bool,
+    pub evidence_only: bool,
+    pub release_claims_suppressed: bool,
+}
+
+/// Machine-readable performance evidence for a replay run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmReplayPerformanceEvidence {
+    pub schema: String,
+    pub trace_id: String,
+    pub budget: SwarmReplayPerformanceBudget,
+    pub observation: SwarmReplayPerformanceObservation,
+    pub observed: SwarmReplayPerformanceObservedMetrics,
+    pub checks: Vec<SwarmReplayPerformanceCheck>,
+    pub verdict: String,
+    pub missing_data: Vec<String>,
+    pub caveats: Vec<String>,
+    pub guards: SwarmReplayPerformanceEvidenceGuards,
+}
+
 /// Confidence attached to policy comparison metrics.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SwarmReplayPolicyConfidence {
@@ -769,6 +844,197 @@ pub fn evaluate_swarm_replay_policies(
             consumed_replay_report_only: true,
         },
     })
+}
+
+/// Build claim-gated performance evidence for one replay and optional policy report.
+pub fn build_swarm_replay_performance_evidence(
+    report: &SwarmReplayReport,
+    policy_report: Option<&SwarmReplayPolicyReport>,
+    budget: SwarmReplayPerformanceBudget,
+    observation: SwarmReplayPerformanceObservation,
+) -> Result<SwarmReplayPerformanceEvidence> {
+    if report.schema != SWARM_REPLAY_REPORT_SCHEMA {
+        return Err(Error::validation(format!(
+            "unsupported swarm replay report schema {}",
+            report.schema
+        )));
+    }
+    if let Some(policy_report) = policy_report
+        && policy_report.schema != SWARM_REPLAY_POLICY_REPORT_SCHEMA
+    {
+        return Err(Error::validation(format!(
+            "unsupported swarm replay policy report schema {}",
+            policy_report.schema
+        )));
+    }
+
+    let report_size_bytes = serialized_json_len(report)?
+        .saturating_add(policy_report.map_or(Ok(0), serialized_json_len)?);
+    let ordering_cost_units = swarm_replay_ordering_cost_units(report.replayed_event_count);
+    let policy_decision_count = policy_report.map_or(0, |report| report.decision_count);
+    let snapshot_count = u64::try_from(report.snapshots.len()).unwrap_or(u64::MAX);
+
+    let observed = SwarmReplayPerformanceObservedMetrics {
+        replayed_event_count: report.replayed_event_count,
+        policy_decision_count,
+        snapshot_count,
+        wall_time_ms: observation.wall_time_ms,
+        peak_rss_gib: observation.peak_rss_gib,
+        report_size_bytes: Some(report_size_bytes),
+        ordering_cost_units: Some(ordering_cost_units),
+    };
+    let checks = vec![
+        min_performance_check(
+            "replayed_event_count",
+            budget.min_replayed_events,
+            Some(observed.replayed_event_count),
+        ),
+        max_performance_check(
+            "wall_time_ms",
+            budget.max_wall_time_ms,
+            observed.wall_time_ms,
+        ),
+        max_performance_check(
+            "peak_rss_gib",
+            budget.max_peak_rss_gib,
+            observed.peak_rss_gib,
+        ),
+        max_performance_check(
+            "report_size_bytes",
+            budget.max_report_size_bytes,
+            observed.report_size_bytes,
+        ),
+        max_performance_check(
+            "ordering_cost_units",
+            budget.max_ordering_cost_units,
+            observed.ordering_cost_units,
+        ),
+    ];
+    let missing_data = checks
+        .iter()
+        .filter(|check| check.status == "missing")
+        .map(|check| check.reason.clone())
+        .collect::<Vec<_>>();
+    let verdict = if checks.iter().all(|check| check.status == "pass") {
+        "pass"
+    } else {
+        "fail"
+    };
+    let caveats = performance_evidence_caveats(report, policy_report, &observation);
+
+    Ok(SwarmReplayPerformanceEvidence {
+        schema: SWARM_REPLAY_PERFORMANCE_EVIDENCE_SCHEMA.to_string(),
+        trace_id: report.trace_id.clone(),
+        budget,
+        observation,
+        observed,
+        checks,
+        verdict: verdict.to_string(),
+        missing_data,
+        caveats,
+        guards: SwarmReplayPerformanceEvidenceGuards {
+            read_only: true,
+            no_live_mutation: true,
+            no_network_required: true,
+            evidence_only: true,
+            release_claims_suppressed: true,
+        },
+    })
+}
+
+/// Estimate deterministic ordering work as `n * ceil(log2(n))`.
+#[must_use]
+pub fn swarm_replay_ordering_cost_units(event_count: u64) -> u64 {
+    if event_count <= 1 {
+        return event_count;
+    }
+    let log_width = u64::from(u64::BITS - event_count.saturating_sub(1).leading_zeros());
+    event_count.saturating_mul(log_width)
+}
+
+fn serialized_json_len<T: Serialize>(value: &T) -> Result<u64> {
+    serde_json::to_vec(value)
+        .map_err(|err| Error::Json(Box::new(err)))
+        .map(|bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX))
+}
+
+fn min_performance_check(
+    metric: &str,
+    threshold: u64,
+    observed: Option<u64>,
+) -> SwarmReplayPerformanceCheck {
+    performance_check(metric, ">=", threshold, observed, |value, limit| {
+        value >= limit
+    })
+}
+
+fn max_performance_check(
+    metric: &str,
+    threshold: u64,
+    observed: Option<u64>,
+) -> SwarmReplayPerformanceCheck {
+    performance_check(metric, "<=", threshold, observed, |value, limit| {
+        value <= limit
+    })
+}
+
+fn performance_check(
+    metric: &str,
+    comparator: &str,
+    threshold: u64,
+    observed: Option<u64>,
+    passes: impl FnOnce(u64, u64) -> bool,
+) -> SwarmReplayPerformanceCheck {
+    let (status, reason) = match observed {
+        Some(value) if passes(value, threshold) => (
+            "pass".to_string(),
+            format!("{metric} observed {value} {comparator} threshold {threshold}"),
+        ),
+        Some(value) => (
+            "fail".to_string(),
+            format!("{metric} observed {value} exceeded budget threshold {threshold}"),
+        ),
+        None => (
+            "missing".to_string(),
+            format!("{metric} observation missing; performance claim suppressed"),
+        ),
+    };
+    SwarmReplayPerformanceCheck {
+        metric: metric.to_string(),
+        comparator: comparator.to_string(),
+        threshold,
+        observed,
+        status,
+        reason,
+    }
+}
+
+fn performance_evidence_caveats(
+    report: &SwarmReplayReport,
+    policy_report: Option<&SwarmReplayPolicyReport>,
+    observation: &SwarmReplayPerformanceObservation,
+) -> Vec<String> {
+    let mut caveats = observation.caveats.iter().cloned().collect::<BTreeSet<_>>();
+    match &report.final_state.resource_budget {
+        Some(profile) => {
+            if observation.host_profile_id.as_deref() != Some(profile.profile_id.as_str()) {
+                caveats.insert("host_profile_observation_mismatch".to_string());
+            }
+            if profile.cgroup_cpu_quota.is_none() || profile.cgroup_memory_gib.is_none() {
+                caveats.insert("cgroup_limit_observation_partial".to_string());
+            }
+        }
+        None => {
+            caveats.insert("host_resource_profile_missing".to_string());
+        }
+    }
+    if policy_report.is_none() {
+        caveats.insert("policy_report_not_supplied".to_string());
+    }
+    if !report.diagnostics.is_empty() {
+        caveats.insert("replay_diagnostics_present".to_string());
+    }
+    caveats.into_iter().collect()
 }
 
 #[derive(Debug, Clone)]
