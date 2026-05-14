@@ -6,6 +6,8 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 const CONTRACT_PATH: &str = "docs/contracts/validation-broker-contract.json";
+const README_PATH: &str = "README.md";
+const SWARM_RUNBOOK_PATH: &str = "docs/swarm-operations-runbook.md";
 const EXPECTED_SCHEMA: &str = "pi.validation_broker.contract.v1";
 const EXPECTED_REQUEST_SCHEMA: &str = "pi.validation_broker.request.v1";
 const EXPECTED_SLOT_SCHEMA: &str = "pi.validation_broker.slot.v1";
@@ -44,6 +46,12 @@ fn load_contract() -> Result<Value, String> {
         .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
     serde_json::from_str(&raw)
         .map_err(|err| format!("failed to parse {} as JSON: {err}", path.display()))
+}
+
+fn load_text(relative_path: &str) -> Result<String, String> {
+    let path = repo_root().join(relative_path);
+    std::fs::read_to_string(&path)
+        .map_err(|err| format!("failed to read {}: {err}", path.display()))
 }
 
 fn require(condition: bool, message: impl Into<String>) -> TestResult {
@@ -878,6 +886,68 @@ fn validation_broker_contract_declares_doctor_runpack_projection() -> TestResult
         boundary.contains("release-claim gates"),
         "projection boundary must block release-claim promotion",
     )
+}
+
+#[test]
+fn validation_broker_operator_docs_cover_workflow_privacy_and_cli_flags() -> TestResult {
+    let readme = load_text(README_PATH)?;
+    let runbook = load_text(SWARM_RUNBOOK_PATH)?;
+
+    require(
+        readme.contains("docs/swarm-operations-runbook.md#validation-broker-operator-workflow"),
+        "README must link to validation broker operator workflow docs",
+    )?;
+    require(
+        runbook.contains("### Validation Broker Operator Workflow"),
+        "runbook must include validation broker workflow heading",
+    )?;
+
+    for fragment in [
+        "pi validation-broker status",
+        "pi validation-broker plan",
+        "pi validation-broker acquire",
+        "pi validation-broker renew",
+        "pi validation-broker release",
+        "--store \"$PI_VALIDATION_BROKER_STORE\"",
+        "--request \"$capture_dir/validation-request.json\"",
+        "--inputs \"$capture_dir/validation-inputs.json\"",
+        "--slot-id \"$slot_id\"",
+        "--owner \"$AGENT_NAME\"",
+        "--reason \"gate completed and artifacts recorded\"",
+    ] {
+        require(
+            runbook.contains(fragment),
+            format!("operator docs missing CLI fragment {fragment:?}"),
+        )?;
+    }
+
+    for required_boundary in [
+        "does not claim beads",
+        "does not replace RCH",
+        "Agent Mail",
+        "use the Beads assignee as the soft lock",
+        "do not infer that nobody owns a file",
+        "not release performance evidence",
+        "strict drop-in claims",
+        "Validation broker troubleshooting",
+        "Agent Mail schema-corrupt",
+        "deny_local_fallback",
+        "Scratch-space, target-dir, or TMPDIR headroom is low",
+        "Slot store is missing, malformed, or unavailable",
+        "Reusable artifact provenance does not match",
+        "These commands remain mandatory before commit",
+        "rch exec -- cargo check --all-targets",
+        "rch exec -- cargo clippy --all-targets -- -D warnings",
+        "ubs --staged --only=rust .",
+        "./scripts/reconcile_beads_ledger.sh",
+    ] {
+        require(
+            runbook.contains(required_boundary),
+            format!("operator docs missing boundary {required_boundary:?}"),
+        )?;
+    }
+
+    Ok(())
 }
 
 #[test]

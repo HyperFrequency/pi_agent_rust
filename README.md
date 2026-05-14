@@ -1919,7 +1919,9 @@ If validation-broker status or plan JSON is supplied with
 `--validation-broker-json`, the runpack projects source status, slot counts,
 stale slot warnings, duplicate-gate opportunities, and recommended next actions
 as advisory handoff data. This projection does not replace RCH, Doctor, Beads,
-Agent Mail, CI, UBS, `cargo_headroom.sh`, or release-claim gates.
+Agent Mail, CI, UBS, `cargo_headroom.sh`, or release-claim gates. Operator
+workflow, privacy, and degraded-data guidance lives in
+[docs/swarm-operations-runbook.md#validation-broker-operator-workflow](docs/swarm-operations-runbook.md#validation-broker-operator-workflow).
 
 The same runpack command can emit a dry-run swarm autopilot input pack and plan
 beside the handoff bundle. When those companion artifacts are requested, the

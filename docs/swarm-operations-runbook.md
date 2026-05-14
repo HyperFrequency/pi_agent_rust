@@ -214,6 +214,130 @@ The no-mock autopilot E2E harness emits `pi.swarm.autopilot_e2e.v1` plus `pi.swa
 The final closeout gate emits `pi.swarm.autopilot_decision_gate.v1`, governed by `docs/contracts/swarm-autopilot-decision-gate-contract.json`. It compares the shipped input pack, planner, work partitions, failure-action catalog, budget drift watcher, E2E/logging evidence, runpack handoff, safety guards, pushed commits, and quality gates to the prompt-to-artifact checklist. A failed gate emits `follow_up_beads` and `decision=file_follow_up_beads_before_closing_epic`; a passing gate is still only closeout evidence over Beads, git, RCH, Doctor, Agent Mail, and source artifacts, not a new source of truth.
 The context-intelligence closeout gate emits `pi.context_intelligence.closeout_gate.v1`, governed by `docs/contracts/context-intelligence-closeout-gate-contract.json`. It maps each `bd-ircr3` child bead to code, tests, docs or evidence, commands, close reasons, and commit hashes; then it checks graph contracts, graph builder, freshness and claim gates, bundle planner, redaction and invalidation, preview surface, prompt injection, no-mock E2E, performance budgets, Doctor/runpack posture, operator docs, README freshness, pushed commits, staged UBS, and Beads ledger reconciliation. A passing context gate is closeout evidence only and does not replace Beads, git, RCH, Doctor, runpacks, or source files.
 
+### Validation Broker Operator Workflow
+
+The validation broker is an advisory coordination aid for expensive validation
+work. It helps agents decide whether to run a gate now, wait for an active slot,
+reuse equivalent evidence, narrow the command, or recover stale slots. It does
+not claim beads, reserve files, schedule RCH jobs, waive CI, or turn stale data
+into a green validation result.
+In short: it does not claim beads, does not replace RCH, and does not skip
+required gates.
+
+Use the broker only after the normal ownership checks are visible:
+
+1. Check Beads for actionable work and stale ownership with `br ready --json`,
+   `br show <id> --json`, and `br list --status=in_progress --json`.
+2. Reserve files through Agent Mail when the Mail DB is healthy. If Mail is
+   red, read-only, or schema-corrupt, use the Beads assignee as the soft lock
+   and record the Mail blocker in the bead or handoff.
+3. Run `pi doctor --only swarm --format json` and
+   `scripts/cargo_headroom.sh --admit-only ...` before heavyweight gates so
+   scratch-space, cgroup, CPU, memory, and RCH posture remain explicit.
+4. Ask the broker for a plan before launching duplicate or broad validation
+   commands. Treat the result as advice, not permission to skip required gates.
+
+Typical read-only status capture:
+
+```bash
+pi validation-broker status \
+  --store "$PI_VALIDATION_BROKER_STORE" \
+  --format json \
+  --out-json "$capture_dir/validation-broker-status.json"
+```
+
+Typical plan request:
+
+```bash
+pi validation-broker plan \
+  --request "$capture_dir/validation-request.json" \
+  --inputs "$capture_dir/validation-inputs.json" \
+  --store "$PI_VALIDATION_BROKER_STORE" \
+  --policy "$capture_dir/validation-policy.json" \
+  --format json \
+  --out-json "$capture_dir/validation-broker-plan.json"
+```
+
+Interpret decisions conservatively:
+
+| Decision | Operator action |
+| --- | --- |
+| `allow` | Run the requested gate through the declared runner and still record the actual command result. |
+| `wait` | Do not launch a duplicate heavyweight gate; wait for the active owner or ask for an update. |
+| `coalesce` | Reuse only the named artifacts whose command, git head, target/TMPDIR, runner, feature flags, and hashes match the request. |
+| `narrow` | Replace the broad command with the broker's narrower required action, then validate that narrower scope honestly. |
+| `deny_local_fallback` | Do not let an RCH-required command fail open into a local build. Surface the RCH or headroom blocker. |
+| `stale_recover` | Mark the stale slot visibly, open a non-overlapping slot or rerun after provenance mismatch, and do not kill processes. |
+| `degraded_block` | Stop and surface the missing, stale, malformed, or unavailable source rows. |
+
+Acquire, renew, and release mutate only the append-only slot store:
+
+```bash
+pi validation-broker acquire \
+  --request "$capture_dir/validation-request.json" \
+  --store "$PI_VALIDATION_BROKER_STORE" \
+  --started-at "$started_at_utc" \
+  --expires-at "$expires_at_utc"
+
+pi validation-broker renew \
+  --store "$PI_VALIDATION_BROKER_STORE" \
+  --slot-id "$slot_id" \
+  --owner "$AGENT_NAME" \
+  --heartbeat-at "$heartbeat_at_utc" \
+  --expires-at "$expires_at_utc"
+
+pi validation-broker release \
+  --store "$PI_VALIDATION_BROKER_STORE" \
+  --slot-id "$slot_id" \
+  --owner "$AGENT_NAME" \
+  --at "$released_at_utc" \
+  --reason "gate completed and artifacts recorded"
+```
+
+The broker's reusable-evidence path is fail-closed. Reuse is valid only when
+the broker names the slot and its provenance matches the current request. A
+similar command from another git head, target directory, TMPDIR, runner,
+feature set, dirty-path scope, or artifact hash is a rejected reusable slot, not
+a pass.
+
+Privacy and redaction boundaries:
+
+- Broker status, plan, runpack, and autopilot summaries should carry schema IDs,
+  source availability, source hashes, degraded reasons, and bounded excerpts
+  instead of raw prompt bodies, mailbox tokens, command logs, or secrets.
+- Dynamic paths, PIDs, ports, timestamps, durations, long numeric IDs, and hex
+  IDs should be normalized before blocker fingerprints are compared across
+  agents.
+- Agent Mail health and reservation facts are coordination evidence only. If
+  Mail is unavailable, do not infer that nobody owns a file; fall back to Beads
+  and visible handoff notes.
+- Synthetic stress artifacts such as
+  `docs/evidence/validation-broker-stress-budgets.json` are engineering budget
+  evidence only. They are not release performance evidence and do not support
+  README speed, capacity, or strict drop-in claims.
+
+Validation broker troubleshooting:
+
+| Symptom | Operator response |
+| --- | --- |
+| Agent Mail schema-corrupt, red, or read-only | Use Beads assignee and visible handoff notes as the soft lock; do not infer absent reservations and do not wait in coordination purgatory. |
+| RCH-required gate would fail open locally | Treat `deny_local_fallback` as a hard blocker, surface the RCH status or queue evidence, and rerun only when remote execution is available. |
+| Scratch-space, target-dir, or TMPDIR headroom is low | Run the documented cargo headroom preflight, switch to an isolated high-capacity target/TMPDIR pair when allowed, and do not launch broad gates until headroom is explicit. |
+| Slot store is missing, malformed, or unavailable | Treat the broker posture as degraded, avoid coalescing evidence, and record the malformed source path or missing artifact in the handoff. |
+| Reusable artifact provenance does not match | Reject reuse and run the required gate for the current command, git head, runner, features, target directory, TMPDIR, and artifact hash. |
+
+These commands remain mandatory before commit when code changed, even when a
+broker plan says `allow` or `coalesce`:
+
+```bash
+cargo fmt --check
+git diff --check
+rch exec -- cargo check --all-targets
+rch exec -- cargo clippy --all-targets -- -D warnings
+ubs --staged --only=rust .
+./scripts/reconcile_beads_ledger.sh
+```
+
 When closing the autopilot epic, collect the actual command outcomes and pass them to the final gate:
 
 ```bash
@@ -281,7 +405,7 @@ git add .beads/issues.jsonl
 AGENT_NAME="$AGENT_NAME" git commit -m "<type>: <summary>"
 git pull --rebase
 git push
-git push origin main:master
+# Mirror the legacy compatibility branch per AGENTS.md after pushing main.
 git status --short --branch
 ```
 
