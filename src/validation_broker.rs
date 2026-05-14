@@ -30,6 +30,10 @@ pub const VALIDATION_BROKER_HEADROOM_INPUT_SCHEMA: &str = "pi.validation_broker.
 pub const VALIDATION_BROKER_DOCTOR_INPUT_SCHEMA: &str = "pi.validation_broker.doctor_input.v1";
 pub const VALIDATION_BROKER_GIT_INPUT_SCHEMA: &str = "pi.validation_broker.git_input.v1";
 pub const VALIDATION_BROKER_BEADS_INPUT_SCHEMA: &str = "pi.validation_broker.beads_input.v1";
+pub const VALIDATION_BROKER_CLI_STATUS_SCHEMA: &str = "pi.validation_broker.cli_status.v1";
+pub const VALIDATION_BROKER_CLI_PLAN_SCHEMA: &str = "pi.validation_broker.cli_plan.v1";
+pub const VALIDATION_BROKER_CLI_LEASE_MUTATION_SCHEMA: &str =
+    "pi.validation_broker.cli_lease_mutation.v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

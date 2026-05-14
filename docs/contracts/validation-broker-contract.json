@@ -3,6 +3,9 @@
   "request_schema": "pi.validation_broker.request.v1",
   "slot_schema": "pi.validation_broker.slot.v1",
   "decision_schema": "pi.validation_broker.decision.v1",
+  "cli_status_schema": "pi.validation_broker.cli_status.v1",
+  "cli_plan_schema": "pi.validation_broker.cli_plan.v1",
+  "cli_lease_mutation_schema": "pi.validation_broker.cli_lease_mutation.v1",
   "contract_version": "1.0.0",
   "bead_id": "bd-gusp4.1",
   "parent_bead_id": "bd-gusp4",
@@ -265,6 +268,46 @@
       "not_permission_to_modify_other_agents_files"
     ]
   },
+  "cli_surface_contract": {
+    "subcommand": "validation-broker",
+    "actions": [
+      "status",
+      "plan",
+      "acquire",
+      "renew",
+      "release"
+    ],
+    "format_modes": [
+      "text",
+      "json"
+    ],
+    "output_path_policy": "All --out-json and --out-text paths must refuse to overwrite existing files.",
+    "plan_mode": {
+      "read_only": true,
+      "required_inputs": [
+        "ValidationAdmissionRequestContext JSON",
+        "ValidationBrokerInputSnapshot JSON",
+        "ValidationSlotStore JSONL"
+      ],
+      "required_next_actions": [
+        "run_now",
+        "wait",
+        "coalesce_with_reusable_slot",
+        "narrow_scope",
+        "surface_blocker",
+        "recover_stale_slot_or_bead"
+      ]
+    },
+    "lease_mutations": {
+      "allowed_actions": [
+        "acquire",
+        "renew",
+        "release"
+      ],
+      "mutation_shape": "append_slot_record_only",
+      "degraded_store_policy": "Lease mutations must refuse to append when the slot store is degraded."
+    }
+  },
   "mutation_policy": {
     "plan_mode_live_mutation_allowed": false,
     "lease_mode_allowed_mutations": [
@@ -391,6 +434,14 @@
       "description": "Broker evidence redacts secrets, mail bodies, private prompts, unnecessary home paths, and large command output bodies while preserving fingerprints and exit metadata.",
       "validated_by": [
         "redaction_contract"
+      ]
+    },
+    {
+      "id": "VALIDBROKER-MUST-009",
+      "description": "The CLI surface exposes status, read-only plan, and explicit lease mutation actions with stable text/JSON output and overwrite refusal for output artifacts.",
+      "validated_by": [
+        "cli_surface_contract",
+        "mutation_policy"
       ]
     }
   ],

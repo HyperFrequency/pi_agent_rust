@@ -35,6 +35,7 @@ const ROOT_SUBCOMMANDS: &[&str] = &[
     "update-index",
     "context-preview",
     "swarm-replay-preview",
+    "validation-broker",
     "search",
     "info",
     "list",
@@ -868,6 +869,41 @@ mod tests {
     fn parse_update_index_subcommand() {
         let cli = Cli::parse_from(["pi", "update-index"]);
         assert!(matches!(cli.command, Some(Commands::UpdateIndex)));
+    }
+
+    #[test]
+    fn parse_validation_broker_plan_subcommand() -> Result<(), String> {
+        let cli = Cli::parse_from([
+            "pi",
+            "validation-broker",
+            "plan",
+            "--request",
+            "request.json",
+            "--inputs",
+            "inputs.json",
+            "--store",
+            "slots.jsonl",
+            "--format",
+            "json",
+        ]);
+        let Some(Commands::ValidationBroker {
+            command:
+                super::ValidationBrokerCommand::Plan {
+                    request,
+                    inputs,
+                    store,
+                    format,
+                    ..
+                },
+        }) = cli.command
+        else {
+            return Err(format!("unexpected command: {:?}", cli.command));
+        };
+        assert_eq!(request, "request.json");
+        assert_eq!(inputs, "inputs.json");
+        assert_eq!(store, "slots.jsonl");
+        assert_eq!(format, "json");
+        Ok(())
     }
 
     #[test]
@@ -1809,6 +1845,13 @@ pub enum Commands {
         generated_at: Option<String>,
     },
 
+    /// Inspect and mutate validation-broker slot leases
+    #[command(name = "validation-broker")]
+    ValidationBroker {
+        #[command(subcommand)]
+        command: ValidationBrokerCommand,
+    },
+
     /// Show detailed information about an extension
     Info {
         /// Extension name or id to look up
@@ -1871,6 +1914,137 @@ pub enum Commands {
         /// Dry-run: validate migration without persisting changes
         #[arg(long)]
         dry_run: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ValidationBrokerCommand {
+    /// Print current slot-store status without mutating it
+    Status {
+        /// Append-only validation slot JSONL store
+        #[arg(long)]
+        store: String,
+        /// Output format when no output path is supplied
+        #[arg(long, default_value = "text", value_parser = ["text", "json"])]
+        format: String,
+        /// Write schema-governed JSON; refuses to overwrite
+        #[arg(long = "out-json")]
+        out_json: Option<String>,
+        /// Write concise text; refuses to overwrite
+        #[arg(long = "out-text")]
+        out_text: Option<String>,
+        /// Override report timestamp for deterministic fixtures
+        #[arg(long = "generated-at")]
+        generated_at: Option<String>,
+    },
+
+    /// Plan whether to run, narrow, wait, coalesce, or surface a blocker
+    Plan {
+        /// ValidationAdmissionRequestContext JSON
+        #[arg(long)]
+        request: String,
+        /// ValidationBrokerInputSnapshot JSON
+        #[arg(long)]
+        inputs: String,
+        /// Append-only validation slot JSONL store to inspect
+        #[arg(long)]
+        store: String,
+        /// Optional ValidationAdmissionPolicy JSON
+        #[arg(long)]
+        policy: Option<String>,
+        /// Output format when no output path is supplied
+        #[arg(long, default_value = "text", value_parser = ["text", "json"])]
+        format: String,
+        /// Write schema-governed JSON; refuses to overwrite
+        #[arg(long = "out-json")]
+        out_json: Option<String>,
+        /// Write concise text; refuses to overwrite
+        #[arg(long = "out-text")]
+        out_text: Option<String>,
+        /// Override report timestamp for deterministic fixtures
+        #[arg(long = "generated-at")]
+        generated_at: Option<String>,
+    },
+
+    /// Acquire a slot by appending an active lease record
+    Acquire {
+        /// ValidationSlotRequest JSON
+        #[arg(long)]
+        request: String,
+        /// Append-only validation slot JSONL store
+        #[arg(long)]
+        store: String,
+        /// Lease start timestamp in UTC RFC3339
+        #[arg(long = "started-at")]
+        started_at: String,
+        /// Lease expiry timestamp in UTC RFC3339
+        #[arg(long = "expires-at")]
+        expires_at: String,
+        /// Output format when no output path is supplied
+        #[arg(long, default_value = "text", value_parser = ["text", "json"])]
+        format: String,
+        /// Write schema-governed JSON; refuses to overwrite
+        #[arg(long = "out-json")]
+        out_json: Option<String>,
+        /// Write concise text; refuses to overwrite
+        #[arg(long = "out-text")]
+        out_text: Option<String>,
+    },
+
+    /// Renew a slot owned by the caller
+    Renew {
+        /// Append-only validation slot JSONL store
+        #[arg(long)]
+        store: String,
+        /// Slot ID to renew
+        #[arg(long = "slot-id")]
+        slot_id: String,
+        /// Owning agent name
+        #[arg(long)]
+        owner: String,
+        /// New heartbeat timestamp in UTC RFC3339
+        #[arg(long = "heartbeat-at")]
+        heartbeat_at: String,
+        /// New expiry timestamp in UTC RFC3339
+        #[arg(long = "expires-at")]
+        expires_at: String,
+        /// Output format when no output path is supplied
+        #[arg(long, default_value = "text", value_parser = ["text", "json"])]
+        format: String,
+        /// Write schema-governed JSON; refuses to overwrite
+        #[arg(long = "out-json")]
+        out_json: Option<String>,
+        /// Write concise text; refuses to overwrite
+        #[arg(long = "out-text")]
+        out_text: Option<String>,
+    },
+
+    /// Release a slot owned by the caller
+    Release {
+        /// Append-only validation slot JSONL store
+        #[arg(long)]
+        store: String,
+        /// Slot ID to release
+        #[arg(long = "slot-id")]
+        slot_id: String,
+        /// Owning agent name
+        #[arg(long)]
+        owner: String,
+        /// Release timestamp in UTC RFC3339
+        #[arg(long)]
+        at: String,
+        /// Release reason
+        #[arg(long)]
+        reason: String,
+        /// Output format when no output path is supplied
+        #[arg(long, default_value = "text", value_parser = ["text", "json"])]
+        format: String,
+        /// Write schema-governed JSON; refuses to overwrite
+        #[arg(long = "out-json")]
+        out_json: Option<String>,
+        /// Write concise text; refuses to overwrite
+        #[arg(long = "out-text")]
+        out_text: Option<String>,
     },
 }
 

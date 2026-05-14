@@ -9,7 +9,7 @@
 // Allow dead code and unused async during scaffolding phase - remove once implementation is complete
 #![allow(dead_code, clippy::unused_async)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, IsTerminal, Read, Write};
@@ -59,6 +59,15 @@ use pi::swarm_replay::{
 };
 use pi::tools::ToolRegistry;
 use pi::tui::PiConsole;
+use pi::validation_broker::{
+    VALIDATION_BROKER_CLI_LEASE_MUTATION_SCHEMA, VALIDATION_BROKER_CLI_PLAN_SCHEMA,
+    VALIDATION_BROKER_CLI_STATUS_SCHEMA, VALIDATION_BROKER_DECISION_SCHEMA,
+    VALIDATION_BROKER_INPUT_SCHEMA, ValidationAdmissionDecision, ValidationAdmissionDecisionRecord,
+    ValidationAdmissionPolicy, ValidationAdmissionRequestContext, ValidationBrokerInputSnapshot,
+    ValidationSlotLease, ValidationSlotRequest, ValidationSlotState, ValidationSlotStore,
+    ValidationSlotStoreSnapshot, decide_validation_admission,
+};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -336,6 +345,10 @@ fn main_impl() -> Result<()> {
                     out_text.as_deref(),
                     generated_at.as_deref(),
                 )?;
+                return Ok(());
+            }
+            cli::Commands::ValidationBroker { command } => {
+                handle_validation_broker_blocking(&cwd, command)?;
                 return Ok(());
             }
             cli::Commands::List => {
@@ -1760,6 +1773,9 @@ async fn handle_subcommand(command: cli::Commands, cwd: &Path) -> Result<()> {
                 generated_at.as_deref(),
             )?;
         }
+        cli::Commands::ValidationBroker { command } => {
+            handle_validation_broker_blocking(cwd, &command)?;
+        }
         cli::Commands::Search {
             query,
             tag,
@@ -1799,6 +1815,677 @@ async fn handle_subcommand(command: cli::Commands, cwd: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct ValidationBrokerCommandReport {
+    name: &'static str,
+    action: String,
+    cwd: String,
+    store: String,
+    output_writes: u8,
+}
+
+#[derive(Debug, Serialize)]
+struct ValidationBrokerOutputPaths {
+    json: Option<String>,
+    text: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ValidationBrokerGuards {
+    read_only_plan: bool,
+    live_mutations: u8,
+    refuses_output_overwrite: bool,
+    destructive_actions: u8,
+    provider_calls: u8,
+}
+
+#[derive(Debug, Serialize)]
+struct ValidationBrokerStoreSummary {
+    path: String,
+    schema: String,
+    status: String,
+    total_records: usize,
+    total_slots: usize,
+    active_slots: usize,
+    reusable_slots: usize,
+    stale_slots: usize,
+    expired_at_report_time_slots: usize,
+    state_counts: BTreeMap<String, usize>,
+    degraded_reasons: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ValidationBrokerStatusReport {
+    schema: &'static str,
+    generated_at_utc: String,
+    command: ValidationBrokerCommandReport,
+    store: ValidationBrokerStoreSummary,
+    output_paths: ValidationBrokerOutputPaths,
+    guards: ValidationBrokerGuards,
+}
+
+#[derive(Debug, Serialize)]
+struct ValidationBrokerPlanReport {
+    schema: &'static str,
+    generated_at_utc: String,
+    command: ValidationBrokerCommandReport,
+    request_id: String,
+    bead_id: String,
+    read_only: bool,
+    next_action: &'static str,
+    decision: ValidationAdmissionDecisionRecord,
+    store: ValidationBrokerStoreSummary,
+    output_paths: ValidationBrokerOutputPaths,
+    guards: ValidationBrokerGuards,
+}
+
+#[derive(Debug, Serialize)]
+struct ValidationBrokerLeaseMutationReport {
+    schema: &'static str,
+    generated_at_utc: String,
+    command: ValidationBrokerCommandReport,
+    event: &'static str,
+    lease: ValidationSlotLease,
+    store: ValidationBrokerStoreSummary,
+    output_paths: ValidationBrokerOutputPaths,
+    guards: ValidationBrokerGuards,
+}
+
+#[allow(clippy::too_many_lines)]
+fn handle_validation_broker_blocking(
+    cwd: &Path,
+    command: &cli::ValidationBrokerCommand,
+) -> Result<()> {
+    match command {
+        cli::ValidationBrokerCommand::Status {
+            store,
+            format,
+            out_json,
+            out_text,
+            generated_at,
+        } => {
+            let generated_at_utc = validation_broker_generated_at(
+                "validation-broker status",
+                generated_at.as_deref(),
+            )?;
+            let store_path = resolve_cli_path(cwd, store);
+            let slot_store = ValidationSlotStore::new(&store_path);
+            let snapshot = slot_store.load_snapshot();
+            let output_paths =
+                validation_broker_output_paths(out_json.as_deref(), out_text.as_deref());
+            let report = ValidationBrokerStatusReport {
+                schema: VALIDATION_BROKER_CLI_STATUS_SCHEMA,
+                generated_at_utc: generated_at_utc.clone(),
+                command: validation_broker_command_report(
+                    cwd,
+                    "status",
+                    store,
+                    output_paths.output_writes(),
+                ),
+                store: validation_store_summary(&store_path, &snapshot, &generated_at_utc),
+                output_paths,
+                guards: validation_broker_guards(true, 0),
+            };
+            emit_validation_broker_status(
+                cwd,
+                &report,
+                format,
+                out_json.as_deref(),
+                out_text.as_deref(),
+            )?;
+        }
+        cli::ValidationBrokerCommand::Plan {
+            request,
+            inputs,
+            store,
+            policy,
+            format,
+            out_json,
+            out_text,
+            generated_at,
+        } => {
+            let generated_at_utc =
+                validation_broker_generated_at("validation-broker plan", generated_at.as_deref())?;
+            let request_path = resolve_cli_path(cwd, request);
+            let inputs_path = resolve_cli_path(cwd, inputs);
+            let context =
+                read_validation_broker_json::<ValidationAdmissionRequestContext>(&request_path)?;
+            let input_snapshot =
+                read_validation_broker_json::<ValidationBrokerInputSnapshot>(&inputs_path)?;
+            if input_snapshot.schema != VALIDATION_BROKER_INPUT_SCHEMA {
+                return Err(validation_broker_validation_error(format!(
+                    "validation-broker plan requires inputs schema {VALIDATION_BROKER_INPUT_SCHEMA}, got {}",
+                    input_snapshot.schema
+                )));
+            }
+            let policy = match policy {
+                Some(path) => read_validation_broker_json::<ValidationAdmissionPolicy>(
+                    &resolve_cli_path(cwd, path),
+                )?,
+                None => ValidationAdmissionPolicy::default(),
+            };
+            let store_path = resolve_cli_path(cwd, store);
+            let slot_store = ValidationSlotStore::new(&store_path);
+            let snapshot = slot_store.load_snapshot();
+            let decision = decide_validation_admission(
+                context.clone(),
+                &input_snapshot,
+                &snapshot,
+                &policy,
+                &generated_at_utc,
+            )?;
+            if decision.schema != VALIDATION_BROKER_DECISION_SCHEMA {
+                return Err(validation_broker_validation_error(format!(
+                    "validation-broker plan produced unexpected decision schema {}",
+                    decision.schema
+                )));
+            }
+            let output_paths =
+                validation_broker_output_paths(out_json.as_deref(), out_text.as_deref());
+            let next_action = validation_broker_next_action(&decision.decision);
+            let report = ValidationBrokerPlanReport {
+                schema: VALIDATION_BROKER_CLI_PLAN_SCHEMA,
+                generated_at_utc: generated_at_utc.clone(),
+                command: validation_broker_command_report(
+                    cwd,
+                    "plan",
+                    store,
+                    output_paths.output_writes(),
+                ),
+                request_id: context.request_id,
+                bead_id: context.request.bead_id,
+                read_only: true,
+                next_action,
+                decision,
+                store: validation_store_summary(&store_path, &snapshot, &generated_at_utc),
+                output_paths,
+                guards: validation_broker_guards(true, 0),
+            };
+            emit_validation_broker_plan(
+                cwd,
+                &report,
+                format,
+                out_json.as_deref(),
+                out_text.as_deref(),
+            )?;
+        }
+        cli::ValidationBrokerCommand::Acquire {
+            request,
+            store,
+            started_at,
+            expires_at,
+            format,
+            out_json,
+            out_text,
+        } => {
+            let request_path = resolve_cli_path(cwd, request);
+            let request = read_validation_broker_json::<ValidationSlotRequest>(&request_path)?;
+            let lease =
+                ValidationSlotLease::acquire(request, started_at.clone(), expires_at.clone())?;
+            let store_path = resolve_cli_path(cwd, store);
+            let slot_store = ValidationSlotStore::new(&store_path);
+            let snapshot = slot_store.load_snapshot();
+            ensure_validation_store_mutable(&snapshot)?;
+            if snapshot.latest_by_slot_id.contains_key(&lease.slot_id) {
+                return Err(validation_broker_validation_error(format!(
+                    "validation-broker acquire refuses duplicate slot_id {}",
+                    lease.slot_id
+                )));
+            }
+            slot_store.append_lease("acquired", started_at.clone(), &lease)?;
+            let updated = slot_store.load_snapshot();
+            emit_validation_broker_lease_mutation(
+                cwd,
+                "acquire",
+                "acquired",
+                store,
+                &store_path,
+                &updated,
+                lease,
+                started_at,
+                format,
+                out_json.as_deref(),
+                out_text.as_deref(),
+            )?;
+        }
+        cli::ValidationBrokerCommand::Renew {
+            store,
+            slot_id,
+            owner,
+            heartbeat_at,
+            expires_at,
+            format,
+            out_json,
+            out_text,
+        } => {
+            let store_path = resolve_cli_path(cwd, store);
+            let slot_store = ValidationSlotStore::new(&store_path);
+            let snapshot = slot_store.load_snapshot();
+            ensure_validation_store_mutable(&snapshot)?;
+            let mut lease = validation_broker_latest_lease(&snapshot, slot_id)?;
+            lease.renew(owner, heartbeat_at.clone(), expires_at.clone())?;
+            slot_store.append_lease("renewed", heartbeat_at.clone(), &lease)?;
+            let updated = slot_store.load_snapshot();
+            emit_validation_broker_lease_mutation(
+                cwd,
+                "renew",
+                "renewed",
+                store,
+                &store_path,
+                &updated,
+                lease,
+                heartbeat_at,
+                format,
+                out_json.as_deref(),
+                out_text.as_deref(),
+            )?;
+        }
+        cli::ValidationBrokerCommand::Release {
+            store,
+            slot_id,
+            owner,
+            at,
+            reason,
+            format,
+            out_json,
+            out_text,
+        } => {
+            let store_path = resolve_cli_path(cwd, store);
+            let slot_store = ValidationSlotStore::new(&store_path);
+            let snapshot = slot_store.load_snapshot();
+            ensure_validation_store_mutable(&snapshot)?;
+            let mut lease = validation_broker_latest_lease(&snapshot, slot_id)?;
+            lease.release(owner, at.clone(), reason.clone())?;
+            slot_store.append_lease("released", at.clone(), &lease)?;
+            let updated = slot_store.load_snapshot();
+            emit_validation_broker_lease_mutation(
+                cwd,
+                "release",
+                "released",
+                store,
+                &store_path,
+                &updated,
+                lease,
+                at,
+                format,
+                out_json.as_deref(),
+                out_text.as_deref(),
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+impl ValidationBrokerOutputPaths {
+    fn output_writes(&self) -> u8 {
+        u8::from(self.json.is_some()) + u8::from(self.text.is_some())
+    }
+}
+
+fn validation_broker_output_paths(
+    out_json: Option<&str>,
+    out_text: Option<&str>,
+) -> ValidationBrokerOutputPaths {
+    ValidationBrokerOutputPaths {
+        json: out_json.map(ToOwned::to_owned),
+        text: out_text.map(ToOwned::to_owned),
+    }
+}
+
+const fn validation_broker_guards(
+    read_only_plan: bool,
+    live_mutations: u8,
+) -> ValidationBrokerGuards {
+    ValidationBrokerGuards {
+        read_only_plan,
+        live_mutations,
+        refuses_output_overwrite: true,
+        destructive_actions: 0,
+        provider_calls: 0,
+    }
+}
+
+fn validation_broker_command_report(
+    cwd: &Path,
+    action: impl Into<String>,
+    store: &str,
+    output_writes: u8,
+) -> ValidationBrokerCommandReport {
+    ValidationBrokerCommandReport {
+        name: "validation-broker",
+        action: action.into(),
+        cwd: cwd.display().to_string(),
+        store: store.to_string(),
+        output_writes,
+    }
+}
+
+fn read_validation_broker_json<T>(path: &Path) -> Result<T>
+where
+    T: DeserializeOwned,
+{
+    let raw = fs::read_to_string(path)?;
+    serde_json::from_str(&raw).map_err(Into::into)
+}
+
+fn validation_store_summary(
+    path: &Path,
+    snapshot: &ValidationSlotStoreSnapshot,
+    now_utc: &str,
+) -> ValidationBrokerStoreSummary {
+    let mut state_counts = BTreeMap::new();
+    let mut active_slots = 0usize;
+    let mut reusable_slots = 0usize;
+    let mut stale_slots = 0usize;
+    let mut expired_at_report_time_slots = 0usize;
+    for lease in snapshot.latest_by_slot_id.values() {
+        let state_key = validation_slot_state_key(&lease.state);
+        *state_counts.entry(state_key.to_string()).or_insert(0) += 1;
+        match lease.state {
+            ValidationSlotState::Requested | ValidationSlotState::Active => active_slots += 1,
+            ValidationSlotState::Reusable => reusable_slots += 1,
+            ValidationSlotState::Stale => stale_slots += 1,
+            ValidationSlotState::Failed
+            | ValidationSlotState::Released
+            | ValidationSlotState::Expired
+            | ValidationSlotState::Degraded => {}
+        }
+        if lease.is_stale_at(now_utc).unwrap_or(false) {
+            expired_at_report_time_slots += 1;
+        }
+    }
+
+    ValidationBrokerStoreSummary {
+        path: path.display().to_string(),
+        schema: snapshot.schema.clone(),
+        status: format!("{:?}", snapshot.status).to_ascii_lowercase(),
+        total_records: snapshot.leases.len(),
+        total_slots: snapshot.latest_by_slot_id.len(),
+        active_slots,
+        reusable_slots,
+        stale_slots,
+        expired_at_report_time_slots,
+        state_counts,
+        degraded_reasons: snapshot.degraded_reasons.clone(),
+    }
+}
+
+const fn validation_slot_state_key(state: &ValidationSlotState) -> &'static str {
+    match state {
+        ValidationSlotState::Requested => "requested",
+        ValidationSlotState::Active => "active",
+        ValidationSlotState::Reusable => "reusable",
+        ValidationSlotState::Stale => "stale",
+        ValidationSlotState::Failed => "failed",
+        ValidationSlotState::Released => "released",
+        ValidationSlotState::Expired => "expired",
+        ValidationSlotState::Degraded => "degraded",
+    }
+}
+
+const fn validation_decision_key(decision: &ValidationAdmissionDecision) -> &'static str {
+    match decision {
+        ValidationAdmissionDecision::Allow => "allow",
+        ValidationAdmissionDecision::Wait => "wait",
+        ValidationAdmissionDecision::Coalesce => "coalesce",
+        ValidationAdmissionDecision::Narrow => "narrow",
+        ValidationAdmissionDecision::DenyLocalFallback => "deny_local_fallback",
+        ValidationAdmissionDecision::StaleRecover => "stale_recover",
+        ValidationAdmissionDecision::DegradedBlock => "degraded_block",
+    }
+}
+
+const fn validation_broker_next_action(decision: &ValidationAdmissionDecision) -> &'static str {
+    match decision {
+        ValidationAdmissionDecision::Allow => "run_now",
+        ValidationAdmissionDecision::Wait => "wait",
+        ValidationAdmissionDecision::Coalesce => "coalesce_with_reusable_slot",
+        ValidationAdmissionDecision::Narrow => "narrow_scope",
+        ValidationAdmissionDecision::DenyLocalFallback
+        | ValidationAdmissionDecision::DegradedBlock => "surface_blocker",
+        ValidationAdmissionDecision::StaleRecover => "recover_stale_slot_or_bead",
+    }
+}
+
+fn validation_broker_generated_at(label: &str, generated_at: Option<&str>) -> Result<String> {
+    let Some(value) = generated_at.and_then(non_empty_string) else {
+        return Ok(chrono::Utc::now().to_rfc3339());
+    };
+    match chrono::DateTime::parse_from_rfc3339(&value) {
+        Ok(parsed) if parsed.offset().local_minus_utc() == 0 => {}
+        Ok(_) => {
+            return Err(validation_broker_validation_error(format!(
+                "{label} requires --generated-at to use UTC offset: {value}"
+            )));
+        }
+        Err(_) => {
+            return Err(validation_broker_validation_error(format!(
+                "{label} requires --generated-at to be RFC3339: {value}"
+            )));
+        }
+    }
+    Ok(value)
+}
+
+fn ensure_validation_store_mutable(snapshot: &ValidationSlotStoreSnapshot) -> Result<()> {
+    if snapshot.is_degraded() {
+        Err(validation_broker_validation_error(format!(
+            "refusing to mutate degraded validation slot store: {}",
+            snapshot.degraded_reasons.join("; ")
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+fn validation_broker_latest_lease(
+    snapshot: &ValidationSlotStoreSnapshot,
+    slot_id: &str,
+) -> Result<ValidationSlotLease> {
+    snapshot
+        .latest_by_slot_id
+        .get(slot_id)
+        .cloned()
+        .ok_or_else(|| {
+            validation_broker_validation_error(format!(
+                "validation-broker slot_id {slot_id} not found"
+            ))
+        })
+}
+
+fn validation_broker_validation_error(message: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::new(pi::error::Error::validation(message.into()))
+}
+
+fn emit_validation_broker_status(
+    cwd: &Path,
+    report: &ValidationBrokerStatusReport,
+    format: &str,
+    out_json: Option<&str>,
+    out_text: Option<&str>,
+) -> Result<()> {
+    let json_output = serde_json::to_string_pretty(report)?;
+    let text_output = render_validation_broker_status_text(report);
+    emit_validation_broker_output(cwd, &json_output, &text_output, format, out_json, out_text)
+}
+
+fn emit_validation_broker_plan(
+    cwd: &Path,
+    report: &ValidationBrokerPlanReport,
+    format: &str,
+    out_json: Option<&str>,
+    out_text: Option<&str>,
+) -> Result<()> {
+    let json_output = serde_json::to_string_pretty(report)?;
+    let text_output = render_validation_broker_plan_text(report);
+    emit_validation_broker_output(cwd, &json_output, &text_output, format, out_json, out_text)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_validation_broker_lease_mutation(
+    cwd: &Path,
+    action: &str,
+    event: &'static str,
+    store_arg: &str,
+    store_path: &Path,
+    snapshot: &ValidationSlotStoreSnapshot,
+    lease: ValidationSlotLease,
+    generated_at_utc: &str,
+    format: &str,
+    out_json: Option<&str>,
+    out_text: Option<&str>,
+) -> Result<()> {
+    let output_paths = validation_broker_output_paths(out_json, out_text);
+    let report = ValidationBrokerLeaseMutationReport {
+        schema: VALIDATION_BROKER_CLI_LEASE_MUTATION_SCHEMA,
+        generated_at_utc: generated_at_utc.to_string(),
+        command: validation_broker_command_report(
+            cwd,
+            action,
+            store_arg,
+            output_paths.output_writes(),
+        ),
+        event,
+        lease,
+        store: validation_store_summary(store_path, snapshot, generated_at_utc),
+        output_paths,
+        guards: validation_broker_guards(false, 1),
+    };
+    let json_output = serde_json::to_string_pretty(&report)?;
+    let text_output = render_validation_broker_lease_text(&report);
+    emit_validation_broker_output(cwd, &json_output, &text_output, format, out_json, out_text)
+}
+
+fn emit_validation_broker_output(
+    cwd: &Path,
+    json_output: &str,
+    text_output: &str,
+    format: &str,
+    out_json: Option<&str>,
+    out_text: Option<&str>,
+) -> Result<()> {
+    if let Some(path) = out_json {
+        write_validation_broker_output(&resolve_cli_path(cwd, path), json_output, "JSON output")?;
+    }
+    if let Some(path) = out_text {
+        write_validation_broker_output(&resolve_cli_path(cwd, path), text_output, "text output")?;
+    }
+    if out_json.is_none() && out_text.is_none() {
+        match format {
+            "json" => println!("{json_output}"),
+            "text" => print!("{text_output}"),
+            other => {
+                return Err(validation_broker_validation_error(format!(
+                    "unsupported validation-broker format: {other}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn write_validation_broker_output(path: &Path, content: &str, label: &str) -> Result<()> {
+    if path.exists() {
+        return Err(validation_broker_validation_error(format!(
+            "refusing to overwrite existing validation-broker {label}: {}",
+            path.display()
+        )));
+    }
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, content)?;
+    Ok(())
+}
+
+fn render_validation_broker_status_text(report: &ValidationBrokerStatusReport) -> String {
+    let mut output = String::new();
+    let _ = writeln!(output, "Validation Broker Status");
+    let _ = writeln!(output, "schema: {}", report.schema);
+    let _ = writeln!(output, "generated_at_utc: {}", report.generated_at_utc);
+    push_validation_store_summary_text(&mut output, &report.store);
+    push_validation_list(
+        &mut output,
+        "degraded_reasons",
+        &report.store.degraded_reasons,
+    );
+    output
+}
+
+fn render_validation_broker_plan_text(report: &ValidationBrokerPlanReport) -> String {
+    let mut output = String::new();
+    let _ = writeln!(output, "Validation Broker Plan");
+    let _ = writeln!(output, "schema: {}", report.schema);
+    let _ = writeln!(output, "generated_at_utc: {}", report.generated_at_utc);
+    let _ = writeln!(output, "read_only: {}", report.read_only);
+    let _ = writeln!(output, "request_id: {}", report.request_id);
+    let _ = writeln!(output, "bead_id: {}", report.bead_id);
+    let _ = writeln!(
+        output,
+        "decision: {}",
+        validation_decision_key(&report.decision.decision)
+    );
+    let _ = writeln!(output, "next_action: {}", report.next_action);
+    let _ = writeln!(output, "confidence: {}", report.decision.confidence);
+    push_validation_list(&mut output, "reasons", &report.decision.reasons);
+    push_validation_list(
+        &mut output,
+        "required_actions",
+        &report.decision.required_actions,
+    );
+    push_validation_list(&mut output, "no_claims", &report.decision.no_claims);
+    push_validation_store_summary_text(&mut output, &report.store);
+    output
+}
+
+fn render_validation_broker_lease_text(report: &ValidationBrokerLeaseMutationReport) -> String {
+    let mut output = String::new();
+    let _ = writeln!(output, "Validation Broker Lease");
+    let _ = writeln!(output, "schema: {}", report.schema);
+    let _ = writeln!(output, "generated_at_utc: {}", report.generated_at_utc);
+    let _ = writeln!(output, "event: {}", report.event);
+    let _ = writeln!(output, "slot_id: {}", report.lease.slot_id);
+    let _ = writeln!(
+        output,
+        "state: {}",
+        validation_slot_state_key(&report.lease.state)
+    );
+    let _ = writeln!(output, "owner_agent: {}", report.lease.owner_agent);
+    let _ = writeln!(output, "bead_id: {}", report.lease.bead_id);
+    push_validation_store_summary_text(&mut output, &report.store);
+    output
+}
+
+fn push_validation_store_summary_text(output: &mut String, store: &ValidationBrokerStoreSummary) {
+    let _ = writeln!(output, "store: {}", store.path);
+    let _ = writeln!(output, "store_status: {}", store.status);
+    let _ = writeln!(output, "total_records: {}", store.total_records);
+    let _ = writeln!(output, "total_slots: {}", store.total_slots);
+    let _ = writeln!(output, "active_slots: {}", store.active_slots);
+    let _ = writeln!(output, "reusable_slots: {}", store.reusable_slots);
+    let _ = writeln!(output, "stale_slots: {}", store.stale_slots);
+    let _ = writeln!(
+        output,
+        "expired_at_report_time_slots: {}",
+        store.expired_at_report_time_slots
+    );
+}
+
+fn push_validation_list(output: &mut String, label: &str, values: &[String]) {
+    let _ = writeln!(output, "{label}:");
+    if values.is_empty() {
+        let _ = writeln!(output, "- none");
+    } else {
+        for value in values {
+            let _ = writeln!(output, "- {value}");
+        }
+    }
 }
 
 const SWARM_REPLAY_PREVIEW_SCHEMA: &str = "pi.swarm.replay_preview.v1";

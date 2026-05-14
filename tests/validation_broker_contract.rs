@@ -365,6 +365,43 @@ fn validation_broker_contract_is_read_only_in_plan_mode() -> TestResult {
 }
 
 #[test]
+fn validation_broker_contract_declares_cli_surface() -> TestResult {
+    let contract = load_contract()?;
+
+    require(
+        pointer_str(&contract, "/cli_status_schema")? == "pi.validation_broker.cli_status.v1",
+        "CLI status schema mismatch",
+    )?;
+    require(
+        pointer_str(&contract, "/cli_plan_schema")? == "pi.validation_broker.cli_plan.v1",
+        "CLI plan schema mismatch",
+    )?;
+    require(
+        pointer_bool(&contract, "/cli_surface_contract/plan_mode/read_only")?,
+        "CLI plan mode must be read-only",
+    )?;
+    require_set(
+        &contract,
+        "/cli_surface_contract/actions",
+        &["status", "plan", "acquire", "renew", "release"],
+        "CLI action",
+    )?;
+    require_set(
+        &contract,
+        "/cli_surface_contract/plan_mode/required_next_actions",
+        &[
+            "run_now",
+            "wait",
+            "coalesce_with_reusable_slot",
+            "narrow_scope",
+            "surface_blocker",
+            "recover_stale_slot_or_bead",
+        ],
+        "CLI next action",
+    )
+}
+
+#[test]
 fn validation_broker_contract_preserves_redaction_and_no_claims() -> TestResult {
     let contract = load_contract()?;
 

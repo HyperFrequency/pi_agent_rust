@@ -336,6 +336,7 @@ fn command_value(command: Option<&Commands>) -> Value {
             "out_text": out_text,
             "generated_at": generated_at,
         }),
+        Some(Commands::ValidationBroker { command }) => validation_broker_command_value(command),
         Some(Commands::List) => json!({
             "name": "list",
         }),
@@ -375,6 +376,122 @@ fn command_value(command: Option<&Commands>) -> Value {
             "dry_run": dry_run,
         }),
         None => Value::Null,
+    }
+}
+
+fn validation_broker_command_value(command: &pi::cli::ValidationBrokerCommand) -> Value {
+    match command {
+        pi::cli::ValidationBrokerCommand::Status {
+            store,
+            format,
+            out_json,
+            out_text,
+            generated_at,
+        } => json!({
+            "name": "validation-broker",
+            "command": "status",
+            "store": store,
+            "format": format,
+            "out_json": out_json,
+            "out_text": out_text,
+            "generated_at": generated_at,
+        }),
+        pi::cli::ValidationBrokerCommand::Plan {
+            request,
+            inputs,
+            store,
+            policy,
+            format,
+            out_json,
+            out_text,
+            generated_at,
+        } => json!({
+            "name": "validation-broker",
+            "command": "plan",
+            "request": request,
+            "inputs": inputs,
+            "store": store,
+            "policy": policy,
+            "format": format,
+            "out_json": out_json,
+            "out_text": out_text,
+            "generated_at": generated_at,
+        }),
+        pi::cli::ValidationBrokerCommand::Acquire { .. }
+        | pi::cli::ValidationBrokerCommand::Renew { .. }
+        | pi::cli::ValidationBrokerCommand::Release { .. } => {
+            validation_broker_lease_command_value(command)
+        }
+    }
+}
+
+fn validation_broker_lease_command_value(command: &pi::cli::ValidationBrokerCommand) -> Value {
+    match command {
+        pi::cli::ValidationBrokerCommand::Acquire {
+            request,
+            store,
+            started_at,
+            expires_at,
+            format,
+            out_json,
+            out_text,
+        } => json!({
+            "name": "validation-broker",
+            "command": "acquire",
+            "request": request,
+            "store": store,
+            "started_at": started_at,
+            "expires_at": expires_at,
+            "format": format,
+            "out_json": out_json,
+            "out_text": out_text,
+        }),
+        pi::cli::ValidationBrokerCommand::Renew {
+            store,
+            slot_id,
+            owner,
+            heartbeat_at,
+            expires_at,
+            format,
+            out_json,
+            out_text,
+        } => json!({
+            "name": "validation-broker",
+            "command": "renew",
+            "store": store,
+            "slot_id": slot_id,
+            "owner": owner,
+            "heartbeat_at": heartbeat_at,
+            "expires_at": expires_at,
+            "format": format,
+            "out_json": out_json,
+            "out_text": out_text,
+        }),
+        pi::cli::ValidationBrokerCommand::Release {
+            store,
+            slot_id,
+            owner,
+            at,
+            reason,
+            format,
+            out_json,
+            out_text,
+        } => json!({
+            "name": "validation-broker",
+            "command": "release",
+            "store": store,
+            "slot_id": slot_id,
+            "owner": owner,
+            "at": at,
+            "reason": reason,
+            "format": format,
+            "out_json": out_json,
+            "out_text": out_text,
+        }),
+        pi::cli::ValidationBrokerCommand::Status { .. }
+        | pi::cli::ValidationBrokerCommand::Plan { .. } => {
+            unreachable!("status and plan commands are handled by validation_broker_command_value")
+        }
     }
 }
 
