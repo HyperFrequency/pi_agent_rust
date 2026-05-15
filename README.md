@@ -710,7 +710,7 @@ pi migrate ~/.pi/agent/sessions
 - `update-index` refreshes extension index metadata used by `search` and `info`.
 - `search` and `info` let you discover and inspect extension metadata without leaving the CLI.
 - `doctor` checks config, directories, auth, shell setup, sessions, swarm coordination readiness, and extension compatibility. `pi doctor --only swarm --format json` also reports cgroup CPU quota, cpuset size, NUMA topology, cgroup memory limits, target/tmp headroom, and recommended concurrency budgets before large multi-agent runs.
-- `swarm-progress` evaluates a normalized progress SLO snapshot and emits advisory JSON/text only; it does not mutate Beads, git, Agent Mail, RCH, validation broker slots, runpacks, or source files.
+- `swarm-progress` evaluates a normalized progress SLO snapshot and emits advisory JSON/text only; it does not mutate Beads, git, Agent Mail, RCH, validation broker slots, runpacks, or source files. Operator workflow, privacy boundaries, degraded Agent Mail/RCH interpretation, stale-Beads handling, and no-open-work convergence guidance lives in [docs/swarm-operations-runbook.md#progress-slo-operator-workflow](docs/swarm-operations-runbook.md#progress-slo-operator-workflow).
 - `migrate` validates or creates the v2 session sidecar format for faster resume on larger histories.
 
 ---
@@ -1928,6 +1928,15 @@ Agent Mail, CI, UBS, `cargo_headroom.sh`, or release-claim gates. Operator
 workflow, privacy, and degraded-data guidance lives in
 [docs/swarm-operations-runbook.md#validation-broker-operator-workflow](docs/swarm-operations-runbook.md#validation-broker-operator-workflow).
 
+If progress SLO JSON is supplied with `--progress-slo-json`, the runpack
+projects the current swarm progress posture, confidence, saturation summary,
+source freshness, redaction posture, and next actions as advisory handoff data.
+This projection does not replace Beads, Agent Mail, RCH, Doctor, validation
+gates, git, or release-claim gates. Operator workflow, privacy, degraded-source
+handling, stale-Beads handling, RCH pressure interpretation, and no-open-work
+convergence guidance lives in
+[docs/swarm-operations-runbook.md#progress-slo-operator-workflow](docs/swarm-operations-runbook.md#progress-slo-operator-workflow).
+
 The same runpack command can emit a dry-run swarm autopilot input pack and plan
 beside the handoff bundle. When those companion artifacts are requested, the
 runpack JSON/Markdown includes an `autopilot_handoff` summary
@@ -2538,6 +2547,7 @@ broader inventory.
 | Area | Primary docs |
 |---|---|
 | Getting started and operations | [development](docs/development.md), [terminal setup](docs/terminal-setup.md), [settings](docs/settings.md), [models](docs/models.md), [keybindings](docs/keybindings.md), [packages](docs/packages.md), [troubleshooting](docs/troubleshooting.md), [releasing](docs/releasing.md) |
+| Swarm operations and replay | [operations runbook](docs/swarm-operations-runbook.md), [replay operator workflow](docs/swarm-replay-operator-workflow.md), [activity ledger](docs/swarm-activity-ledger.md), [flight recorder](docs/swarm-flight-recorder.md) |
 | Core runtime surfaces | [session](docs/session.md), [tree](docs/tree.md), [TUI](docs/tui.md), [RPC](docs/rpc.md), [SDK](docs/sdk.md), [skills](docs/skills.md), [prompt templates](docs/prompt-templates.md), [streaming hostcalls](docs/streaming-hostcalls.md), [context intelligence](docs/context-intelligence.md) |
 | Drop-in certification and migration | [certification contract](docs/contracts/dropin-certification-contract.json), [certification verdict](docs/evidence/dropin-certification-verdict.json), [parity gap ledger](docs/evidence/dropin-parity-gap-ledger.json), [differential evidence suite](docs/evidence/dropin-differential-evidence-suite.json), [feature inventory](docs/evidence/dropin-feature-inventory-matrix.json), [migration playbook](docs/integrator-migration-playbook.md), [parity snapshot](docs/parity-certification.json), [program governance](docs/program-governance.md) |
 | Extensions | [architecture](docs/extension-architecture.md), [compatibility guide](docs/ext-compat.md), [compatibility matrix](docs/extension-compatibility-matrix.md), [conformance plan](docs/extension-conformance-test-plan.json), [runtime threat model](docs/extension-runtime-threat-model.md), [troubleshooting](docs/extension-troubleshooting.md), [registry](docs/extension-registry.md), [WIT ABI](docs/wit/extension.wit) |

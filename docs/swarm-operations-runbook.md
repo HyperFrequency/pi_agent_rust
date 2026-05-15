@@ -14,6 +14,7 @@ This runbook is operator guidance. It does not replace Beads as the work ledger,
 | Cargo/RCH admission | Cargo headroom preflight | `scripts/cargo_headroom.sh --runner rch --admit-only check --all-targets` |
 | Remote build status | RCH queue and worker state | `rch status`, `rch queue`, `rch doctor` |
 | Handoff bundle | Operator runpack | `python3 scripts/build_swarm_operator_runpack.py --capture-current ...` |
+| Progress posture | Read-only progress SLO report | `pi swarm-progress --input <progress-slo-input.json> --out-json <progress-slo.json>` |
 | Saturation and timeline evidence | Redacted swarm activity ledger | `docs/swarm-activity-ledger.md`, schema `pi.swarm.activity_digest.v1` |
 | Deterministic replay evidence | Swarm flight recorder | `docs/swarm-flight-recorder.md`, schema `pi.swarm.flight_recorder.report.v1` |
 | Offline replay policy comparison | Swarm replay operator workflow | `docs/swarm-replay-operator-workflow.md`, `pi swarm-replay-preview --trace <trace.json>` |
@@ -176,6 +177,120 @@ Watch for:
 
 Do not revert unrelated dirty files. Treat them as another agent's work unless the owning bead or the user explicitly says otherwise.
 
+## Progress SLO Operator Workflow
+
+`pi swarm-progress` classifies whether a swarm is making progress from a
+normalized `ProgressSloEvaluationInput` snapshot. It is read-only advisory
+evidence. It does not read live Beads, send Agent Mail, reserve files, start or
+cancel RCH jobs, mutate git, close beads, waive validation gates, or support
+release-facing speed, capacity, benchmark, or strict drop-in claims.
+
+Capture the source facts first, then build or reuse the normalized input from
+those artifacts:
+
+```bash
+capture_dir="/data/tmp/pi_swarm_progress/${AGENT_NAME:-agent}-$(date -u +%Y%m%dT%H%M%SZ)"
+mkdir -p "$capture_dir"
+
+br list --json > "$capture_dir/beads.json"
+br ready --json > "$capture_dir/beads-ready.json"
+br list --status=in_progress --json > "$capture_dir/beads-in-progress.json"
+git status --short --branch > "$capture_dir/git-status.txt"
+rch status > "$capture_dir/rch-status.txt"
+rch queue > "$capture_dir/rch-queue.txt"
+PI_SWARM_PROGRESS_SLO_JSON="$capture_dir/progress-slo.json" \
+  pi doctor --only swarm --format json > "$capture_dir/doctor-swarm.json"
+```
+
+Evaluate a prepared normalized input and keep both machine and human-readable
+artifacts:
+
+```bash
+pi swarm-progress \
+  --input "$capture_dir/progress-slo-input.json" \
+  --since HEAD~1 \
+  --out-json "$capture_dir/progress-slo.json" \
+  --out-text "$capture_dir/progress-slo.txt"
+```
+
+`--since` is optional, but when it is supplied it must match
+`input.time_window.comparison_baseline`. The command refuses to overwrite
+existing output files; use a fresh capture directory instead of deleting old
+evidence.
+
+Use `jq` to inspect the fields operators usually need:
+
+```bash
+jq '{schema, status, confidence, reason_ids, next_actions}' \
+  "$capture_dir/progress-slo.json"
+
+jq '.saturation_summary | {
+  coordination_saturation,
+  build_saturation,
+  validation_saturation,
+  queue_convergence,
+  recommended_operator_posture
+}' "$capture_dir/progress-slo.json"
+
+jq '.source_statuses[] | {
+  id: .source_id,
+  kind: .source_kind,
+  availability,
+  freshness_state,
+  redaction_state,
+  degraded_reason
+}' "$capture_dir/progress-slo.json"
+
+jq '.redaction_summary | {
+  redacted_source_count,
+  unsafe_to_emit_source_count,
+  suppressed_claims
+}' "$capture_dir/progress-slo.json"
+```
+
+Interpret statuses conservatively:
+
+| Status | Typical reason | Operator action |
+| --- | --- | --- |
+| `progressing` | Closed beads, pushed commits, and validation passes moved in the window. | Continue the current swarm, but still use Beads and Agent Mail for ownership. |
+| `converged_no_open_work` | No open or in-progress work remains. | Stop claiming new implementation work; file a new bead only for a concrete uncovered gap. |
+| `quiet_blocked` | Open work exists but ready work is blocked. | Inspect dependencies with `br show <id> --json` and unblock the named source issue. |
+| `coordination_degraded` | Agent Mail is red, corrupt, read-only, or missing. | Use Beads status/comments as the soft lock, keep file scope narrow, and record the exact Mail error. |
+| `build_saturated` | RCH or validation broker pressure is high. | Stop launching heavyweight Cargo jobs; continue docs, source inspection, or non-heavy fixes until RCH recovers. |
+| `stalled` | In-progress beads look stale and no useful progress is visible. | Review `br show`, comments, git history, and Agent Mail evidence before reopening; never reopen based on age alone. |
+| `malformed_source_degraded` | A required source was malformed or contradictory. | Repair or regenerate the source artifact; do not act on the optimistic parts of the report. |
+| `insufficient_evidence_degraded` | Required source data was missing, stale, or unsafe to emit. | Refresh source artifacts and rerun; treat the report as a blocker, not a pass. |
+
+When the report should appear in Doctor or an operator runpack, pass the JSON
+explicitly:
+
+```bash
+PI_SWARM_PROGRESS_SLO_JSON="$capture_dir/progress-slo.json" \
+  pi doctor --only swarm --format json \
+  | jq '.findings[] | select(.id == "progress_slo_current_posture")'
+
+python3 scripts/build_swarm_operator_runpack.py \
+  --capture-current \
+  --capture-dir "$capture_dir/runpack" \
+  --project-root /data/projects/pi_agent_rust \
+  --agent-name "${AGENT_NAME:-agent}" \
+  --progress-slo-json "$capture_dir/progress-slo.json" \
+  --out-json "$capture_dir/operator-runpack.json" \
+  --out-md "$capture_dir/operator-runpack.md"
+```
+
+Privacy boundaries:
+
+- Store bead IDs, source IDs, schema names, counts, command labels, exit status,
+  file paths, source hashes, and redaction summaries.
+- Do not embed prompt bodies, provider transcripts, raw Agent Mail message
+  bodies, bearer tokens, cookies, API keys, secrets, or full environment dumps.
+- If a source reports `redacted`, `sensitive_omitted`, or `unsafe_to_emit`,
+  keep the suppressed claim visible and avoid treating the missing raw data as
+  green evidence.
+- A progress SLO report is current only for its source window and source hashes.
+  Rebuild it for a new handoff rather than carrying stale status forward.
+
 ## Throttle Or Pause
 
 Back off new claims when any of these are true:
@@ -271,6 +386,7 @@ python3 scripts/build_swarm_operator_runpack.py \
   --capture-dir "$capture_dir" \
   --project-root /data/projects/pi_agent_rust \
   --agent-name "$AGENT_NAME" \
+  --progress-slo-json "$capture_dir/progress-slo.json" \
   --out-json "$capture_dir/operator-runpack.json" \
   --out-md "$capture_dir/operator-runpack.md" \
   --out-autopilot-input-pack-json "$capture_dir/autopilot-input-pack.json" \
