@@ -15,6 +15,7 @@ This runbook is operator guidance. It does not replace Beads as the work ledger,
 | Remote build status | RCH queue and worker state | `rch status`, `rch queue`, `rch doctor` |
 | Handoff bundle | Operator runpack | `python3 scripts/build_swarm_operator_runpack.py --capture-current ...` |
 | Progress posture | Read-only progress SLO report | `pi swarm-progress --input <progress-slo-input.json> --out-json <progress-slo.json>` |
+| Queue convergence | Read-only empty-queue convergence report | `python3 scripts/report_empty_queue_convergence.py --json` |
 | Saturation and timeline evidence | Redacted swarm activity ledger | `docs/swarm-activity-ledger.md`, schema `pi.swarm.activity_digest.v1` |
 | Deterministic replay evidence | Swarm flight recorder | `docs/swarm-flight-recorder.md`, schema `pi.swarm.flight_recorder.report.v1` |
 | Offline replay policy comparison | Swarm replay operator workflow | `docs/swarm-replay-operator-workflow.md`, `pi swarm-replay-preview --trace <trace.json>` |
@@ -33,6 +34,8 @@ mkdir -p "$CARGO_TARGET_DIR" "$TMPDIR"
 git status --short --branch
 br ready --json
 bv --recipe actionable --robot-plan
+python3 scripts/report_empty_queue_convergence.py --json \
+  --beads-jsonl .beads/issues.jsonl
 pi doctor --only swarm --format json > /data/tmp/pi_swarm_runpack/doctor.json
 scripts/cargo_headroom.sh --runner rch --admit-only check --all-targets \
   --decision-json /data/tmp/pi_swarm_runpack/cargo-admission.json
@@ -44,6 +47,10 @@ Green startup means:
 
 - `git status --short --branch` has no uncommitted work from this agent.
 - `br ready --json` has a real open issue, not a tombstone or deleted item.
+- `scripts/report_empty_queue_convergence.py --json` reports
+  `status=ready_work_available` before claiming a new bead, or
+  `status=queue_clean` only when no ready/in-progress work remains and
+  closeout freshness is available.
 - `pi doctor --only swarm --format json` has no red finding that says new swarm work must stop.
 - `scripts/cargo_headroom.sh --runner rch --admit-only ...` returns
   `decision=allow` with `admission_action=allow`. `admission_action=defer`
@@ -613,6 +620,7 @@ command -v git br bv rch cargo jq python3
 python3 scripts/build_swarm_operator_runpack.py --self-test
 python3 scripts/check_swarm_runpack_freshness.py --self-test
 python3 scripts/check_swarm_runpack_freshness.py --run-runpack-smoke
+python3 scripts/report_empty_queue_convergence.py --self-test
 e2e_dir="/data/tmp/pi_swarm_autopilot_e2e/${AGENT_NAME:-agent}-$(date -u +%Y%m%dT%H%M%SZ)"
 python3 scripts/build_swarm_operator_runpack.py \
   --run-autopilot-e2e \
