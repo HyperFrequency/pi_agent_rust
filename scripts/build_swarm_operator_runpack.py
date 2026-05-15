@@ -91,6 +91,17 @@ DEFAULT_STALE_AFTER_HOURS = 24
 DEFAULT_CAPTURE_TIMEOUT_SECONDS = 12
 CAPTURE_SNIPPET_MAX_CHARS = 1200
 SCORECARD_MAX_PER_DIMENSION = 2
+DEFERRED_PLANNING_LABELS = {
+    "idea-wizard",
+    "planning",
+    "roadmap",
+}
+DEFERRED_PLANNING_TERMS = (
+    "backlog",
+    "idea-wizard",
+    "roadmap",
+    "work_to_plan",
+)
 SENSITIVE_KEY_FRAGMENTS = (
     "authorization",
     "bearer",
@@ -196,6 +207,7 @@ AUTOPILOT_PLAN_ALLOWED_ACTIONS = (
     "capture_handoff",
     "adjust_swarm_budget",
     "claim_ready_bead",
+    "create_or_refine_backlog",
     "run_docs_only_work",
     "plan_new_bead",
 )
@@ -209,6 +221,7 @@ AUTOPILOT_PLAN_DANGEROUS_COMMAND_FRAGMENTS = (
 AUTOPILOT_E2E_REQUIRED_SCENARIOS = (
     "healthy_ready_claim",
     "empty_ready_queue",
+    "deferred_roadmap_backlog",
     "degraded_agent_mail_soft_lock",
     "saturated_rch_queue",
     "capacity_cpu16_mem64_healthy_admit",
@@ -2720,6 +2733,8 @@ def normalized_bead_candidate(issue: dict[str, Any]) -> dict[str, Any]:
         "updated_at": issue.get("updated_at"),
         "labels": issue.get("labels") if isinstance(issue.get("labels"), list) else [],
     }
+    if issue.get("issue_type") is not None:
+        candidate["issue_type"] = issue.get("issue_type")
     if description:
         candidate["description"] = description
     return candidate
@@ -2729,6 +2744,84 @@ def sort_bead_candidates(issues: list[dict[str, Any]]) -> list[dict[str, Any]]:
     normalized = [normalized_bead_candidate(issue) for issue in issues]
     return sorted(
         normalized,
+        key=lambda issue: (
+            issue.get("priority", 99),
+            str(issue.get("updated_at") or ""),
+            str(issue.get("id") or ""),
+        ),
+    )
+
+
+def issue_labels(issue: dict[str, Any]) -> list[str]:
+    labels = issue.get("labels")
+    if isinstance(labels, list):
+        return [str(label) for label in labels]
+    if isinstance(labels, str):
+        return [label.strip() for label in labels.split(",") if label.strip()]
+    return []
+
+
+def issue_type(issue: dict[str, Any]) -> str:
+    value = issue.get("issue_type") or issue.get("type")
+    return str(value or "")
+
+
+def child_issues_by_parent(issues: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    children: dict[str, list[dict[str, Any]]] = {}
+    for issue in issues:
+        for dep in issue.get("dependencies") or []:
+            if not isinstance(dep, dict):
+                continue
+            dep_type = dep.get("type") or dep.get("dependency_type")
+            if dep_type != "parent-child":
+                continue
+            parent_id = dep.get("depends_on_id") or dep.get("id")
+            if parent_id:
+                children.setdefault(str(parent_id), []).append(issue)
+    return children
+
+
+def is_deferred_planning_epic(issue: dict[str, Any]) -> bool:
+    if issue.get("status") != "deferred":
+        return False
+    if issue_type(issue) != "epic":
+        return False
+    labels = {label.lower() for label in issue_labels(issue)}
+    if labels & DEFERRED_PLANNING_LABELS:
+        return True
+    haystack = " ".join(
+        str(issue.get(field, "")).lower()
+        for field in ("title", "description", "body", "notes")
+    )
+    return any(term in haystack for term in DEFERRED_PLANNING_TERMS)
+
+
+def deferred_planning_beads(issues: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    children_by_parent = child_issues_by_parent(issues)
+    planning: list[dict[str, Any]] = []
+    for issue in issues:
+        if not is_deferred_planning_epic(issue):
+            continue
+        children = children_by_parent.get(str(issue.get("id")), [])
+        child_statuses: dict[str, int] = {}
+        for child in children:
+            status = str(child.get("status") or "unknown")
+            child_statuses[status] = child_statuses.get(status, 0) + 1
+        active_child_count = (
+            child_statuses.get("open", 0) + child_statuses.get("in_progress", 0)
+        )
+        if active_child_count:
+            continue
+        planning.append(
+            {
+                **normalized_bead_candidate(issue),
+                "child_count": len(children),
+                "child_statuses": dict(sorted(child_statuses.items())),
+                "planning_reason": "deferred roadmap/planning epic has no open or in-progress child work",
+            }
+        )
+    return sorted(
+        planning,
         key=lambda issue: (
             issue.get("priority", 99),
             str(issue.get("updated_at") or ""),
@@ -2750,6 +2843,7 @@ def summarize_beads(
     open_candidates = sort_bead_candidates(
         [issue for issue in issues if issue.get("status") == "open"]
     )
+    deferred_planning = deferred_planning_beads(issues)
     stale: list[dict[str, Any]] = []
     for issue in active:
         updated_at = str(issue.get("updated_at") or "")
@@ -2777,6 +2871,8 @@ def summarize_beads(
         "active_count": len(active),
         "open_candidate_count": len(open_candidates),
         "open_candidates": bounded(open_candidates, max_items),
+        "deferred_planning_count": len(deferred_planning),
+        "deferred_planning": bounded(deferred_planning, max_items),
         "stale_after_hours": stale_after_hours,
         "stale": bounded(stale, max_items),
     }
@@ -5242,7 +5338,60 @@ def build_autopilot_plan(
     ready_count = int_value(beads_ready.get("ready_count"))
     active_count = int_value(beads.get("active_count"))
     open_count = int_value(beads.get("open_candidate_count"))
-    if ready_count == 0 and active_count == 0 and open_count == 0 and not blockers:
+    deferred_planning = beads.get("deferred_planning")
+    if not isinstance(deferred_planning, list):
+        deferred_planning = []
+    deferred_planning_count = int_value(beads.get("deferred_planning_count"))
+    if (
+        ready_count == 0
+        and active_count == 0
+        and open_count == 0
+        and deferred_planning_count
+        and not blockers
+    ):
+        issue_ids = [
+            str(item.get("id"))
+            for item in deferred_planning
+            if item.get("id")
+        ]
+        epic_id = issue_ids[0] if issue_ids else "<epic-id>"
+        title_suffix = ", ".join(issue_ids[:3]) if issue_ids else "deferred roadmap epics"
+        actions.append(
+            autopilot_plan_action(
+                action="create_or_refine_backlog",
+                title=f"Create/refine child Beads for deferred roadmap epics: {title_suffix}",
+                severity="medium",
+                confidence="high",
+                preconditions=[
+                    "No ready, open, or in-progress Beads are present in the captured evidence.",
+                    "Deferred roadmap/planning epics remain without open child work.",
+                    "Create bounded child Beads before treating the queue as clean.",
+                ],
+                evidence_paths=[
+                    "normalized_inputs.beads.deferred_planning",
+                    "normalized_inputs.beads.deferred_planning_count",
+                    "normalized_inputs.beads_ready.ready_count",
+                    "normalized_inputs.beads.open_candidate_count",
+                    "command_provenance",
+                ],
+                commands=[
+                    plan_command("Inspect top deferred epic", f"br show {epic_id} --json"),
+                    plan_command("Create one child bead", "br create --title \"<narrow child task>\" --type task --priority 2"),
+                    plan_command("Link child to epic", f"br dep add <child-id> {epic_id} --type parent-child"),
+                    plan_command("Sync Beads JSONL", "br sync --flush-only"),
+                ],
+                omitted_commands=[
+                    omitted_command("stop queue clean", "deferred roadmap/planning epics still need actionable children"),
+                    omitted_command("automatic bead creation", "planner is dry-run and must not mutate Beads"),
+                ],
+                forbidden_actions=["invent broad work without a bead", "automatic commit"],
+                rationale=(
+                    "Captured Beads evidence has no ready or active work, but deferred "
+                    "roadmap/planning epics remain without open child Beads."
+                ),
+            )
+        )
+    if ready_count == 0 and active_count == 0 and open_count == 0 and deferred_planning_count == 0 and not blockers:
         actions.append(
             autopilot_plan_action(
                 action="run_docs_only_work",
@@ -5849,6 +5998,17 @@ def operator_next_actions(runpack: dict[str, Any]) -> list[str]:
         actions.append("Resolve failing `pi doctor --only swarm --format json` findings")
     if runpack["beads"].get("stale"):
         actions.append("Review stale in-progress Beads before assigning more work")
+    deferred_planning = runpack["beads"].get("deferred_planning")
+    if isinstance(deferred_planning, list) and deferred_planning:
+        epic_names = [
+            f"{item.get('id')} ({item.get('title')})"
+            for item in deferred_planning[:3]
+            if item.get("id")
+        ]
+        actions.append(
+            "Create or refine child Beads for deferred roadmap/planning epics before "
+            f"declaring the queue clean: {', '.join(epic_names)}"
+        )
     if runpack["rch_admission"].get("decision") in {"backoff", "degraded", "deny"}:
         actions.append("Treat cargo/RCH admission as blocked or degraded before heavy builds")
     proof_ledger = runpack.get("remote_validation_proof_ledger")
@@ -7362,6 +7522,20 @@ def autopilot_e2e_result_from_plan(
                 in action.get("rationale", "")
                 for action in mail_actions
             )
+    if "create_or_refine_backlog" in expected_actions:
+        beads = normalized_section(input_pack, "beads")
+        assert beads.get("deferred_planning_count") == 1
+        assert beads.get("open_candidate_count") == 0
+        assert "run_docs_only_work" not in action_names
+        backlog_actions = [
+            action
+            for action in plan["actions"]
+            if action.get("action") == "create_or_refine_backlog"
+        ]
+        assert backlog_actions
+        assert "normalized_inputs.beads.deferred_planning" in backlog_actions[0].get(
+            "evidence_paths", []
+        )
     selected_action = action_names[0] if action_names else None
     first_action = plan["actions"][0]
     budget_state = plan.get("budget_drift") if isinstance(plan.get("budget_drift"), dict) else {}
@@ -7526,6 +7700,37 @@ def build_autopilot_e2e_summary(
         beads_ready_payload=empty_ready,
         commands=empty_commands,
         expected_actions=["run_docs_only_work"],
+    )
+    deferred_roadmap_payload = {
+        "issues": [
+            {
+                "id": "bd-roadmap-e2e",
+                "title": "Swarm follow-up roadmap",
+                "description": "Needs child backlog after idea-wizard planning.",
+                "status": "deferred",
+                "priority": 2,
+                "issue_type": "epic",
+                "updated_at": generated_at,
+                "labels": ["idea-wizard", "swarm"],
+            },
+            {
+                "id": "bd-roadmap-e2e.1",
+                "title": "Closed roadmap child",
+                "status": "closed",
+                "priority": 2,
+                "updated_at": generated_at,
+                "dependencies": [
+                    {"type": "parent-child", "depends_on_id": "bd-roadmap-e2e"}
+                ],
+            },
+        ]
+    }
+    run_plan_scenario(
+        "deferred_roadmap_backlog",
+        beads_payload=deferred_roadmap_payload,
+        beads_ready_payload=empty_ready,
+        commands=empty_commands,
+        expected_actions=["create_or_refine_backlog"],
     )
 
     degraded_mail_commands = list(ready_commands) + [
@@ -11482,6 +11687,48 @@ def run_self_test() -> int:
         empty_plan = build_autopilot_plan(empty_input_pack, max_items=args.max_items)
         assert empty_input_pack["status"] == "ready"
         assert empty_plan["actions"][0]["action"] == "run_docs_only_work"
+        deferred_roadmap_beads_path = write_json(
+            workspace / "beads-deferred-roadmap.json",
+            {
+                "issues": [
+                    {
+                        "id": "bd-roadmap",
+                        "title": "Swarm follow-up roadmap",
+                        "description": "Needs child backlog after idea-wizard planning.",
+                        "status": "deferred",
+                        "priority": 2,
+                        "issue_type": "epic",
+                        "updated_at": generated_at,
+                        "labels": ["idea-wizard", "swarm"],
+                    },
+                    {
+                        "id": "bd-roadmap.1",
+                        "title": "Closed child",
+                        "status": "closed",
+                        "priority": 2,
+                        "updated_at": generated_at,
+                        "dependencies": [
+                            {"type": "parent-child", "depends_on_id": "bd-roadmap"}
+                        ],
+                    },
+                ]
+            },
+        )
+        deferred_plan_args = argparse.Namespace(
+            **{
+                **vars(healthy_args),
+                "beads_json": deferred_roadmap_beads_path,
+                "beads_ready_json": empty_ready_path,
+            }
+        )
+        deferred_input_pack = build_autopilot_input_pack(deferred_plan_args)
+        deferred_plan = build_autopilot_plan(deferred_input_pack, max_items=args.max_items)
+        assert deferred_input_pack["normalized_inputs"]["beads"]["deferred_planning_count"] == 1
+        assert deferred_plan["actions"][0]["action"] == "create_or_refine_backlog"
+        assert (
+            "normalized_inputs.beads.deferred_planning"
+            in deferred_plan["actions"][0]["evidence_paths"]
+        )
         stale_git_path = write_json(
             workspace / "git-status-stale.json",
             {
@@ -11537,6 +11784,9 @@ def run_self_test() -> int:
         assert autopilot_e2e["scenarios"]["empty_ready_queue"][
             "selected_action"
         ] == "run_docs_only_work"
+        assert autopilot_e2e["scenarios"]["deferred_roadmap_backlog"][
+            "selected_action"
+        ] == "create_or_refine_backlog"
         assert autopilot_e2e["scenarios"]["degraded_agent_mail_soft_lock"][
             "selected_action"
         ] == "use_beads_soft_lock"
@@ -11890,6 +12140,20 @@ def run_self_test() -> int:
         assert clean_runpack["beads"]["active_count"] == 0
         assert clean_runpack["agent_mail_read_state"]["status"] == "degraded"
         assert clean_runpack["validation_outputs"]["status"] == "not_provided"
+        deferred_runpack = build_runpack(
+            argparse.Namespace(
+                **{
+                    **vars(clean_args),
+                    "beads_json": deferred_roadmap_beads_path,
+                }
+            )
+        )
+        assert deferred_runpack["beads"]["deferred_planning_count"] == 1
+        assert any(
+            "Create or refine child Beads for deferred roadmap/planning epics" in action
+            and "bd-roadmap" in action
+            for action in deferred_runpack["operator_next_actions"]
+        )
         text_git_path = workspace / "git-status-text.txt"
         text_git_path.write_text(" M src/main.rs\n", encoding="utf-8")
         text_git_runpack = build_runpack(

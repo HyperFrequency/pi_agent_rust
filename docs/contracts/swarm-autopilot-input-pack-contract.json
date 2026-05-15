@@ -39,6 +39,7 @@
     "normalized_inputs.beads.status",
     "normalized_inputs.beads.active_count",
     "normalized_inputs.beads.open_candidate_count",
+    "normalized_inputs.beads.deferred_planning_count",
     "normalized_inputs.beads_ready.status",
     "normalized_inputs.beads_ready.ready_count",
     "normalized_inputs.agent_mail.status",

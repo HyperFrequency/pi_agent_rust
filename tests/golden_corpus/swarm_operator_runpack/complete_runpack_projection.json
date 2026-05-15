@@ -74,6 +74,8 @@
   },
   "beads": {
     "active_count": 2,
+    "deferred_planning": [],
+    "deferred_planning_count": 0,
     "open_candidate_count": 1,
     "open_candidates": [
       {

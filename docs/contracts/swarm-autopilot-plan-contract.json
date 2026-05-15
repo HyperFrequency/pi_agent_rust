@@ -98,6 +98,7 @@
     "capture_handoff",
     "adjust_swarm_budget",
     "claim_ready_bead",
+    "create_or_refine_backlog",
     "run_docs_only_work",
     "plan_new_bead"
   ],
