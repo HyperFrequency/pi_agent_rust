@@ -14,7 +14,9 @@
 
 use crate::auth::AuthStorage;
 use crate::compaction::{self, ResolvedCompactionSettings};
-use crate::compaction_worker::{CompactionQuota, CompactionWorkerState};
+use crate::compaction_worker::{
+    CompactionAdmissionSignals, CompactionQuota, CompactionWorkerState,
+};
 use crate::error::{Error, Result};
 use crate::extension_events::{
     BeforeAgentStartOutcome, InputEventOutcome, SessionBeforeCompactOutcome,
@@ -7910,8 +7912,20 @@ impl AgentSession {
         };
 
         if let Some(prep) = preparation {
+            let admission = self
+                .compaction_worker
+                .admission_decision(Some(&prep), &CompactionAdmissionSignals::default());
+            if !admission.allowed {
+                tracing::info!(
+                    reason = admission.reason.as_str(),
+                    tokens_before = admission.tokens_before,
+                    "Background compaction admission denied"
+                );
+                return Ok(());
+            }
+
             on_event(AgentEvent::AutoCompactionStart {
-                reason: "threshold".to_string(),
+                reason: format!("threshold;admission={}", admission.reason.as_str()),
             });
 
             let before_outcome = self.dispatch_before_compact(&prep, &entries, None).await;

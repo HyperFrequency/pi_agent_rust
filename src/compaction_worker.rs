@@ -9,8 +9,13 @@ use crate::provider::Provider;
 use asupersync::runtime::{JoinHandle, RuntimeHandle};
 use futures::FutureExt;
 use futures::channel::oneshot;
+use serde::Serialize;
+use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+pub(crate) const COMPACTION_ADMISSION_SCHEMA_V1: &str = "pi.compaction.admission.v1";
 
 /// Quota controls that bound background compaction resource usage.
 #[derive(Debug, Clone)]
@@ -31,6 +36,132 @@ impl Default for CompactionQuota {
             max_attempts_per_session: 100,
         }
     }
+}
+
+/// Optional memory posture supplied by a caller that already has host/cgroup
+/// evidence. Unknown memory posture is treated as unavailable, not healthy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactionMemorySignal {
+    pub available_bytes: Option<u64>,
+    pub required_headroom_bytes: u64,
+    pub pressure: bool,
+}
+
+impl CompactionMemorySignal {
+    fn is_pressure(self) -> bool {
+        self.pressure
+            || self
+                .available_bytes
+                .is_some_and(|available| available < self.required_headroom_bytes)
+    }
+}
+
+/// Optional provider posture for deciding whether background compaction would
+/// amplify an already degraded provider/model path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactionProviderSignal {
+    pub p95_latency_ms: Option<u64>,
+    pub max_p95_latency_ms: Option<u64>,
+    pub error_rate_per_mille: Option<u16>,
+    pub max_error_rate_per_mille: Option<u16>,
+    pub stale: bool,
+    pub degraded: bool,
+}
+
+impl CompactionProviderSignal {
+    fn is_degraded(self) -> bool {
+        self.degraded
+            || self.stale
+            || self
+                .p95_latency_ms
+                .zip(self.max_p95_latency_ms)
+                .is_some_and(|(p95, max)| p95 > max)
+            || self
+                .error_rate_per_mille
+                .zip(self.max_error_rate_per_mille)
+                .is_some_and(|(rate, max)| rate > max)
+    }
+}
+
+/// Optional queue posture from an operator/runtime surface that already tracks
+/// compaction demand across sessions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactionQueueSignal {
+    pub queued_requests: u32,
+    pub max_queued_requests: u32,
+    pub saturated: bool,
+}
+
+impl CompactionQueueSignal {
+    const fn is_saturated(self) -> bool {
+        self.saturated
+            || (self.max_queued_requests > 0 && self.queued_requests >= self.max_queued_requests)
+    }
+}
+
+/// Optional admission signals supplied by the caller. The worker never probes
+/// live host/provider state itself; callers pass already-sampled, redacted facts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactionAdmissionSignals {
+    pub memory: Option<CompactionMemorySignal>,
+    pub provider: Option<CompactionProviderSignal>,
+    pub queue: Option<CompactionQueueSignal>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionAdmissionReason {
+    Allowed,
+    Pending,
+    SessionAttemptLimit,
+    Cooldown,
+    NoPreparation,
+    MemoryPressure,
+    ProviderDegraded,
+    QueueSaturated,
+}
+
+impl CompactionAdmissionReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Allowed => "allowed",
+            Self::Pending => "pending",
+            Self::SessionAttemptLimit => "session_attempt_limit",
+            Self::Cooldown => "cooldown",
+            Self::NoPreparation => "no_preparation",
+            Self::MemoryPressure => "memory_pressure",
+            Self::ProviderDegraded => "provider_degraded",
+            Self::QueueSaturated => "queue_saturated",
+        }
+    }
+}
+
+/// Deterministic explanation for a background compaction admission decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactionAdmissionDecision {
+    pub schema: &'static str,
+    pub allowed: bool,
+    pub reason: CompactionAdmissionReason,
+    pub tokens_before: Option<u64>,
+    pub attempt_count: u32,
+    pub max_attempts_per_session: u32,
+    pub cooldown_remaining_ms: u64,
+    pub signals: CompactionAdmissionSignals,
+}
+
+impl CompactionAdmissionDecision {
+    pub const fn is_allowed(&self) -> bool {
+        self.allowed
+    }
+}
+
+fn duration_millis_saturating(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 type CompactionOutcome = Result<CompactionResult>;
@@ -75,18 +206,74 @@ impl CompactionWorkerState {
 
     /// Whether a new background compaction is allowed to start now.
     pub fn can_start(&self) -> bool {
+        self.quota_block_reason().is_none()
+    }
+
+    pub fn admission_decision(
+        &self,
+        preparation: Option<&CompactionPreparation>,
+        signals: &CompactionAdmissionSignals,
+    ) -> CompactionAdmissionDecision {
+        let cooldown_remaining = self.cooldown_remaining();
+        let tokens_before = preparation.map(|prep| prep.tokens_before);
+        let reason = self
+            .quota_block_reason()
+            .unwrap_or_else(|| Self::signal_block_reason(preparation, signals));
+
+        CompactionAdmissionDecision {
+            schema: COMPACTION_ADMISSION_SCHEMA_V1,
+            allowed: reason == CompactionAdmissionReason::Allowed,
+            reason,
+            tokens_before,
+            attempt_count: self.attempt_count,
+            max_attempts_per_session: self.quota.max_attempts_per_session,
+            cooldown_remaining_ms: duration_millis_saturating(cooldown_remaining),
+            signals: *signals,
+        }
+    }
+
+    fn signal_block_reason(
+        preparation: Option<&CompactionPreparation>,
+        signals: &CompactionAdmissionSignals,
+    ) -> CompactionAdmissionReason {
+        if preparation.is_none() {
+            CompactionAdmissionReason::NoPreparation
+        } else if signals
+            .memory
+            .is_some_and(CompactionMemorySignal::is_pressure)
+        {
+            CompactionAdmissionReason::MemoryPressure
+        } else if signals
+            .provider
+            .is_some_and(CompactionProviderSignal::is_degraded)
+        {
+            CompactionAdmissionReason::ProviderDegraded
+        } else if signals
+            .queue
+            .is_some_and(CompactionQueueSignal::is_saturated)
+        {
+            CompactionAdmissionReason::QueueSaturated
+        } else {
+            CompactionAdmissionReason::Allowed
+        }
+    }
+
+    fn quota_block_reason(&self) -> Option<CompactionAdmissionReason> {
         if self.pending.is_some() {
-            return false;
+            Some(CompactionAdmissionReason::Pending)
+        } else if self.attempt_count >= self.quota.max_attempts_per_session {
+            Some(CompactionAdmissionReason::SessionAttemptLimit)
+        } else if !self.cooldown_remaining().is_zero() {
+            Some(CompactionAdmissionReason::Cooldown)
+        } else {
+            None
         }
-        if self.attempt_count >= self.quota.max_attempts_per_session {
-            return false;
-        }
-        if let Some(last) = self.last_start {
-            if last.elapsed() < self.quota.cooldown {
-                return false;
-            }
-        }
-        true
+    }
+
+    fn cooldown_remaining(&self) -> Duration {
+        self.last_start.map_or(Duration::ZERO, |last| {
+            self.quota.cooldown.saturating_sub(last.elapsed())
+        })
     }
 
     /// Non-blocking check for a completed compaction result.
@@ -155,6 +342,35 @@ impl CompactionWorkerState {
     }
 }
 
+pub fn compaction_admission_evidence(
+    decisions: &[CompactionAdmissionDecision],
+    foreground_p95_ms: u64,
+    foreground_p99_ms: u64,
+) -> Value {
+    let mut rejected_by_reason: BTreeMap<&'static str, usize> = BTreeMap::new();
+    for decision in decisions {
+        if !decision.allowed {
+            *rejected_by_reason
+                .entry(decision.reason.as_str())
+                .or_default() += 1;
+        }
+    }
+    let admitted = decisions.iter().filter(|decision| decision.allowed).count();
+    json!({
+        "schema": COMPACTION_ADMISSION_SCHEMA_V1,
+        "decisionCount": decisions.len(),
+        "admittedCount": admitted,
+        "rejectedCount": decisions.len().saturating_sub(admitted),
+        "rejectedByReason": rejected_by_reason,
+        "foregroundImpact": {
+            "source": "deterministic_fixture",
+            "p95Ms": foreground_p95_ms,
+            "p99Ms": foreground_p99_ms,
+        },
+        "decisions": decisions,
+    })
+}
+
 impl Drop for CompactionWorkerState {
     fn drop(&mut self) {
         if let Some(mut pending) = self.pending.take() {
@@ -209,6 +425,27 @@ mod tests {
 
     fn default_worker() -> CompactionWorkerState {
         make_worker(CompactionQuota::default())
+    }
+
+    fn compaction_admission_preparation(tokens_before: u64) -> CompactionPreparation {
+        CompactionPreparation {
+            first_kept_entry_id: "entry-kept".to_string(),
+            messages_to_summarize: Vec::new(),
+            turn_prefix_messages: Vec::new(),
+            is_split_turn: false,
+            tokens_before,
+            previous_summary: None,
+            file_ops: compaction::FileOperations::default(),
+            settings: compaction::ResolvedCompactionSettings::default(),
+        }
+    }
+
+    fn compaction_admission_decision(
+        worker: &CompactionWorkerState,
+        signals: CompactionAdmissionSignals,
+    ) -> CompactionAdmissionDecision {
+        let prep = compaction_admission_preparation(150_000);
+        worker.admission_decision(Some(&prep), &signals)
     }
 
     fn run_async<T, F>(make_future: impl FnOnce(RuntimeHandle) -> F) -> T
@@ -312,6 +549,211 @@ mod tests {
         });
         w.attempt_count = 2;
         assert!(!w.can_start());
+    }
+
+    #[test]
+    fn compaction_admission_reports_session_attempt_limit() {
+        let mut w = make_worker(CompactionQuota {
+            max_attempts_per_session: 2,
+            cooldown: Duration::from_millis(0),
+            ..CompactionQuota::default()
+        });
+        w.attempt_count = 2;
+
+        let decision = compaction_admission_decision(&w, CompactionAdmissionSignals::default());
+        assert!(!decision.is_allowed());
+        assert_eq!(
+            decision.reason,
+            CompactionAdmissionReason::SessionAttemptLimit
+        );
+    }
+
+    #[test]
+    fn compaction_admission_reports_cooldown() {
+        let mut w = make_worker(CompactionQuota {
+            cooldown: Duration::from_secs(3600),
+            ..CompactionQuota::default()
+        });
+        w.last_start = Some(Instant::now());
+        w.attempt_count = 1;
+
+        let decision = compaction_admission_decision(&w, CompactionAdmissionSignals::default());
+        assert!(!decision.is_allowed());
+        assert_eq!(decision.reason, CompactionAdmissionReason::Cooldown);
+        assert!(decision.cooldown_remaining_ms > 0);
+    }
+
+    #[test]
+    fn compaction_admission_reports_no_preparation_when_transcript_below_threshold() {
+        let w = default_worker();
+        let decision = w.admission_decision(None, &CompactionAdmissionSignals::default());
+        assert!(!decision.allowed);
+        assert_eq!(decision.reason, CompactionAdmissionReason::NoPreparation);
+        assert_eq!(decision.tokens_before, None);
+    }
+
+    #[test]
+    fn compaction_admission_allows_prepared_workload_without_degraded_signals() {
+        let w = default_worker();
+        let prep = compaction_admission_preparation(180_000);
+        let decision = w.admission_decision(Some(&prep), &CompactionAdmissionSignals::default());
+        assert!(decision.allowed);
+        assert_eq!(decision.reason, CompactionAdmissionReason::Allowed);
+        assert_eq!(decision.tokens_before, Some(180_000));
+    }
+
+    #[test]
+    fn compaction_admission_reports_memory_pressure() {
+        let w = default_worker();
+        let decision = compaction_admission_decision(
+            &w,
+            CompactionAdmissionSignals {
+                memory: Some(CompactionMemorySignal {
+                    available_bytes: Some(256 * 1024 * 1024),
+                    required_headroom_bytes: 512 * 1024 * 1024,
+                    pressure: false,
+                }),
+                ..CompactionAdmissionSignals::default()
+            },
+        );
+        assert!(!decision.allowed);
+        assert_eq!(decision.reason, CompactionAdmissionReason::MemoryPressure);
+    }
+
+    #[test]
+    fn compaction_admission_reports_provider_degraded_for_stale_or_slow_metrics() {
+        let w = default_worker();
+        let stale = compaction_admission_decision(
+            &w,
+            CompactionAdmissionSignals {
+                provider: Some(CompactionProviderSignal {
+                    p95_latency_ms: None,
+                    max_p95_latency_ms: Some(5_000),
+                    error_rate_per_mille: None,
+                    max_error_rate_per_mille: Some(50),
+                    stale: true,
+                    degraded: false,
+                }),
+                ..CompactionAdmissionSignals::default()
+            },
+        );
+        assert_eq!(stale.reason, CompactionAdmissionReason::ProviderDegraded);
+
+        let slow = compaction_admission_decision(
+            &w,
+            CompactionAdmissionSignals {
+                provider: Some(CompactionProviderSignal {
+                    p95_latency_ms: Some(8_000),
+                    max_p95_latency_ms: Some(5_000),
+                    error_rate_per_mille: Some(10),
+                    max_error_rate_per_mille: Some(50),
+                    stale: false,
+                    degraded: false,
+                }),
+                ..CompactionAdmissionSignals::default()
+            },
+        );
+        assert_eq!(slow.reason, CompactionAdmissionReason::ProviderDegraded);
+
+        let erroring = compaction_admission_decision(
+            &w,
+            CompactionAdmissionSignals {
+                provider: Some(CompactionProviderSignal {
+                    p95_latency_ms: Some(100),
+                    max_p95_latency_ms: Some(5_000),
+                    error_rate_per_mille: Some(75),
+                    max_error_rate_per_mille: Some(50),
+                    stale: false,
+                    degraded: false,
+                }),
+                ..CompactionAdmissionSignals::default()
+            },
+        );
+        assert_eq!(erroring.reason, CompactionAdmissionReason::ProviderDegraded);
+    }
+
+    #[test]
+    fn compaction_admission_reports_queue_saturated() {
+        let w = default_worker();
+        let decision = compaction_admission_decision(
+            &w,
+            CompactionAdmissionSignals {
+                queue: Some(CompactionQueueSignal {
+                    queued_requests: 4,
+                    max_queued_requests: 4,
+                    saturated: false,
+                }),
+                ..CompactionAdmissionSignals::default()
+            },
+        );
+        assert!(!decision.allowed);
+        assert_eq!(decision.reason, CompactionAdmissionReason::QueueSaturated);
+    }
+
+    #[test]
+    fn compaction_admission_priority_prefers_existing_work_and_quotas() {
+        run_async(|runtime_handle| async move {
+            let mut w = default_worker();
+            let pending = parked_pending_with_handle(runtime_handle, None).await;
+            inject_pending(&mut w, pending);
+
+            let decision = compaction_admission_decision(
+                &w,
+                CompactionAdmissionSignals {
+                    memory: Some(CompactionMemorySignal {
+                        available_bytes: Some(1),
+                        required_headroom_bytes: 2,
+                        pressure: true,
+                    }),
+                    provider: Some(CompactionProviderSignal {
+                        p95_latency_ms: Some(10_000),
+                        max_p95_latency_ms: Some(1),
+                        error_rate_per_mille: Some(1_000),
+                        max_error_rate_per_mille: Some(1),
+                        stale: true,
+                        degraded: true,
+                    }),
+                    queue: Some(CompactionQueueSignal {
+                        queued_requests: 10,
+                        max_queued_requests: 1,
+                        saturated: true,
+                    }),
+                },
+            );
+            assert_eq!(decision.reason, CompactionAdmissionReason::Pending);
+        });
+    }
+
+    #[test]
+    fn compaction_admission_multi_session_fixture_bounds_started_compactions() {
+        let mut decisions = Vec::new();
+        let mut queued_requests = 0_u32;
+        for _ in 0..5 {
+            let w = default_worker();
+            let decision = compaction_admission_decision(
+                &w,
+                CompactionAdmissionSignals {
+                    queue: Some(CompactionQueueSignal {
+                        queued_requests,
+                        max_queued_requests: 2,
+                        saturated: false,
+                    }),
+                    ..CompactionAdmissionSignals::default()
+                },
+            );
+            if decision.allowed {
+                queued_requests = queued_requests.saturating_add(1);
+            }
+            decisions.push(decision);
+        }
+
+        let evidence = compaction_admission_evidence(&decisions, 4, 7);
+        assert_eq!(evidence["schema"], COMPACTION_ADMISSION_SCHEMA_V1);
+        assert_eq!(evidence["admittedCount"], 2);
+        assert_eq!(evidence["rejectedCount"], 3);
+        assert_eq!(evidence["rejectedByReason"]["queue_saturated"], 3);
+        assert_eq!(evidence["foregroundImpact"]["p95Ms"], 4);
+        assert_eq!(evidence["foregroundImpact"]["p99Ms"], 7);
     }
 
     #[test]
