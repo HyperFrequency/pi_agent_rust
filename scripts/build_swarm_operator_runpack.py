@@ -195,6 +195,7 @@ AUTOPILOT_PLAN_ALLOWED_ACTIONS = (
     "adjust_swarm_budget",
     "claim_ready_bead",
     "run_docs_only_work",
+    "plan_new_bead",
 )
 AUTOPILOT_PLAN_SEVERITIES = ("critical", "high", "medium", "low", "info")
 AUTOPILOT_PLAN_CONFIDENCE = ("high", "medium", "low")
@@ -211,6 +212,7 @@ AUTOPILOT_E2E_REQUIRED_SCENARIOS = (
     "capacity_cpu16_mem64_healthy_admit",
     "capacity_cpu32_mem128_degraded_mail",
     "capacity_cpu64_mem256_rch_backoff",
+    "dirty_mail_rch_empty_beads_dry_run",
     "stale_in_progress_bead",
     "unrelated_dirty_worktree",
     "malformed_source_fail_closed",
@@ -5064,6 +5066,39 @@ def build_autopilot_plan(
                 rationale="Captured Beads evidence contains no ready, open, or in-progress work.",
             )
         )
+        actions.append(
+            autopilot_plan_action(
+                action="plan_new_bead",
+                title="Create a narrow Beads issue from current operator evidence",
+                severity="low",
+                confidence="medium",
+                preconditions=[
+                    "No ready, open, or in-progress Beads are present in the captured evidence.",
+                    "Use idea-wizard or a focused source audit to define one narrow task before coding.",
+                    "Do not wait for unavailable coordination surfaces when the queue is empty.",
+                ],
+                evidence_paths=[
+                    "normalized_inputs.beads_ready.ready_count",
+                    "normalized_inputs.beads.active_count",
+                    "normalized_inputs.beads.open_candidate_count",
+                    "command_provenance",
+                ],
+                commands=[
+                    plan_command("Run idea-wizard planning", "bv --recipe actionable --robot-plan"),
+                    plan_command("Create one follow-up bead", "br create --title \"<narrow task>\" --type task --priority 2"),
+                    plan_command("Sync Beads JSONL", "br sync --flush-only"),
+                ],
+                omitted_commands=[
+                    omitted_command("wait for ready work", "the captured ready/open/in-progress Beads sets are empty"),
+                    omitted_command("claim placeholder epic", "new work needs a leaf bead with concrete acceptance"),
+                ],
+                forbidden_actions=["invent broad work without a bead"],
+                rationale=(
+                    "Captured Beads evidence is empty after closeout; next progress is a "
+                    "new narrow bead or idea-wizard planning artifact, not idle waiting."
+                ),
+            )
+        )
 
     if not actions:
         actions.append(
@@ -6598,6 +6633,105 @@ def autopilot_e2e_cargo_payload(
     }
 
 
+def autopilot_e2e_remote_validation_cargo_payload(
+    generated_at: str,
+    *,
+    scenario_id: str,
+) -> dict[str, Any]:
+    payload = autopilot_e2e_cargo_payload(
+        queue_depth=0,
+        slots_total=8,
+        slots_available=7,
+        active_builds=1,
+        queued_builds=0,
+        reason="remote validation proof captured through RCH",
+    )
+    timestamp = generated_at.replace("+00:00", "Z")
+    payload["cargo_command"] = "check --all-targets"
+    payload["remote_validation_proof"] = {
+        "bead_id": scenario_id,
+        "runner": {
+            "requested_runner": "rch",
+            "resolved_runner": "rch_remote",
+            "runner_requirement": "rch_required",
+            "remote_execution": True,
+            "local_fallback": "none",
+            "rch_job_id": f"{scenario_id}-rch-job",
+            "worker_id": "autopilot-e2e-worker",
+            "worker_host": "ubuntu@autopilot-e2e-worker",
+            "queue_state": "admitted",
+            "worker_state": "completed",
+            "command_rewrite": {
+                "tmpdir_rewritten": True,
+                "target_dir_rewritten": True,
+            },
+            "status_excerpt": "Remote command finished: exit=0",
+        },
+        "timing": {
+            "started_at_utc": timestamp,
+            "ended_at_utc": timestamp,
+            "duration_ms": 0,
+            "heartbeat_at_utc": timestamp,
+            "stale_progress_detected": False,
+        },
+        "exit": {
+            "exit_code": 0,
+            "success": True,
+            "termination_reason": "completed",
+            "stderr_excerpt": "",
+            "stdout_excerpt": "Finished dev profile",
+        },
+        "paths": {
+            "remote_target_dir": "/data/projects/pi_agent_rust/.rch-target-autopilot-e2e",
+            "remote_tmpdir": "/data/projects/pi_agent_rust/.rch-tmp-autopilot-e2e",
+            "artifact_paths": ["target/debug/.fingerprint"],
+        },
+    }
+    return payload
+
+
+def autopilot_e2e_remote_artifact_sync_payload(generated_at: str) -> dict[str, Any]:
+    return {
+        "schema": RCH_ARTIFACT_SYNC_SCHEMA,
+        "generated_at": generated_at,
+        "status": "pass",
+        "required_paths": [{"path": "target/debug/.fingerprint", "included": True}],
+        "violations": [],
+        "exit_code": 0,
+        "elapsed_ms": 12,
+    }
+
+
+def autopilot_e2e_remote_validation_ledger(
+    *,
+    cargo_payload: dict[str, Any],
+    git_payload: dict[str, Any],
+    generated_at: str,
+    scenario_id: str,
+) -> dict[str, Any]:
+    return build_remote_validation_proof_ledger(
+        by_id={
+            "cargo_admission": SourcePayload(
+                "cargo_admission",
+                None,
+                "ok",
+                cargo_payload.get("schema"),
+                cargo_payload,
+            ),
+            "rch_artifact_sync": SourcePayload(
+                "rch_artifact_sync",
+                None,
+                "ok",
+                RCH_ARTIFACT_SYNC_SCHEMA,
+                autopilot_e2e_remote_artifact_sync_payload(generated_at),
+            ),
+        },
+        generated_at=parse_utc(generated_at),
+        git_state=git_payload,
+        bead_id=scenario_id,
+    )
+
+
 def autopilot_e2e_agent_mail_status(
     generated_at: str,
     *,
@@ -7350,6 +7484,112 @@ def build_autopilot_e2e_summary(
             )
         assert_autopilot_input_pack_contract(input_pack)
         assert_autopilot_plan_contract(plan)
+
+    dry_run_scenario_id = "dirty_mail_rch_empty_beads_dry_run"
+    dry_run_git_path, dry_run_git_commands = build_real_dirty_git_source(
+        workspace / dry_run_scenario_id,
+        scenario_id=dry_run_scenario_id,
+        generated_at=generated_at,
+        timeout_seconds=timeout_seconds,
+    )
+    dry_run_cargo = autopilot_e2e_remote_validation_cargo_payload(
+        generated_at,
+        scenario_id=dry_run_scenario_id,
+    )
+    dry_run_mail = autopilot_e2e_agent_mail_status(
+        generated_at,
+        status="error",
+        health_level="red",
+        issue=(
+            "sqlite schema missing required health_check tables: "
+            "projects, agents, messages, message_recipients"
+        ),
+        semantic_readiness_detail=(
+            "sqlite schema missing required health_check tables: "
+            "projects, agents, messages, message_recipients"
+        ),
+        recovery_mode="corrupt",
+    )
+    dry_run_remote_command = {
+        "id": "remote_validation_rch_check",
+        "command": "rch exec -- cargo check --all-targets",
+        "cwd": str(workspace),
+        "status": "ok",
+        "exit_code": 0,
+        "issue": None,
+        "stdout_path": None,
+        "stderr_snippet": "",
+        "redaction_summary": {"redacted_count": 0, "fields": []},
+    }
+    dry_run_mail_command = {
+        "id": "agent_mail_status",
+        "command": "am robot status --format json",
+        "cwd": str(workspace),
+        "status": "failed",
+        "exit_code": 2,
+        "issue": "database schema missing required tables",
+        "stdout_path": None,
+        "stderr_snippet": "database schema missing required tables",
+        "redaction_summary": {"redacted_count": 0, "fields": []},
+    }
+    dry_run_input, dry_run_plan, dry_run_result = run_plan_scenario(
+        dry_run_scenario_id,
+        beads_payload=empty_beads,
+        beads_ready_payload=empty_ready,
+        commands=dry_run_git_commands
+        + empty_commands
+        + [dry_run_mail_command, dry_run_remote_command],
+        expected_actions=[
+            "use_beads_soft_lock",
+            "capture_handoff",
+            "run_docs_only_work",
+            "plan_new_bead",
+        ],
+        cargo_payload=dry_run_cargo,
+        agent_mail_payload=dry_run_mail,
+        git_status_file=dry_run_git_path,
+    )
+    dry_run_git_payload = json.loads(dry_run_git_path.read_text(encoding="utf-8"))
+    dry_run_ledger = autopilot_e2e_remote_validation_ledger(
+        cargo_payload=dry_run_cargo,
+        git_payload=dry_run_git_payload,
+        generated_at=generated_at,
+        scenario_id=dry_run_scenario_id,
+    )
+    dry_run_entry = dry_run_ledger["entries"][0]
+    dry_run_actions = [action["action"] for action in dry_run_plan["actions"]]
+    dry_run_beads = dry_run_input["normalized_inputs"]["beads"]
+    dry_run_ready = dry_run_input["normalized_inputs"]["beads_ready"]
+    dry_run_result["agent_mail_status"] = dry_run_input["normalized_inputs"][
+        "agent_mail"
+    ]["status"]
+    dry_run_result["git_dirty_preserved"] = dry_run_input["normalized_inputs"][
+        "git_state"
+    ]["dirty"]
+    dry_run_result["beads_after_closeout"] = {
+        "active_count": dry_run_beads["active_count"],
+        "open_candidate_count": dry_run_beads["open_candidate_count"],
+        "ready_count": dry_run_ready["ready_count"],
+    }
+    dry_run_result["remote_validation_proof"] = {
+        "schema": dry_run_ledger["schema"],
+        "summary": dry_run_ledger["summary"],
+        "entry_status": dry_run_entry["evidence_classification"]["status"],
+        "clean_remote_proof": dry_run_entry["evidence_classification"][
+            "clean_remote_proof"
+        ],
+        "runner": dry_run_entry["runner"],
+    }
+    assert dry_run_input["normalized_inputs"]["git_state"]["dirty"] is True
+    assert dry_run_input["normalized_inputs"]["agent_mail"]["status"] == "degraded"
+    assert dry_run_beads["active_count"] == 0
+    assert dry_run_beads["open_candidate_count"] == 0
+    assert dry_run_ready["ready_count"] == 0
+    assert dry_run_ledger["summary"]["clean_remote_proof_entries"] == 1
+    assert dry_run_entry["runner"]["remote_execution"] is True
+    assert dry_run_entry["runner"]["local_fallback"] == "none"
+    assert "plan_new_bead" in dry_run_actions
+    assert "wait_for_rch" not in dry_run_actions
 
     stale_beads_payload = {
         "issues": [
@@ -10858,6 +11098,22 @@ def run_self_test() -> int:
         assert "wait_for_rch" in autopilot_e2e["scenarios"]["saturated_rch_queue"][
             "actions"
         ]
+        dirty_mail_rch_empty = autopilot_e2e["scenarios"][
+            "dirty_mail_rch_empty_beads_dry_run"
+        ]
+        assert dirty_mail_rch_empty["git_dirty_preserved"] is True
+        assert dirty_mail_rch_empty["agent_mail_status"] == "degraded"
+        assert dirty_mail_rch_empty["beads_after_closeout"] == {
+            "active_count": 0,
+            "open_candidate_count": 0,
+            "ready_count": 0,
+        }
+        assert dirty_mail_rch_empty["remote_validation_proof"]["summary"][
+            "clean_remote_proof_entries"
+        ] == 1
+        assert dirty_mail_rch_empty["remote_validation_proof"]["clean_remote_proof"] is True
+        assert "plan_new_bead" in dirty_mail_rch_empty["actions"]
+        assert "wait_for_rch" not in dirty_mail_rch_empty["actions"]
         assert autopilot_e2e["scenarios"]["stale_in_progress_bead"][
             "selected_action"
         ] == "reopen_stale_bead_candidate"

@@ -98,7 +98,8 @@
     "capture_handoff",
     "adjust_swarm_budget",
     "claim_ready_bead",
-    "run_docs_only_work"
+    "run_docs_only_work",
+    "plan_new_bead"
   ],
   "allowed_severities": [
     "critical",
