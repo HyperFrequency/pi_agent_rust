@@ -404,6 +404,7 @@ The no-mock autopilot E2E harness emits `pi.swarm.autopilot_e2e.v1` plus `pi.swa
 The final closeout gate emits `pi.swarm.autopilot_decision_gate.v1`, governed by `docs/contracts/swarm-autopilot-decision-gate-contract.json`. It compares the shipped input pack, planner, work partitions, failure-action catalog, budget drift watcher, E2E/logging evidence, runpack handoff, safety guards, pushed commits, and quality gates to the prompt-to-artifact checklist. A failed gate emits `follow_up_beads` and `decision=file_follow_up_beads_before_closing_epic`; a passing gate is still only closeout evidence over Beads, git, RCH, Doctor, Agent Mail, and source artifacts, not a new source of truth.
 The context-intelligence closeout gate emits `pi.context_intelligence.closeout_gate.v1`, governed by `docs/contracts/context-intelligence-closeout-gate-contract.json`. It maps each `bd-ircr3` child bead to code, tests, docs or evidence, commands, close reasons, and commit hashes; then it checks graph contracts, graph builder, freshness and claim gates, bundle planner, redaction and invalidation, preview surface, prompt injection, no-mock E2E, performance budgets, Doctor/runpack posture, operator docs, README freshness, pushed commits, staged UBS, and Beads ledger reconciliation. A passing context gate is closeout evidence only and does not replace Beads, git, RCH, Doctor, runpacks, or source files.
 The validation-broker closeout gate emits `pi.validation_broker.closeout_gate.v1`, governed by `docs/contracts/validation-broker-closeout-gate-contract.json`. It maps each `bd-gusp4` implementation child bead to code, tests, docs or evidence, commands, close reasons, and commit hashes; then it checks source-boundary contracts, lease storage, source normalization, admission policy, CLI lease flow, fault corpus, Doctor/runpack projection, no-mock E2E coverage, stress-budget evidence, operator docs, README freshness, pushed commits, staged UBS, and Beads ledger reconciliation. A passing validation-broker gate is closeout evidence only and does not replace Beads, git, RCH, Doctor, runpacks, Agent Mail, CI, UBS, `cargo_headroom.sh`, or source files.
+The progress-SLO closeout gate emits `pi.swarm.progress_slo.closeout_gate.v1`, governed by `docs/contracts/swarm-progress-slo-closeout-gate-contract.json`; the current artifact is `docs/evidence/swarm-progress-slo-closeout-gate.json`. It maps each `bd-wzri8` implementation child bead to code, tests, docs or evidence, commands, close reasons, and commit hashes; then it checks the progress-SLO contract, deterministic evaluator, read-only CLI, Doctor/runpack projection, no-mock E2E evidence, synthetic stress budgets, operator docs, README freshness, pushed commits, staged UBS, Beads ledger reconciliation, and source-boundary checks. A passing progress-SLO gate is closeout evidence only and does not replace Beads, git, RCH, Doctor, runpacks, Agent Mail, CI, UBS, claim-integrity gates, or source files.
 
 ### Validation Broker Operator Workflow
 
@@ -948,6 +949,36 @@ Validation-broker final closeout-gate evidence:
     "cli_surface",
     "fault_corpus_stale_recovery",
     "doctor_runpack",
+    "no_mock_e2e",
+    "stress_budgets",
+    "operator_docs_privacy",
+    "readme_freshness",
+    "source_boundaries",
+    "pushed_commits",
+    "quality_gates"
+  ],
+  "missing_checks": [],
+  "remaining_follow_ups": [],
+  "follow_up_required": false,
+  "follow_up_beads": [],
+  "decision": "close_final_gate_and_parent_epic",
+  "epic_can_close_after_this_commit": true
+}
+```
+
+Progress-SLO final closeout-gate evidence:
+
+```json
+{
+  "schema": "pi.swarm.progress_slo.closeout_gate.v1",
+  "purpose": "prompt_to_artifact_swarm_progress_slo_closeout_gate_not_source_of_truth",
+  "status": "pass",
+  "required_checks": [
+    "child_beads_closed",
+    "contract_and_source_inventory",
+    "deterministic_evaluator",
+    "cli_surface",
+    "doctor_runpack_projection",
     "no_mock_e2e",
     "stress_budgets",
     "operator_docs_privacy",

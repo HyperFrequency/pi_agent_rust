@@ -1869,12 +1869,13 @@ Current checked-in performance evidence state:
 - Regenerate the perf evidence bundle before adding release-facing speed,
   throughput, memory, or startup numbers to this README.
 
-Latest certification/evidence refresh (`2026-05-14` extension gate and full-suite reports; `2026-05-01` drop-in certification verdict):
+Latest certification/evidence refresh (`2026-05-15` progress SLO closeout; `2026-05-14` extension gate and full-suite reports; `2026-05-01` drop-in certification verdict):
 - Unified evidence bundle: `29/29` sections present, `0` missing, `0` invalid *(from tests/evidence_bundle/index.json)*
 - Full-suite gate: `20/20` gates passed, including `14/14` blocking gates *(from tests/full_suite_gate/full_suite_verdict.json)*
 - Drop-in certification: `20/20` certification gates passed, overall verdict `CERTIFIED` *(from docs/evidence/dropin-certification-verdict.json)*
 - Extension must-pass gate: `123/123` must-pass extensions passed; stretch set `99/101` passed with only non-blocking stretch failures *(from tests/ext_conformance/reports/gate/must_pass_gate_verdict.json)*
 - Context-intelligence closeout gate: `pass`, with child Beads mapped to code, tests, docs/evidence, validation commands, pushed commits, redaction posture, perf-budget evidence, README freshness, staged UBS, and Beads ledger reconciliation *(from docs/evidence/context-intelligence-closeout-gate.json)*
+- Progress SLO closeout gate: `pass`, with child Beads mapped to code, tests, docs/evidence, validation commands, pushed commits, source-boundary checks, stress-budget evidence, README freshness, staged UBS, and Beads ledger reconciliation *(from docs/evidence/swarm-progress-slo-closeout-gate.json)*
 
 ### Fast Loop vs Definitive Benchmarks
 
@@ -1968,6 +1969,14 @@ and final closeout evidence. The context-intelligence closeout gate emits
 `pi.context_intelligence.closeout_gate.v1` and is governed by
 `docs/contracts/context-intelligence-closeout-gate-contract.json`; the current
 closeout artifact is `docs/evidence/context-intelligence-closeout-gate.json`.
+
+The progress-SLO closeout gate emits `pi.swarm.progress_slo.closeout_gate.v1`.
+It audits the shipped contract/source inventory, deterministic evaluator,
+read-only CLI, Doctor/runpack projection, no-mock E2E evidence, large-host
+stress budgets, operator docs, pushed child commits, source-boundary checks,
+staged UBS, and Beads ledger reconciliation. It is governed by
+`docs/contracts/swarm-progress-slo-closeout-gate-contract.json`; the current
+closeout artifact is `docs/evidence/swarm-progress-slo-closeout-gate.json`.
 
 For the full launch, throttling, recovery, and handoff workflow for large
 multi-agent runs, see [docs/swarm-operations-runbook.md](docs/swarm-operations-runbook.md).
@@ -2554,7 +2563,7 @@ broader inventory.
 | Providers | [provider guide](docs/providers.md), [auth troubleshooting](docs/provider-auth-troubleshooting.md), [config examples](docs/provider-config-examples.md), [canonical ID policy](docs/provider-canonical-id-policy.md), [onboarding playbook](docs/provider-onboarding-playbook.md), [test obligations](docs/provider-test-obligations.md), [upstream catalog snapshot](docs/provider-upstream-catalog-snapshot.md), [support baseline audit](docs/provider-support-baseline-audit.md) |
 | QA and evidence | [QA runbook](docs/qa-runbook.md), [testing policy](docs/testing-policy.md), [conformance playbook](docs/conformance-operator-playbook.md), [coverage matrix](docs/TEST_COVERAGE_MATRIX.md), [evidence schema](docs/evidence-contract-schema.json), [coverage baseline map](docs/coverage-baseline-map.json), [E2E scenario matrix](docs/e2e_scenario_matrix.json), [non-mock rubric](docs/non-mock-rubric.json) |
 | Security | [baseline audit](docs/security/baseline-audit.md), [threat model](docs/security/threat-model.md), [security invariants](docs/security/invariants.md), [operator handbook](docs/security/operator-handbook.md), [operator quick reference](docs/security/operator-quick-reference.md), [incident response](docs/security/incident-response-runbook.md), [runtime hostcall telemetry](docs/security/runtime-hostcall-telemetry.md), [security SLOs](docs/security/security-slos.md) |
-| Schemas and machine contracts | [extension manifest schema](docs/schema/extension_manifest.json), [extension protocol schema](docs/schema/extension_protocol.json), [session store v2 contract](docs/schema/session_store_v2_contract.json), [semantic workspace graph contract](docs/contracts/semantic-workspace-graph-contract.json), [semantic context graph contract](docs/contracts/semantic-context-graph-contract.json), [swarm replay trace contract](docs/contracts/swarm-replay-trace-contract.json), [swarm replay preview schema](docs/schema/swarm_replay_preview.json), [remote validation proof ledger contract](docs/contracts/remote-validation-proof-ledger-contract.json), [validation broker contract](docs/contracts/validation-broker-contract.json), [validation broker closeout gate contract](docs/contracts/validation-broker-closeout-gate-contract.json), [validation broker closeout gate evidence](docs/evidence/validation-broker-closeout-gate.json), [context-intelligence closeout gate contract](docs/contracts/context-intelligence-closeout-gate-contract.json), [context-intelligence closeout gate evidence](docs/evidence/context-intelligence-closeout-gate.json), [test evidence logging contract](docs/schema/test_evidence_logging_contract.json), [runtime hostcall telemetry schema](docs/schema/runtime_hostcall_telemetry.json), [mock spec schema](docs/schema/mock_spec.json), [CLI surface diff schema](docs/schema/cli-surface-diff.json), [security traceability matrix](docs/sec_traceability_matrix.md) |
+| Schemas and machine contracts | [extension manifest schema](docs/schema/extension_manifest.json), [extension protocol schema](docs/schema/extension_protocol.json), [session store v2 contract](docs/schema/session_store_v2_contract.json), [semantic workspace graph contract](docs/contracts/semantic-workspace-graph-contract.json), [semantic context graph contract](docs/contracts/semantic-context-graph-contract.json), [swarm replay trace contract](docs/contracts/swarm-replay-trace-contract.json), [swarm replay preview schema](docs/schema/swarm_replay_preview.json), [remote validation proof ledger contract](docs/contracts/remote-validation-proof-ledger-contract.json), [validation broker contract](docs/contracts/validation-broker-contract.json), [validation broker closeout gate contract](docs/contracts/validation-broker-closeout-gate-contract.json), [validation broker closeout gate evidence](docs/evidence/validation-broker-closeout-gate.json), [context-intelligence closeout gate contract](docs/contracts/context-intelligence-closeout-gate-contract.json), [context-intelligence closeout gate evidence](docs/evidence/context-intelligence-closeout-gate.json), [progress SLO closeout gate contract](docs/contracts/swarm-progress-slo-closeout-gate-contract.json), [progress SLO closeout gate evidence](docs/evidence/swarm-progress-slo-closeout-gate.json), [test evidence logging contract](docs/schema/test_evidence_logging_contract.json), [runtime hostcall telemetry schema](docs/schema/runtime_hostcall_telemetry.json), [mock spec schema](docs/schema/mock_spec.json), [CLI surface diff schema](docs/schema/cli-surface-diff.json), [security traceability matrix](docs/sec_traceability_matrix.md) |
 
 ---
 
