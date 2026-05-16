@@ -43,6 +43,10 @@ not include prompts, tool arguments, provider payloads, transcript text, or
 credentials. Runtime summaries use the `pi.operator_tail_latency.v1` schema and
 include p95, p99, and p999 windows for provider streaming, local tools,
 extension hostcalls, session append/index work, and TUI render phases.
+Frame-budget snapshots use the `pi.tui.frame_budget.v1` schema for large
+conversation, tool preview, model selector, branch picker, and tree selector
+surfaces. The deterministic regression evidence for those snapshots is recorded
+in `docs/evidence/large-session-tui-frame-budget.json`.
 
 This telemetry is an operator handoff aid, not release performance evidence.
 Release-facing speed claims still require the measured artifacts and freshness

@@ -126,6 +126,19 @@ impl FrameTimingStats {
         Self::percentiles(&self.frame_times_us.borrow()).2
     }
 
+    pub(super) const fn enable_for_test(&mut self) {
+        self.enabled = true;
+    }
+
+    pub(super) fn reset_for_test(&mut self) {
+        self.frame_times_us.borrow_mut().clear();
+        self.content_build_times_us.borrow_mut().clear();
+        self.viewport_sync_times_us.borrow_mut().clear();
+        self.update_times_us.clear();
+        self.total_frames.set(0);
+        self.budget_exceeded_count.set(0);
+    }
+
     pub(super) fn percentiles(times: &VecDeque<u64>) -> (u64, u64, u64, u64) {
         if times.is_empty() {
             return (0, 0, 0, 0);
@@ -138,6 +151,69 @@ impl FrameTimingStats {
         let p99 = sorted[(len * 99 / 100).min(len - 1)];
         let p999 = sorted[(len * 999 / 1000).min(len - 1)];
         (p50, p95, p99, p999)
+    }
+
+    pub(super) fn snapshot_json(&self, surface: &str, fixture: &Value) -> Value {
+        let frame_times = self.frame_times_us.borrow();
+        let content_times = self.content_build_times_us.borrow();
+        let viewport_times = self.viewport_sync_times_us.borrow();
+        let update_times = &self.update_times_us;
+        let recent_over_budget =
+            Self::over_budget_count(frame_times.as_slices().0, FRAME_BUDGET_US)
+                + Self::over_budget_count(frame_times.as_slices().1, FRAME_BUDGET_US);
+        let verdict = if frame_times.is_empty() {
+            "empty"
+        } else if recent_over_budget == 0 {
+            "pass"
+        } else {
+            "warn"
+        };
+
+        json!({
+            "schema": "pi.tui.frame_budget.v1",
+            "surface": surface,
+            "enabled": self.enabled,
+            "budget_us": FRAME_BUDGET_US,
+            "window_capacity": FRAME_TIMING_WINDOW,
+            "fixture": fixture,
+            "samples": {
+                "frame": Self::sample_stats_json(&frame_times, FRAME_BUDGET_US),
+                "content_build": Self::sample_stats_json(&content_times, FRAME_BUDGET_US),
+                "viewport_sync": Self::sample_stats_json(&viewport_times, FRAME_BUDGET_US),
+                "update": Self::sample_stats_json(update_times, FRAME_BUDGET_US),
+            },
+            "totals": {
+                "frames": self.total_frames.get(),
+                "budget_exceeded": self.budget_exceeded_count.get(),
+                "recent_budget_exceeded": recent_over_budget,
+            },
+            "verdict": verdict,
+            "redaction": {
+                "prompt_content": "omitted",
+                "tool_payload_content": "omitted",
+                "model_response_content": "omitted",
+            },
+        })
+    }
+
+    fn over_budget_count(times: &[u64], budget_us: u64) -> usize {
+        times.iter().filter(|&&value| value > budget_us).count()
+    }
+
+    fn sample_stats_json(times: &VecDeque<u64>, budget_us: u64) -> Value {
+        let (p50, p95, p99, p999) = Self::percentiles(times);
+        let max = times.iter().copied().max().unwrap_or(0);
+        let over_budget = Self::over_budget_count(times.as_slices().0, budget_us)
+            + Self::over_budget_count(times.as_slices().1, budget_us);
+        json!({
+            "count": times.len(),
+            "p50_us": p50,
+            "p95_us": p95,
+            "p99_us": p99,
+            "p999_us": p999,
+            "max_us": max,
+            "over_budget_count": over_budget,
+        })
     }
 
     #[allow(clippy::cast_precision_loss)]
@@ -154,7 +230,14 @@ impl FrameTimingStats {
             .iter()
             .filter(|&&t| t > FRAME_BUDGET_US)
             .count();
+        let fixture = json!({
+            "name": "rolling_frame_window",
+            "source": "PI_PERF_TELEMETRY",
+            "sample_window": FRAME_TIMING_WINDOW,
+        });
+        let snapshot = self.snapshot_json("interactive_tui", &fixture);
         tracing::debug!(
+            telemetry = %snapshot,
             "[perf] frame p50={:.1}ms p95={:.1}ms p99={:.1}ms p999={:.1}ms | \
              content p50={:.1}ms p95={:.1}ms p99={:.1}ms p999={:.1}ms | \
              viewport p50={:.1}ms p95={:.1}ms p99={:.1}ms p999={:.1}ms | \
@@ -1165,6 +1248,39 @@ mod tests {
         assert!(summary.contains("update()"));
         assert!(summary.contains("p999"));
         assert!(summary.contains("Budget exceeded"));
+    }
+
+    #[test]
+    fn frame_timing_snapshot_is_structured_and_redaction_safe() {
+        let mut stats = make_stats(false);
+        stats.enable_for_test();
+        stats.record_frame(8_000);
+        stats.record_frame(FRAME_BUDGET_US + 25);
+        stats.record_content_build(3_000);
+        stats.record_viewport_sync(1_000);
+        stats.record_update(750);
+
+        let fixture = json!({
+            "message_count": 600,
+            "tool_preview_count": 12,
+            "model_count": 80,
+            "branch_count": 64,
+        });
+        let snapshot = stats.snapshot_json("large_conversation", &fixture);
+
+        assert_eq!(snapshot["schema"], "pi.tui.frame_budget.v1");
+        assert_eq!(snapshot["surface"], "large_conversation");
+        assert_eq!(snapshot["enabled"], true);
+        assert_eq!(snapshot["samples"]["frame"]["count"], 2);
+        assert_eq!(snapshot["samples"]["frame"]["over_budget_count"], 1);
+        assert_eq!(snapshot["verdict"], "warn");
+        assert_eq!(snapshot["redaction"]["prompt_content"], "omitted");
+        assert_eq!(snapshot["redaction"]["tool_payload_content"], "omitted");
+        let serialized = snapshot.to_string();
+        assert!(
+            !serialized.contains("payload content"),
+            "snapshot must not include prompt or tool payload text"
+        );
     }
 
     #[test]

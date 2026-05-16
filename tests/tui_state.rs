@@ -562,6 +562,14 @@ fn normalize_view(input: &str) -> String {
         .join("\n")
 }
 
+fn assert_view_fits(surface: &str, raw_view: &str, term_height: usize) {
+    let line_count = raw_view.lines().count();
+    assert!(
+        line_count <= term_height,
+        "{surface} view should fit within {term_height} terminal rows, got {line_count}"
+    );
+}
+
 fn assert_all_newlines_are_crlf(input: &str) {
     let bytes = input.as_bytes();
     for idx in 0..bytes.len() {
@@ -8499,6 +8507,384 @@ fn tui_perf_buffer_survives_cache_invalidation() {
 // PERF-TEST-E2E: End-to-end performance test scripts (bd-2oz69)
 // ============================================================================
 
+#[derive(Default)]
+struct SurfaceProbe {
+    view_samples_us: Vec<u64>,
+    update_samples_us: Vec<u64>,
+    max_rendered_lines: usize,
+    max_line_width: usize,
+}
+
+impl SurfaceProbe {
+    #[allow(clippy::cast_possible_truncation)]
+    fn sample_view(&mut self, app: &PiApp) -> String {
+        let start = Instant::now();
+        let view = BubbleteaModel::view(app);
+        self.view_samples_us
+            .push(start.elapsed().as_micros() as u64);
+        let normalized = normalize_view(&view);
+        self.max_rendered_lines = self.max_rendered_lines.max(normalized.lines().count());
+        self.max_line_width = self.max_line_width.max(max_line_width(&normalized));
+        normalized
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    fn sample_update<F>(&mut self, app: &mut PiApp, update: F)
+    where
+        F: FnOnce(&mut PiApp),
+    {
+        let start = Instant::now();
+        update(app);
+        self.update_samples_us
+            .push(start.elapsed().as_micros() as u64);
+    }
+
+    fn evidence_json(&self, surface: &str, fixture: &serde_json::Value) -> serde_json::Value {
+        let view_p95_us = percentile_us(&self.view_samples_us, 95);
+        let view_p99_us = percentile_us(&self.view_samples_us, 99);
+        let update_p95_us = percentile_us(&self.update_samples_us, 95);
+        let update_p99_us = percentile_us(&self.update_samples_us, 99);
+        json!({
+            "surface": surface,
+            "fixture": fixture,
+            "samples": {
+                "view": self.view_samples_us.len(),
+                "update": self.update_samples_us.len(),
+            },
+            "timing_us": {
+                "view_p95": view_p95_us,
+                "view_p99": view_p99_us,
+                "update_p95": update_p95_us,
+                "update_p99": update_p99_us,
+                "view_over_frame_budget": self.view_samples_us
+                    .iter()
+                    .filter(|sample| **sample > 16_667)
+                    .count(),
+                "update_over_frame_budget": self.update_samples_us
+                    .iter()
+                    .filter(|sample| **sample > 16_667)
+                    .count(),
+            },
+            "render_bounds": {
+                "max_rendered_lines": self.max_rendered_lines,
+                "max_line_width": self.max_line_width,
+            },
+        })
+    }
+}
+
+fn max_line_width(view: &str) -> usize {
+    view.lines()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0)
+}
+
+fn percentile_us(samples: &[u64], percentile: usize) -> u64 {
+    if samples.is_empty() {
+        return 0;
+    }
+    let mut sorted = samples.to_vec();
+    sorted.sort_unstable();
+    let idx = (sorted.len() * percentile / 100).min(sorted.len() - 1);
+    sorted[idx]
+}
+
+fn assert_view_bounded(surface: &str, view: &str, terminal_height: usize) {
+    assert!(!view.is_empty(), "{surface} rendered an empty view");
+    let line_count = view.lines().count();
+    assert!(
+        line_count <= terminal_height,
+        "{surface} rendered {line_count} lines, expected at most {terminal_height}"
+    );
+}
+
+fn write_large_session_perf_json_artifact(value: &serde_json::Value) {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/artifacts/perf");
+    let _ = fs::create_dir_all(&dir);
+    let path = dir.join("large_session_tui_frame_budget.json");
+    let content = serde_json::to_string_pretty(value).expect("serialize perf artifact");
+    fs::write(&path, format!("{content}\n")).expect("write perf json artifact");
+}
+
+#[test]
+#[allow(clippy::cast_possible_truncation, clippy::too_many_lines)]
+fn tui_perf_large_session_frame_budget_surfaces_emit_evidence() {
+    let harness = TestHarness::new("tui_perf_large_session_frame_budget_surfaces_emit_evidence");
+    let terminal_width = 120usize;
+    let terminal_height = 42usize;
+
+    let mut app = build_app(&harness, Vec::new());
+    log_initial_state(&harness, &app);
+    app.set_terminal_size(terminal_width, terminal_height);
+
+    let mut messages: Vec<ConversationMessage> = (0..720)
+        .map(|i| ConversationMessage {
+            role: match i % 3 {
+                0 => MessageRole::User,
+                1 => MessageRole::Assistant,
+                _ => MessageRole::System,
+            },
+            content: format!("large-session-message-{i:04}: bounded viewport fixture"),
+            thinking: None,
+            collapsed: false,
+        })
+        .collect();
+    let huge_tool_output = format!(
+        "Tool result (bash): huge deterministic output\n{}",
+        (0..160)
+            .map(|line| format!("huge-tool-line-{line:03}: payload redacted from evidence"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    messages.push(ConversationMessage {
+        role: MessageRole::Tool,
+        content: huge_tool_output,
+        thinking: None,
+        collapsed: true,
+    });
+
+    apply_pi(
+        &harness,
+        &mut app,
+        "ConversationReset(720 msgs + huge tool preview)",
+        PiMsg::ConversationReset {
+            messages,
+            usage: Usage::default(),
+            status: None,
+        },
+    );
+
+    let mut conversation_probe = SurfaceProbe::default();
+    let _ = conversation_probe.sample_view(&app);
+    let mut conversation_view = String::new();
+    for _ in 0..24 {
+        conversation_view = conversation_probe.sample_view(&app);
+    }
+    for _ in 0..8 {
+        conversation_probe.sample_update(&mut app, |app| {
+            let _ = BubbleteaModel::update(app, Message::new(KeyMsg::from_type(KeyType::PgUp)));
+        });
+    }
+    for _ in 0..8 {
+        conversation_probe.sample_update(&mut app, |app| {
+            let _ = BubbleteaModel::update(app, Message::new(KeyMsg::from_type(KeyType::PgDown)));
+        });
+    }
+    assert_view_bounded(
+        "large conversation viewport",
+        &conversation_view,
+        terminal_height,
+    );
+    assert!(
+        conversation_view.contains("Tool result (bash): huge deterministic output"),
+        "tail viewport should include the collapsed tool header"
+    );
+    assert!(
+        conversation_view.contains("huge-tool-line-000"),
+        "collapsed tool preview should include the first preview line"
+    );
+    assert!(
+        !conversation_view.contains("huge-tool-line-090"),
+        "collapsed tool preview should not render the full large payload"
+    );
+
+    let huge_models = (0..240)
+        .map(|i| {
+            let provider = match i % 4 {
+                0 => "anthropic",
+                1 => "openai",
+                2 => "google",
+                _ => "xai",
+            };
+            make_model_entry(
+                provider,
+                &format!("model-{i:03}"),
+                "https://example.invalid",
+            )
+        })
+        .collect::<Vec<_>>();
+    let current_model = huge_models[0].clone();
+    let mut model_app = build_app_with_models(
+        &harness,
+        Session::in_memory(),
+        Config::default(),
+        current_model,
+        Vec::new(),
+        huge_models,
+        KeyBindings::new(),
+    );
+    model_app.set_terminal_size(terminal_width, terminal_height);
+    let mut model_probe = SurfaceProbe::default();
+    model_probe.sample_update(&mut model_app, |app| {
+        let _ = BubbleteaModel::update(app, Message::new(KeyMsg::from_type(KeyType::CtrlL)));
+    });
+    let mut model_view = model_probe.sample_view(&model_app);
+    for _ in 0..5 {
+        model_probe.sample_update(&mut model_app, |app| {
+            let _ = BubbleteaModel::update(app, Message::new(KeyMsg::from_type(KeyType::Down)));
+        });
+    }
+    for _ in 0..3 {
+        model_probe.sample_update(&mut model_app, |app| {
+            let _ = BubbleteaModel::update(app, Message::new(KeyMsg::from_type(KeyType::PgDown)));
+        });
+    }
+    model_probe.sample_update(&mut model_app, |app| {
+        let _ = BubbleteaModel::update(
+            app,
+            Message::new(KeyMsg::from_runes("~~~~".chars().collect())),
+        );
+    });
+    for _ in 0..12 {
+        model_view = model_probe.sample_view(&model_app);
+    }
+    assert_view_bounded("large model selector", &model_view, terminal_height);
+    assert!(
+        model_view.contains("Select a model"),
+        "large model selector should stay open"
+    );
+    assert!(
+        model_view.contains("No matching models."),
+        "large model selector should render empty filtered state"
+    );
+
+    let mut empty_model_app = build_app_with_models(
+        &harness,
+        Session::in_memory(),
+        Config::default(),
+        dummy_model_entry(),
+        Vec::new(),
+        Vec::new(),
+        KeyBindings::new(),
+    );
+    empty_model_app.set_terminal_size(terminal_width, terminal_height);
+    let mut empty_model_probe = SurfaceProbe::default();
+    empty_model_probe.sample_update(&mut empty_model_app, |app| {
+        let _ = BubbleteaModel::update(app, Message::new(KeyMsg::from_type(KeyType::CtrlL)));
+    });
+    let empty_model_view = empty_model_probe.sample_view(&empty_model_app);
+    assert_view_bounded("empty model selector", &empty_model_view, terminal_height);
+    assert!(
+        empty_model_view.contains("No models available"),
+        "empty model selector path should surface a status instead of panicking"
+    );
+
+    let mut tree_session = Session::in_memory();
+    for i in 0..120 {
+        tree_session.append_message(SessionMessage::User {
+            content: UserContent::Text(format!("tree-user-message-{i:03}")),
+            timestamp: Some(i),
+        });
+    }
+    let mut tree_app = build_app_with_session(&harness, Vec::new(), tree_session);
+    tree_app.set_terminal_size(terminal_width, terminal_height);
+    let mut tree_probe = SurfaceProbe::default();
+    tree_probe.sample_update(&mut tree_app, |app| {
+        let _ = BubbleteaModel::update(
+            app,
+            Message::new(KeyMsg::from_runes("/tree".chars().collect())),
+        );
+    });
+    tree_probe.sample_update(&mut tree_app, |app| {
+        let _ = BubbleteaModel::update(app, Message::new(KeyMsg::from_type(KeyType::Enter)));
+    });
+    let mut tree_view = tree_probe.sample_view(&tree_app);
+    for _ in 0..6 {
+        tree_probe.sample_update(&mut tree_app, |app| {
+            let _ = BubbleteaModel::update(app, Message::new(KeyMsg::from_type(KeyType::Up)));
+        });
+    }
+    for _ in 0..3 {
+        tree_probe.sample_update(&mut tree_app, |app| {
+            let _ = BubbleteaModel::update(app, Message::new(KeyMsg::from_type(KeyType::PgDown)));
+        });
+    }
+    for _ in 0..12 {
+        tree_view = tree_probe.sample_view(&tree_app);
+    }
+    assert_view_bounded("tree navigation", &tree_view, terminal_height);
+    assert!(
+        tree_view.contains("Session Tree"),
+        "tree navigation should render the selector"
+    );
+
+    let evidence = json!({
+        "schema": "pi.test.large_session_tui_frame_budget.v1",
+        "test": "tui_perf_large_session_frame_budget_surfaces_emit_evidence",
+        "frame_budget_us": 16_667,
+        "redaction": {
+            "payloads_included": false,
+            "fields": [
+                "sample_counts",
+                "timing_percentiles",
+                "fixture_dimensions",
+                "render_bounds"
+            ]
+        },
+        "surfaces": [
+            conversation_probe.evidence_json(
+                "conversation_viewport_and_tool_preview",
+                &json!({
+                    "messages": 721,
+                    "tool_output_lines": 161,
+                    "collapsed_tool_preview_lines": 5,
+                    "terminal_width": terminal_width,
+                    "terminal_height": terminal_height,
+                }),
+            ),
+            model_probe.evidence_json(
+                "model_selector_large_filtered_empty",
+                &json!({
+                    "available_models": 240,
+                    "filtered_query": "~~~~",
+                    "terminal_width": terminal_width,
+                    "terminal_height": terminal_height,
+                }),
+            ),
+            empty_model_probe.evidence_json(
+                "model_selector_empty_inventory",
+                &json!({
+                    "available_models": 0,
+                    "terminal_width": terminal_width,
+                    "terminal_height": terminal_height,
+                }),
+            ),
+            tree_probe.evidence_json(
+                "tree_session_navigation",
+                &json!({
+                    "session_entries": 120,
+                    "terminal_width": terminal_width,
+                    "terminal_height": terminal_height,
+                }),
+            ),
+        ],
+    });
+
+    for surface in evidence["surfaces"].as_array().expect("surfaces array") {
+        let name = surface["surface"].as_str().expect("surface name");
+        let view_p99_us = surface["timing_us"]["view_p99"].as_u64().expect("view p99");
+        let update_p99_us = surface["timing_us"]["update_p99"]
+            .as_u64()
+            .expect("update p99");
+        assert!(
+            view_p99_us < 250_000,
+            "{name} view p99 should stay under 250ms, got {view_p99_us}us"
+        );
+        assert!(
+            update_p99_us < 100_000,
+            "{name} update p99 should stay under 100ms, got {update_p99_us}us"
+        );
+    }
+
+    write_large_session_perf_json_artifact(&evidence);
+    log_perf_test_event(
+        "tui_perf_large_session_frame_budget_surfaces_emit_evidence",
+        "large_session_tui_frame_budget",
+        evidence,
+    );
+}
+
 /// Script 1: Long Conversation Responsiveness
 ///
 /// Creates a 500-message synthetic conversation and measures frame render
@@ -8612,6 +8998,231 @@ fn tui_perf_e2e_long_conversation_responsiveness() {
             "warm_content_p50_us": content_p50_us,
             "warm_frame_p95_us": p95_us,
             "frame_count": frame_count,
+        }),
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines, clippy::cast_possible_truncation)]
+fn tui_frame_budget_snapshot_covers_large_session_surfaces() {
+    let harness = TestHarness::new("tui_frame_budget_snapshot_covers_large_session_surfaces");
+    let available_models: Vec<ModelEntry> = (0..80)
+        .map(|idx| {
+            make_model_entry(
+                "openai",
+                &format!("perf-model-{idx:03}"),
+                "https://example.invalid",
+            )
+        })
+        .collect();
+    let current_model = available_models
+        .first()
+        .expect("at least one model")
+        .clone();
+    let mut app = build_app_with_models(
+        &harness,
+        Session::in_memory(),
+        Config::default(),
+        current_model,
+        Vec::new(),
+        available_models,
+        KeyBindings::new(),
+    );
+    app.set_terminal_size(120, 40);
+    app.enable_frame_timing_for_test();
+
+    let messages: Vec<ConversationMessage> = (0..600)
+        .map(|idx| {
+            let role = match idx % 4 {
+                0 => MessageRole::User,
+                1 => MessageRole::Assistant,
+                2 => MessageRole::Tool,
+                _ => MessageRole::System,
+            };
+            let content = if role == MessageRole::Tool {
+                format!(
+                    "Tool result (grep): synthetic-{idx}.rs\n{}",
+                    (0..28)
+                        .map(|line| format!(
+                            "line {line}: SECRET_FRAME_PAYLOAD_{idx} fixture output"
+                        ))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                )
+            } else {
+                format!("large-session-message-{idx:03}: viewport regression fixture")
+            };
+            ConversationMessage {
+                role,
+                content,
+                thinking: None,
+                collapsed: role == MessageRole::Tool,
+            }
+        })
+        .collect();
+
+    apply_pi(
+        &harness,
+        &mut app,
+        "ConversationReset(600 mixed messages)",
+        PiMsg::ConversationReset {
+            messages,
+            usage: Usage::default(),
+            status: None,
+        },
+    );
+    app.reset_frame_timing_for_test();
+    let large_view = BubbleteaModel::view(&app);
+    assert_view_fits("large_conversation", &large_view, 40);
+    let large_view_normalized = normalize_view(&large_view);
+    assert!(
+        large_view_normalized.contains("large-session-message-599"),
+        "tail-following large conversation view should keep the newest message visible"
+    );
+    let large_snapshot = app.frame_budget_snapshot_for_test(
+        "large_conversation",
+        &json!({
+            "message_count": 600,
+            "terminal": {"width": 120, "height": 40},
+            "tool_preview_count": 150,
+        }),
+    );
+
+    app.reset_frame_timing_for_test();
+    let tool_messages: Vec<ConversationMessage> = (0..12)
+        .map(|idx| ConversationMessage {
+            role: MessageRole::Tool,
+            content: format!(
+                "Tool result (read): huge-{idx}.log\n{}",
+                (0..35)
+                    .map(|line| format!("line {line}: collapsed preview fixture {idx}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ),
+            thinking: None,
+            collapsed: true,
+        })
+        .collect();
+    apply_pi(
+        &harness,
+        &mut app,
+        "ConversationReset(large tool previews)",
+        PiMsg::ConversationReset {
+            messages: tool_messages,
+            usage: Usage::default(),
+            status: None,
+        },
+    );
+    let tool_view = BubbleteaModel::view(&app);
+    assert_view_fits("tool_preview", &tool_view, 40);
+    let tool_view_normalized = normalize_view(&tool_view);
+    assert!(
+        tool_view_normalized.contains("collapsed"),
+        "large tool-output previews should render collapsed state"
+    );
+    let tool_snapshot = app.frame_budget_snapshot_for_test(
+        "tool_preview",
+        &json!({
+            "tool_messages": 12,
+            "lines_per_tool": 36,
+            "terminal": {"width": 120, "height": 40},
+        }),
+    );
+
+    app.reset_frame_timing_for_test();
+    app.open_model_selector();
+    for _ in 0..95 {
+        app.handle_model_selector_key(&KeyMsg::from_type(KeyType::Down));
+    }
+    let model_view = BubbleteaModel::view(&app);
+    assert_view_fits("model_selector", &model_view, 40);
+    assert!(
+        normalize_view(&model_view).contains("Select a model"),
+        "large model selector overlay should remain visible"
+    );
+    let model_snapshot = app.frame_budget_snapshot_for_test(
+        "model_selector",
+        &json!({
+            "model_count": 80,
+            "navigation_events": 95,
+            "terminal": {"width": 120, "height": 40},
+        }),
+    );
+
+    let branch_session = create_many_branch_session(64);
+    let (mut branch_app, _rx) =
+        build_app_with_session_and_events(&harness, Vec::new(), branch_session);
+    branch_app.set_terminal_size(120, 40);
+    branch_app.enable_frame_timing_for_test();
+
+    branch_app.open_branch_picker();
+    for _ in 0..96 {
+        branch_app.handle_branch_picker_key(&KeyMsg::from_type(KeyType::Down));
+    }
+    let branch_view = BubbleteaModel::view(&branch_app);
+    assert_view_fits("branch_picker", &branch_view, 40);
+    assert!(
+        normalize_view(&branch_view).contains("Select a branch"),
+        "large branch picker should remain visible"
+    );
+    let branch_snapshot = branch_app.frame_budget_snapshot_for_test(
+        "branch_picker",
+        &json!({
+            "branch_count": 64,
+            "navigation_events": 96,
+            "terminal": {"width": 120, "height": 40},
+        }),
+    );
+
+    branch_app.handle_branch_picker_key(&KeyMsg::from_type(KeyType::Esc));
+    branch_app.reset_frame_timing_for_test();
+    type_text(&harness, &mut branch_app, "/tree");
+    let tree_step = press_enter(&harness, &mut branch_app);
+    assert_after_contains(&harness, &tree_step, "Session Tree");
+    let tree_view = BubbleteaModel::view(&branch_app);
+    assert_view_fits("tree_selector", &tree_view, 40);
+    let tree_snapshot = branch_app.frame_budget_snapshot_for_test(
+        "tree_selector",
+        &json!({
+            "branch_count": 64,
+            "entry_count_lower_bound": 129,
+            "terminal": {"width": 120, "height": 40},
+        }),
+    );
+
+    let snapshots = vec![
+        large_snapshot,
+        tool_snapshot,
+        model_snapshot,
+        branch_snapshot,
+        tree_snapshot,
+    ];
+    for snapshot in &snapshots {
+        assert_eq!(snapshot["schema"], "pi.tui.frame_budget.v1");
+        assert_eq!(snapshot["budget_us"], 16_667);
+        assert!(
+            snapshot["samples"]["frame"]["count"].as_u64().unwrap_or(0) > 0,
+            "each surface should record at least one frame sample: {snapshot}"
+        );
+        assert_eq!(snapshot["redaction"]["prompt_content"], "omitted");
+        assert_eq!(snapshot["redaction"]["tool_payload_content"], "omitted");
+    }
+    let serialized = serde_json::to_string(&snapshots).expect("serialize frame-budget snapshots");
+    assert!(
+        !serialized.contains("SECRET_FRAME_PAYLOAD"),
+        "frame-budget telemetry must not include raw conversation or tool payload text"
+    );
+
+    write_perf_artifact("large_session_tui_frame_budget.jsonl", &snapshots);
+    log_perf_test_event(
+        "tui_frame_budget_snapshot_covers_large_session_surfaces",
+        "surface_snapshots",
+        json!({
+            "surface_count": snapshots.len(),
+            "surfaces": snapshots
+                .iter()
+                .filter_map(|snapshot| snapshot["surface"].as_str())
+                .collect::<Vec<_>>(),
         }),
     );
 }

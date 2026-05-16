@@ -2712,6 +2712,22 @@ impl PiApp {
         self.memory_monitor.summary()
     }
 
+    /// Enable frame timing telemetry for integration tests without mutating
+    /// process environment.
+    pub const fn enable_frame_timing_for_test(&mut self) {
+        self.frame_timing.enable_for_test();
+    }
+
+    /// Clear frame timing samples for the next integration-test surface.
+    pub fn reset_frame_timing_for_test(&mut self) {
+        self.frame_timing.reset_for_test();
+    }
+
+    /// Return a redaction-safe frame-budget snapshot for integration tests.
+    pub fn frame_budget_snapshot_for_test(&self, surface: &str, fixture: &Value) -> Value {
+        self.frame_timing.snapshot_json(surface, fixture)
+    }
+
     /// Install a deterministic RSS sampler for integration tests.
     ///
     /// This replaces `/proc/self` RSS sampling with a caller-provided function
