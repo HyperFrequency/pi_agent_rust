@@ -9,6 +9,7 @@ signals and emits stable JSON plus Markdown. It does not mutate those sources.
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import re
 import sys
@@ -23,8 +24,10 @@ CONTRACT_SCHEMA = "pi.operator.handoff_summary_contract.v1"
 FIXTURE_SCHEMA = "pi.operator.handoff_summary_fixtures.v1"
 CONTRACT_PATH = Path("docs/contracts/operator-handoff-summary-contract.json")
 FIXTURE_PATH = Path("tests/fixtures/operator_handoff_summary/scenarios.json")
+GOLDEN_DIR = Path("tests/fixtures/operator_handoff_summary/goldens")
 STATUSES = ("clean", "watch", "blocked")
 INVARIANT_STATUSES = ("pass", "warn", "block")
+GOLDEN_GENERATED_AT = "[GENERATED_AT]"
 SENSITIVE_KEY_RE = re.compile(
     r"(?i)(authorization|bearer|body|cookie|key|password|prompt|secret|token|transcript)"
 )
@@ -497,7 +500,66 @@ def assert_expected(
             )
 
 
-def self_test(*, repo_root: Path, generated_at: str) -> dict[str, Any]:
+def canonicalize_golden_output(output: dict[str, Any]) -> dict[str, Any]:
+    canonical = json.loads(json_dumps(output))
+    generated_at = str(canonical.get("generated_at") or "")
+    canonical["generated_at"] = GOLDEN_GENERATED_AT
+    markdown = str(canonical.get("markdown") or "")
+    if generated_at:
+        markdown = markdown.replace(generated_at, GOLDEN_GENERATED_AT)
+    canonical["markdown"] = markdown
+    return canonical
+
+
+def golden_paths(repo_root: Path, fixture_id: str) -> tuple[Path, Path]:
+    golden_dir = repo_root / GOLDEN_DIR
+    return golden_dir / f"{fixture_id}.json", golden_dir / f"{fixture_id}.md"
+
+
+def diff_text(expected: str, actual: str, *, path: Path) -> str:
+    diff = difflib.unified_diff(
+        expected.splitlines(),
+        actual.splitlines(),
+        fromfile=f"{path} (expected)",
+        tofile=f"{path} (actual)",
+        lineterm="",
+    )
+    lines = list(diff)
+    if len(lines) > 80:
+        lines = lines[:80] + ["... diff truncated ..."]
+    return "\n".join(lines)
+
+
+def assert_golden(
+    *,
+    repo_root: Path,
+    fixture_id: str,
+    output: dict[str, Any],
+    update_goldens: bool,
+) -> None:
+    json_path, md_path = golden_paths(repo_root, fixture_id)
+    canonical = canonicalize_golden_output(output)
+    actual_json = json_dumps(canonical)
+    actual_md = canonical["markdown"]
+    if update_goldens:
+        json_path.parent.mkdir(parents=True, exist_ok=True)
+        json_path.write_text(actual_json, encoding="utf-8")
+        md_path.write_text(actual_md, encoding="utf-8")
+        return
+    for path, actual in ((json_path, actual_json), (md_path, actual_md)):
+        if not path.exists():
+            raise HandoffError(
+                f"{fixture_id}: missing golden {path}; rerun --self-test --update-goldens"
+            )
+        expected = path.read_text(encoding="utf-8")
+        if expected != actual:
+            raise HandoffError(
+                f"{fixture_id}: golden mismatch for {path}\n"
+                + diff_text(expected, actual, path=path)
+            )
+
+
+def self_test(*, repo_root: Path, generated_at: str, update_goldens: bool = False) -> dict[str, Any]:
     fixture = load_json(repo_root / FIXTURE_PATH)
     if fixture.get("schema") != FIXTURE_SCHEMA:
         raise HandoffError(f"invalid fixture schema in {FIXTURE_PATH}")
@@ -507,18 +569,27 @@ def self_test(*, repo_root: Path, generated_at: str) -> dict[str, Any]:
         output = evaluate(scenario["input"], generated_at=generated_at)
         assert_contract(output, repo_root=repo_root)
         assert_expected(output, scenario.get("expected", {}), fixture_id=fixture_id)
+        assert_golden(
+            repo_root=repo_root,
+            fixture_id=fixture_id,
+            output=output,
+            update_goldens=update_goldens,
+        )
         results.append(
             {
                 "id": fixture_id,
                 "status": output["status"],
                 "invariant_count": len(output["invariants"]),
                 "redacted_fields": output["redaction_summary"]["redacted_fields"],
+                "golden_checked": not update_goldens,
+                "golden_updated": update_goldens,
             }
         )
     return {
         "schema": "pi.operator.handoff_summary_self_test.v1",
         "generated_at": generated_at,
         "status": "pass",
+        "golden_mode": "update" if update_goldens else "check",
         "scenario_count": len(results),
         "scenarios": results,
     }
@@ -541,6 +612,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--json", action="store_true", help="Print JSON output")
     parser.add_argument("--markdown", action="store_true", help="Print Markdown output")
     parser.add_argument("--self-test", action="store_true", help="Run fixture self-test")
+    parser.add_argument(
+        "--update-goldens",
+        action="store_true",
+        help="Refresh checked-in self-test goldens; only valid with --self-test",
+    )
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())
     return parser
 
@@ -552,12 +628,18 @@ def main(argv: list[str] | None = None) -> int:
     generated_at = args.generated_at or utc_now_iso()
     try:
         if args.self_test:
-            payload = self_test(repo_root=repo_root, generated_at=generated_at)
+            payload = self_test(
+                repo_root=repo_root,
+                generated_at=generated_at,
+                update_goldens=args.update_goldens,
+            )
             if args.out_json:
                 write_output(args.out_json, json_dumps(payload))
             if args.json or not args.out_json:
                 sys.stdout.write(json_dumps(payload))
             return 0
+        if args.update_goldens:
+            raise HandoffError("--update-goldens is only valid with --self-test")
         if args.fixture_id:
             input_payload = load_fixture(args.fixture_id, repo_root=repo_root)
         elif args.input_json:
