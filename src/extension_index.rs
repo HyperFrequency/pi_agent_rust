@@ -7,6 +7,9 @@
 
 use crate::config::Config;
 use crate::error::{Error, Result};
+use crate::extension_inclusion::{
+    ExtensionCategory, InclusionEntry, VersionPin, classify_registrations,
+};
 use crate::http::client::Client;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -19,11 +22,14 @@ use tempfile::NamedTempFile;
 
 pub const EXTENSION_INDEX_SCHEMA: &str = "pi.ext.index.v1";
 pub const EXTENSION_INDEX_VERSION: u32 = 1;
+pub const EXTENSION_SAFETY_PROVENANCE_SCHEMA: &str = "pi.ext.safety_provenance.v1";
 pub const DEFAULT_INDEX_MAX_AGE: Duration = Duration::from_secs(60 * 60 * 24);
 const DEFAULT_NPM_QUERY: &str = "keywords:pi-extension";
 const DEFAULT_GITHUB_QUERY: &str = "topic:pi-extension";
 const DEFAULT_REMOTE_LIMIT: usize = 100;
 const REMOTE_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+const MAX_CAPABILITY_SIGNALS: usize = 12;
+const REDACTED_CAPABILITY_SIGNAL: &str = "redacted-capability";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -233,12 +239,535 @@ pub struct ExtensionSearchHit {
     pub score: i64,
 }
 
+/// Redaction-safe, offline-only safety metadata shown before extension use.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtensionSafetyProvenance {
+    pub schema: &'static str,
+    pub source_type: String,
+    pub license_status: String,
+    pub registration_categories: Vec<String>,
+    pub requested_capabilities: Vec<String>,
+    pub risk_profile: String,
+    pub freshness: String,
+    pub source_confidence: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub degraded_reasons: Vec<String>,
+}
+
+impl ExtensionSafetyProvenance {
+    #[must_use]
+    pub fn from_index_entry(
+        entry: &ExtensionIndexEntry,
+        index: &ExtensionIndex,
+        max_age: Duration,
+    ) -> Self {
+        Self::from_index_entry_at(entry, index, Utc::now(), max_age)
+    }
+
+    #[must_use]
+    pub fn from_index_entry_at(
+        entry: &ExtensionIndexEntry,
+        index: &ExtensionIndex,
+        now: DateTime<Utc>,
+        max_age: Duration,
+    ) -> Self {
+        let mut degraded_reasons = validate_index_entry_shape(entry);
+        let source_type = source_type_from_index_entry(entry);
+        if source_type == "unknown" {
+            degraded_reasons.push("missing_source".to_string());
+        }
+
+        let (freshness, mut freshness_reasons) = index_freshness_signal(index, now, max_age);
+        degraded_reasons.append(&mut freshness_reasons);
+
+        let license_status = license_status(entry.license.as_deref());
+        let registration_categories = registration_categories_from_tags(&entry.tags);
+        let requested_capabilities = Vec::new();
+        let risk_profile = risk_profile(
+            &registration_categories,
+            &requested_capabilities,
+            None,
+            &mut degraded_reasons,
+        );
+        let source_confidence =
+            source_confidence(&source_type, &license_status, &freshness, &degraded_reasons);
+
+        Self {
+            schema: EXTENSION_SAFETY_PROVENANCE_SCHEMA,
+            source_type,
+            license_status,
+            registration_categories,
+            requested_capabilities,
+            risk_profile,
+            freshness,
+            source_confidence,
+            degraded_reasons: dedupe_sorted(degraded_reasons),
+        }
+    }
+
+    #[must_use]
+    pub fn from_install_source(source: &str) -> Self {
+        let source = source.trim();
+        let mut degraded_reasons = Vec::new();
+        if source.is_empty() {
+            degraded_reasons.push("blank_source".to_string());
+        }
+
+        let source_type = source_type_from_install_source(source);
+        if source_type == "unknown" {
+            degraded_reasons.push("unknown_source_type".to_string());
+        }
+
+        let license_status = "unknown".to_string();
+        let registration_categories = vec!["unknown".to_string()];
+        let requested_capabilities = Vec::new();
+        let freshness = "unknown".to_string();
+        let risk_profile = "unknown".to_string();
+        let source_confidence =
+            source_confidence(&source_type, &license_status, &freshness, &degraded_reasons);
+
+        Self {
+            schema: EXTENSION_SAFETY_PROVENANCE_SCHEMA,
+            source_type,
+            license_status,
+            registration_categories,
+            requested_capabilities,
+            risk_profile,
+            freshness,
+            source_confidence,
+            degraded_reasons: dedupe_sorted(degraded_reasons),
+        }
+    }
+
+    #[must_use]
+    pub fn from_inclusion_entry(entry: &InclusionEntry) -> Self {
+        let mut degraded_reasons = Vec::new();
+        if entry.id.trim().is_empty() {
+            degraded_reasons.push("blank_id".to_string());
+        }
+
+        let source_type = source_type_from_inclusion_entry(entry);
+        if source_type == "unknown" {
+            degraded_reasons.push("missing_source".to_string());
+        }
+
+        let license_status = license_status(entry.license.as_deref());
+        let registration_categories = registration_categories_from_inclusion_entry(entry);
+        let requested_capabilities = sanitize_capabilities(
+            entry.capabilities.as_deref().unwrap_or_default(),
+            &mut degraded_reasons,
+        );
+        let risk_profile = risk_profile(
+            &registration_categories,
+            &requested_capabilities,
+            entry.risk_level.as_deref(),
+            &mut degraded_reasons,
+        );
+        let freshness = "offline".to_string();
+        let source_confidence =
+            source_confidence(&source_type, &license_status, &freshness, &degraded_reasons);
+
+        Self {
+            schema: EXTENSION_SAFETY_PROVENANCE_SCHEMA,
+            source_type,
+            license_status,
+            registration_categories,
+            requested_capabilities,
+            risk_profile,
+            freshness,
+            source_confidence,
+            degraded_reasons: dedupe_sorted(degraded_reasons),
+        }
+    }
+
+    #[must_use]
+    pub fn compact_label(&self) -> String {
+        format!(
+            "{}/{}/{}/{}/{}",
+            self.source_type,
+            self.license_status,
+            self.risk_profile,
+            self.freshness,
+            self.source_confidence
+        )
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ExtensionIndexRefreshStats {
     pub npm_entries: usize,
     pub github_entries: usize,
     pub merged_entries: usize,
     pub refreshed: bool,
+}
+
+fn validate_index_entry_shape(entry: &ExtensionIndexEntry) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if entry.id.trim().is_empty() {
+        reasons.push("blank_id".to_string());
+    }
+    if entry.name.trim().is_empty() {
+        reasons.push("blank_name".to_string());
+    }
+    reasons
+}
+
+fn source_type_from_index_entry(entry: &ExtensionIndexEntry) -> String {
+    let id = entry.id.to_ascii_lowercase();
+    if id.starts_with("community/") || has_tag(&entry.tags, "community") {
+        return "community".to_string();
+    }
+
+    match &entry.source {
+        Some(ExtensionIndexSource::Npm { .. }) => "npm".to_string(),
+        Some(ExtensionIndexSource::Git { repo, path, .. }) => {
+            let repo_lc = repo.to_ascii_lowercase();
+            let path_lc = path.as_deref().unwrap_or_default().to_ascii_lowercase();
+            if repo_lc.contains("github.com/badlogic/pi-mono")
+                && path_lc.contains("packages/coding-agent/examples/extensions/")
+            {
+                "official".to_string()
+            } else {
+                "git".to_string()
+            }
+        }
+        Some(ExtensionIndexSource::Url { .. }) => "url".to_string(),
+        None => "unknown".to_string(),
+    }
+}
+
+fn source_type_from_install_source(source: &str) -> String {
+    let source_lc = source.to_ascii_lowercase();
+    if source_lc.starts_with("npm:") {
+        "npm".to_string()
+    } else if source_lc.starts_with("git:") {
+        "git".to_string()
+    } else if source_lc.starts_with("http://") || source_lc.starts_with("https://") {
+        "url".to_string()
+    } else if source.is_empty() {
+        "unknown".to_string()
+    } else {
+        "local".to_string()
+    }
+}
+
+fn source_type_from_inclusion_entry(entry: &InclusionEntry) -> String {
+    if entry.id.to_ascii_lowercase().starts_with("community/") {
+        return "community".to_string();
+    }
+
+    if let Some(source_tier) = entry.source_tier.as_deref() {
+        match source_tier {
+            "official-pi-mono" => return "official".to_string(),
+            "community" | "agents-mikeastock" => return "community".to_string(),
+            "npm-registry" | "npm-registry-pi" => return "npm".to_string(),
+            _ => {}
+        }
+    }
+
+    match &entry.version_pin {
+        Some(VersionPin::Npm { .. }) => "npm".to_string(),
+        Some(VersionPin::Git { repo, path, .. }) => {
+            let repo_lc = repo.to_ascii_lowercase();
+            let path_lc = path.as_deref().unwrap_or_default().to_ascii_lowercase();
+            if repo_lc.contains("github.com/badlogic/pi-mono")
+                && path_lc.contains("packages/coding-agent/examples/extensions/")
+            {
+                "official".to_string()
+            } else {
+                "git".to_string()
+            }
+        }
+        Some(VersionPin::Url { .. }) => "url".to_string(),
+        Some(VersionPin::Checksum) | None => "unknown".to_string(),
+    }
+}
+
+fn has_tag(tags: &[String], needle: &str) -> bool {
+    tags.iter().any(|tag| tag.eq_ignore_ascii_case(needle))
+}
+
+fn license_status(license: Option<&str>) -> String {
+    match license.map(str::trim) {
+        Some(value) if !value.is_empty() && !value.eq_ignore_ascii_case("unknown") => {
+            "present".to_string()
+        }
+        Some(_) | None => "missing".to_string(),
+    }
+}
+
+fn index_freshness_signal(
+    index: &ExtensionIndex,
+    now: DateTime<Utc>,
+    max_age: Duration,
+) -> (String, Vec<String>) {
+    if let Some(ts) = index.last_refreshed_at.as_deref() {
+        if DateTime::parse_from_rfc3339(ts).is_err() {
+            return (
+                "unknown".to_string(),
+                vec!["malformed_last_refreshed_at".to_string()],
+            );
+        }
+        if index.is_stale(now, max_age) {
+            ("stale".to_string(), Vec::new())
+        } else {
+            ("fresh".to_string(), Vec::new())
+        }
+    } else if index
+        .generated_at
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        ("seed".to_string(), Vec::new())
+    } else {
+        (
+            "unknown".to_string(),
+            vec!["missing_index_timestamp".to_string()],
+        )
+    }
+}
+
+fn registration_categories_from_tags(tags: &[String]) -> Vec<String> {
+    let mut categories = BTreeSet::new();
+    for tag in tags {
+        let tag = tag.to_ascii_lowercase();
+        if tag.contains("provider") {
+            categories.insert("provider".to_string());
+        }
+        if tag.contains("event") || tag.contains("hook") {
+            categories.insert("event_hook".to_string());
+        }
+        if tag.contains("tool") {
+            categories.insert("tool".to_string());
+        }
+        if tag.contains("command") || tag.contains("slash") {
+            categories.insert("command".to_string());
+        }
+        if tag.contains("ui") || tag.contains("renderer") {
+            categories.insert("ui_component".to_string());
+        }
+        if tag.contains("flag") || tag.contains("shortcut") || tag.contains("config") {
+            categories.insert("configuration".to_string());
+        }
+    }
+
+    if categories.is_empty() {
+        vec!["general".to_string()]
+    } else {
+        categories.into_iter().collect()
+    }
+}
+
+fn registration_categories_from_inclusion_entry(entry: &InclusionEntry) -> Vec<String> {
+    if entry.registrations.is_empty() {
+        return vec![category_label(&entry.category).to_string()];
+    }
+
+    let mut categories = BTreeSet::new();
+    for registration in &entry.registrations {
+        match registration.as_str() {
+            "registerTool" => {
+                categories.insert("tool".to_string());
+            }
+            "registerCommand" | "registerSlashCommand" => {
+                categories.insert("command".to_string());
+            }
+            "registerProvider" => {
+                categories.insert("provider".to_string());
+            }
+            "registerEvent" | "registerEventHook" => {
+                categories.insert("event_hook".to_string());
+            }
+            "registerMessageRenderer" => {
+                categories.insert("ui_component".to_string());
+            }
+            "registerFlag" | "registerShortcut" => {
+                categories.insert("configuration".to_string());
+            }
+            _ => {}
+        }
+    }
+
+    let classified = classify_registrations(&entry.registrations);
+    if classified == ExtensionCategory::Multi {
+        categories.insert("multi".to_string());
+    }
+    if categories.is_empty() {
+        categories.insert(category_label(&classified).to_string());
+    }
+    categories.into_iter().collect()
+}
+
+const fn category_label(category: &ExtensionCategory) -> &'static str {
+    match category {
+        ExtensionCategory::Tool => "tool",
+        ExtensionCategory::Command => "command",
+        ExtensionCategory::Provider => "provider",
+        ExtensionCategory::EventHook => "event_hook",
+        ExtensionCategory::UiComponent => "ui_component",
+        ExtensionCategory::Configuration => "configuration",
+        ExtensionCategory::Multi => "multi",
+        ExtensionCategory::General => "general",
+    }
+}
+
+fn sanitize_capabilities(raw: &[String], degraded_reasons: &mut Vec<String>) -> Vec<String> {
+    let mut values = BTreeSet::new();
+    let mut redacted = false;
+    for item in raw {
+        match sanitize_capability(item) {
+            CapabilitySignal::Valid(value) => {
+                values.insert(value);
+            }
+            CapabilitySignal::Redacted => {
+                redacted = true;
+                degraded_reasons.push("redacted_capability_signal".to_string());
+            }
+            CapabilitySignal::Empty => {}
+        }
+    }
+
+    if redacted {
+        values.insert(REDACTED_CAPABILITY_SIGNAL.to_string());
+    }
+
+    let mut out = values
+        .into_iter()
+        .take(MAX_CAPABILITY_SIGNALS)
+        .collect::<Vec<_>>();
+    if raw.len() > MAX_CAPABILITY_SIGNALS {
+        out.push("truncated".to_string());
+    }
+    out
+}
+
+enum CapabilitySignal {
+    Valid(String),
+    Redacted,
+    Empty,
+}
+
+fn sanitize_capability(value: &str) -> CapabilitySignal {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return CapabilitySignal::Empty;
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.contains("api_key")
+        || lower.contains("apikey")
+        || lower.contains("token")
+        || lower.contains("secret")
+        || lower.contains("password")
+        || lower.contains("sk-")
+        || trimmed.len() > 64
+        || !trimmed
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | ':' | '/'))
+    {
+        return CapabilitySignal::Redacted;
+    }
+
+    CapabilitySignal::Valid(lower)
+}
+
+fn risk_profile(
+    registration_categories: &[String],
+    requested_capabilities: &[String],
+    declared_risk: Option<&str>,
+    degraded_reasons: &mut Vec<String>,
+) -> String {
+    let mut risk = if registration_categories.iter().any(|category| {
+        matches!(
+            category.as_str(),
+            "provider" | "event_hook" | "multi" | "unknown"
+        )
+    }) {
+        "elevated"
+    } else {
+        "low"
+    };
+
+    if requested_capabilities
+        .iter()
+        .any(|capability| high_risk_capability(capability))
+    {
+        risk = "high";
+    } else if requested_capabilities
+        .iter()
+        .any(|capability| elevated_capability(capability))
+        && risk != "high"
+    {
+        risk = "elevated";
+    }
+
+    if let Some(declared) = declared_risk
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        match declared.to_ascii_lowercase().as_str() {
+            "critical" | "high" => risk = "high",
+            "medium" | "elevated" if risk != "high" => risk = "elevated",
+            "low" if risk == "low" => {}
+            "unknown" => risk = "unknown",
+            _ => {
+                degraded_reasons.push("unsupported_risk_level".to_string());
+                risk = "unknown";
+            }
+        }
+    }
+
+    if requested_capabilities
+        .iter()
+        .any(|capability| capability == REDACTED_CAPABILITY_SIGNAL)
+        && risk != "high"
+    {
+        risk = "unknown";
+    }
+
+    risk.to_string()
+}
+
+fn high_risk_capability(capability: &str) -> bool {
+    matches!(
+        capability,
+        "exec" | "env" | "shell" | "bash" | "process" | "child_process" | "spawn"
+    )
+}
+
+fn elevated_capability(capability: &str) -> bool {
+    matches!(
+        capability,
+        "write" | "http" | "https" | "network" | "net" | "fetch" | "filesystem:write"
+    )
+}
+
+fn source_confidence(
+    source_type: &str,
+    license_status: &str,
+    freshness: &str,
+    degraded_reasons: &[String],
+) -> String {
+    if !degraded_reasons.is_empty() || source_type == "unknown" {
+        return "degraded".to_string();
+    }
+    if freshness == "stale" || license_status == "missing" || license_status == "unknown" {
+        return "low".to_string();
+    }
+    if source_type == "official" {
+        "high".to_string()
+    } else {
+        "medium".to_string()
+    }
+}
+
+fn dedupe_sorted(values: Vec<String>) -> Vec<String> {
+    values
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 fn score_entry(entry: &ExtensionIndexEntry, tokens: &[String]) -> i64 {
@@ -837,11 +1366,12 @@ pub fn seed_index() -> Result<ExtensionIndex> {
 #[cfg(test)]
 mod tests {
     use super::{
-        EXTENSION_INDEX_SCHEMA, EXTENSION_INDEX_VERSION, ExtensionIndex, ExtensionIndexEntry,
-        ExtensionIndexSource, ExtensionIndexStore, merge_entries, merge_tags, non_empty,
-        normalize_license, parse_github_search_entries, parse_npm_search_entries, score_entry,
-        seed_index,
+        EXTENSION_INDEX_SCHEMA, EXTENSION_INDEX_VERSION, EXTENSION_SAFETY_PROVENANCE_SCHEMA,
+        ExtensionIndex, ExtensionIndexEntry, ExtensionIndexSource, ExtensionIndexStore,
+        ExtensionSafetyProvenance, merge_entries, merge_tags, non_empty, normalize_license,
+        parse_github_search_entries, parse_npm_search_entries, score_entry, seed_index,
     };
+    use crate::extension_inclusion::{ExtensionCategory, InclusionEntry, VersionPin};
     use chrono::{Duration as ChronoDuration, Utc};
     use std::time::Duration;
 
@@ -1095,6 +1625,279 @@ mod tests {
         let mut index = ExtensionIndex::new_empty();
         index.last_refreshed_at = Some((now - ChronoDuration::hours(1)).to_rfc3339());
         assert!(index.is_stale(now, Duration::from_secs(3600)));
+    }
+
+    fn safety_test_index() -> ExtensionIndex {
+        ExtensionIndex {
+            schema: EXTENSION_INDEX_SCHEMA.to_string(),
+            version: EXTENSION_INDEX_VERSION,
+            generated_at: Some("2026-02-05".to_string()),
+            last_refreshed_at: None,
+            entries: Vec::new(),
+        }
+    }
+
+    fn safety_entry(
+        id: &str,
+        source: Option<ExtensionIndexSource>,
+        license: Option<&str>,
+    ) -> ExtensionIndexEntry {
+        ExtensionIndexEntry {
+            id: id.to_string(),
+            name: id.rsplit('/').next().unwrap_or(id).to_string(),
+            description: None,
+            tags: Vec::new(),
+            license: license.map(str::to_string),
+            source,
+            install_source: Some(format!("npm:{id}")),
+        }
+    }
+
+    #[test]
+    fn safety_provenance_classifies_index_source_types() {
+        let index = safety_test_index();
+        let cases = [
+            (
+                safety_entry(
+                    "bookmark",
+                    Some(ExtensionIndexSource::Git {
+                        repo: "https://github.com/badlogic/pi-mono".to_string(),
+                        path: Some(
+                            "packages/coding-agent/examples/extensions/bookmark.ts".to_string(),
+                        ),
+                        r#ref: None,
+                    }),
+                    Some("MIT"),
+                ),
+                "official",
+            ),
+            (
+                safety_entry(
+                    "community/notify",
+                    Some(ExtensionIndexSource::Git {
+                        repo: "https://github.com/badlogic/pi-mono".to_string(),
+                        path: Some("packages/coding-agent/community/notify.ts".to_string()),
+                        r#ref: None,
+                    }),
+                    Some("MIT"),
+                ),
+                "community",
+            ),
+            (
+                safety_entry(
+                    "npm/pi-tool",
+                    Some(ExtensionIndexSource::Npm {
+                        package: "pi-tool".to_string(),
+                        version: Some("1.2.3".to_string()),
+                        url: None,
+                    }),
+                    Some("MIT"),
+                ),
+                "npm",
+            ),
+            (
+                safety_entry(
+                    "git/org/ext",
+                    Some(ExtensionIndexSource::Git {
+                        repo: "https://github.com/org/ext".to_string(),
+                        path: None,
+                        r#ref: None,
+                    }),
+                    Some("Apache-2.0"),
+                ),
+                "git",
+            ),
+            (
+                safety_entry(
+                    "url/ext",
+                    Some(ExtensionIndexSource::Url {
+                        url: "https://example.com/ext.js".to_string(),
+                    }),
+                    Some("MIT"),
+                ),
+                "url",
+            ),
+            (safety_entry("unknown/ext", None, Some("MIT")), "unknown"),
+        ];
+
+        for (entry, expected_source_type) in cases {
+            let safety = ExtensionSafetyProvenance::from_index_entry_at(
+                &entry,
+                &index,
+                Utc::now(),
+                Duration::from_secs(3600),
+            );
+            assert_eq!(safety.source_type, expected_source_type);
+        }
+    }
+
+    #[test]
+    fn safety_provenance_degrades_malformed_index_entries() {
+        let mut index = safety_test_index();
+        index.last_refreshed_at = Some("not-a-timestamp".to_string());
+        let entry = ExtensionIndexEntry {
+            id: String::new(),
+            name: String::new(),
+            description: None,
+            tags: Vec::new(),
+            license: None,
+            source: None,
+            install_source: None,
+        };
+
+        let safety = ExtensionSafetyProvenance::from_index_entry_at(
+            &entry,
+            &index,
+            Utc::now(),
+            Duration::from_secs(3600),
+        );
+
+        assert_eq!(safety.source_type, "unknown");
+        assert_eq!(safety.license_status, "missing");
+        assert_eq!(safety.source_confidence, "degraded");
+        assert!(safety.degraded_reasons.contains(&"blank_id".to_string()));
+        assert!(safety.degraded_reasons.contains(&"blank_name".to_string()));
+        assert!(
+            safety
+                .degraded_reasons
+                .contains(&"malformed_last_refreshed_at".to_string())
+        );
+    }
+
+    #[test]
+    fn safety_provenance_marks_missing_license_low_confidence() {
+        let index = safety_test_index();
+        let entry = safety_entry(
+            "npm/pi-tool",
+            Some(ExtensionIndexSource::Npm {
+                package: "pi-tool".to_string(),
+                version: None,
+                url: None,
+            }),
+            None,
+        );
+
+        let safety = ExtensionSafetyProvenance::from_index_entry_at(
+            &entry,
+            &index,
+            Utc::now(),
+            Duration::from_secs(3600),
+        );
+
+        assert_eq!(safety.license_status, "missing");
+        assert_eq!(safety.source_confidence, "low");
+    }
+
+    #[test]
+    fn safety_provenance_classifies_install_source_fallbacks_offline() {
+        let cases = [
+            ("npm:pi-tool@1.2.3", "npm", "low"),
+            ("git:org/pi-tool", "git", "low"),
+            ("https://example.com/pi-tool.js", "url", "low"),
+            ("./extensions/local-tool.js", "local", "low"),
+            ("", "unknown", "degraded"),
+        ];
+
+        for (source, expected_source_type, expected_confidence) in cases {
+            let safety = ExtensionSafetyProvenance::from_install_source(source);
+
+            assert_eq!(safety.source_type, expected_source_type);
+            assert_eq!(safety.source_confidence, expected_confidence);
+            assert_eq!(safety.license_status, "unknown");
+            assert_eq!(safety.freshness, "unknown");
+        }
+    }
+
+    #[test]
+    fn safety_provenance_reports_provider_event_heavy_inclusion_risk() {
+        let entry = InclusionEntry {
+            id: "community/heavy".to_string(),
+            name: Some("heavy".to_string()),
+            tier: Some("tier-1".to_string()),
+            score: Some(80.0),
+            category: ExtensionCategory::Multi,
+            registrations: vec![
+                "registerProvider".to_string(),
+                "registerEventHook".to_string(),
+            ],
+            version_pin: Some(VersionPin::Git {
+                repo: "https://github.com/example/heavy".to_string(),
+                path: None,
+                commit: Some("abc123".to_string()),
+            }),
+            sha256: Some("abc".to_string()),
+            artifact_path: None,
+            license: Some("MIT".to_string()),
+            source_tier: Some("community".to_string()),
+            rationale: None,
+            directory: None,
+            provenance: None,
+            capabilities: Some(vec!["read".to_string()]),
+            risk_level: None,
+            inclusion_rationale: None,
+        };
+
+        let safety = ExtensionSafetyProvenance::from_inclusion_entry(&entry);
+
+        assert_eq!(safety.source_type, "community");
+        assert!(
+            safety
+                .registration_categories
+                .contains(&"provider".to_string())
+        );
+        assert!(
+            safety
+                .registration_categories
+                .contains(&"event_hook".to_string())
+        );
+        assert_eq!(safety.risk_profile, "elevated");
+    }
+
+    #[test]
+    fn safety_provenance_redacts_invalid_capabilities_without_leaking_secrets() {
+        let entry = InclusionEntry {
+            id: "npm/secret-tool".to_string(),
+            name: Some("secret-tool".to_string()),
+            tier: Some("tier-1".to_string()),
+            score: Some(91.0),
+            category: ExtensionCategory::Tool,
+            registrations: vec!["registerTool".to_string()],
+            version_pin: Some(VersionPin::Npm {
+                package: "secret-tool".to_string(),
+                version: "1.0.0".to_string(),
+                registry_url: "https://registry.npmjs.org".to_string(),
+            }),
+            sha256: Some("abc".to_string()),
+            artifact_path: None,
+            license: Some("MIT".to_string()),
+            source_tier: Some("npm-registry".to_string()),
+            rationale: Some("prompt leak marker sk-should-not-appear".to_string()),
+            directory: None,
+            provenance: Some(serde_json::json!({
+                "prompt": "OPENAI_API_KEY=sk-should-not-appear",
+                "url": "https://example.com/?token=sk-should-not-appear"
+            })),
+            capabilities: Some(vec![
+                "exec".to_string(),
+                "OPENAI_API_KEY=sk-should-not-appear".to_string(),
+            ]),
+            risk_level: None,
+            inclusion_rationale: None,
+        };
+
+        let safety = ExtensionSafetyProvenance::from_inclusion_entry(&entry);
+        let serialized = serde_json::to_string(&safety).expect("serialize safety provenance");
+
+        assert_eq!(safety.schema, EXTENSION_SAFETY_PROVENANCE_SCHEMA);
+        assert_eq!(safety.risk_profile, "high");
+        assert!(
+            safety
+                .requested_capabilities
+                .contains(&"redacted-capability".to_string())
+        );
+        assert!(!serialized.contains("sk-should-not-appear"));
+        assert!(!serialized.contains("OPENAI_API_KEY"));
+        assert!(!serialized.contains("token="));
     }
 
     // ── search ─────────────────────────────────────────────────────────

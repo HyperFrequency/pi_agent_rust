@@ -31,7 +31,10 @@ use pi::cli;
 use pi::compaction::ResolvedCompactionSettings;
 use pi::config::Config;
 use pi::config::SettingsScope;
-use pi::extension_index::ExtensionIndexStore;
+use pi::extension_index::{
+    DEFAULT_INDEX_MAX_AGE, ExtensionIndex, ExtensionIndexEntry, ExtensionIndexStore,
+    ExtensionSafetyProvenance,
+};
 use pi::extensions::{
     ALL_CAPABILITIES, Capability, ExtensionLoadSpec, ExtensionRegion, ExtensionRuntimeHandle,
     JsExtensionRuntimeHandle, NativeRustExtensionRuntimeHandle, PolicyDecision,
@@ -3630,6 +3633,8 @@ const fn scope_from_flag(local: bool) -> PackageScope {
 async fn handle_package_install(manager: &PackageManager, source: &str, local: bool) -> Result<()> {
     let scope = scope_from_flag(local);
     let resolved_source = manager.resolve_install_source_alias(source);
+    let safety_index = load_extension_safety_index();
+    print_install_safety_advisory(&resolved_source, safety_index.as_ref());
     manager.install(&resolved_source, scope).await?;
     manager.add_package_source(&resolved_source, scope).await?;
     if resolved_source.eq(source) {
@@ -3647,6 +3652,8 @@ fn handle_package_install_blocking(
 ) -> Result<()> {
     let scope = scope_from_flag(local);
     let resolved_source = manager.resolve_install_source_alias(source);
+    let safety_index = load_extension_safety_index();
+    print_install_safety_advisory(&resolved_source, safety_index.as_ref());
     manager.install_blocking(&resolved_source, scope)?;
     manager.add_package_source_blocking(&resolved_source, scope)?;
     if resolved_source.eq(source) {
@@ -3790,6 +3797,7 @@ fn handle_package_update_blocking(manager: &PackageManager, source: Option<&str>
 async fn handle_package_list(manager: &PackageManager) -> Result<()> {
     let entries = manager.list_packages().await?;
     let (user, project) = split_package_entries(entries);
+    let safety_index = load_extension_safety_index();
 
     if user.is_empty() && project.is_empty() {
         println!("No packages installed.");
@@ -3799,7 +3807,7 @@ async fn handle_package_list(manager: &PackageManager) -> Result<()> {
     if !user.is_empty() {
         println!("User packages:");
         for entry in &user {
-            print_package_entry(manager, entry).await?;
+            print_package_entry(manager, entry, safety_index.as_ref()).await?;
         }
     }
 
@@ -3809,7 +3817,7 @@ async fn handle_package_list(manager: &PackageManager) -> Result<()> {
         }
         println!("Project packages:");
         for entry in &project {
-            print_package_entry(manager, entry).await?;
+            print_package_entry(manager, entry, safety_index.as_ref()).await?;
         }
     }
 
@@ -3818,7 +3826,10 @@ async fn handle_package_list(manager: &PackageManager) -> Result<()> {
 
 fn handle_package_list_blocking(manager: &PackageManager) -> Result<()> {
     let entries = manager.list_packages_blocking()?;
-    print_package_list_entries_blocking(manager, entries, print_package_entry_blocking)
+    let safety_index = load_extension_safety_index();
+    print_package_list_entries_blocking(manager, entries, |manager, entry| {
+        print_package_entry_blocking(manager, entry, safety_index.as_ref())
+    })
 }
 
 fn split_package_entries(entries: Vec<PackageEntry>) -> (Vec<PackageEntry>, Vec<PackageEntry>) {
@@ -3897,12 +3908,7 @@ async fn handle_search(query: &str, tag: Option<&str>, sort: &str, limit: usize)
     // If no cache exists, use the built-in seed index without a network call.
     let mut index = store.load_or_seed()?;
     let has_cache = store.path().exists();
-    if has_cache
-        && index.is_stale(
-            chrono::Utc::now(),
-            pi::extension_index::DEFAULT_INDEX_MAX_AGE,
-        )
-    {
+    if has_cache && index.is_stale(chrono::Utc::now(), DEFAULT_INDEX_MAX_AGE) {
         println!("Refreshing extension index...");
         let client = pi::http::client::Client::new();
         match store.refresh_best_effort(&client).await {
@@ -3931,12 +3937,7 @@ fn handle_search_blocking(
     // Preserve refresh semantics: if cache is stale, fall back to async path so we can
     // attempt network refresh before searching.
     let has_cache = store.path().exists();
-    if has_cache
-        && index.is_stale(
-            chrono::Utc::now(),
-            pi::extension_index::DEFAULT_INDEX_MAX_AGE,
-        )
-    {
+    if has_cache && index.is_stale(chrono::Utc::now(), DEFAULT_INDEX_MAX_AGE) {
         return Ok(false);
     }
 
@@ -3957,7 +3958,7 @@ fn render_search_results(
         return;
     }
 
-    print_search_results(&hits);
+    print_search_results(&hits, index);
 }
 
 fn collect_search_hits(
@@ -3998,8 +3999,17 @@ fn collect_search_hits(
     hits
 }
 
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    let keep = max_chars.saturating_sub(3);
+    let truncated = value.chars().take(keep).collect::<String>();
+    format!("{truncated}...")
+}
+
 #[allow(clippy::uninlined_format_args)]
-fn print_search_results(hits: &[pi::extension_index::ExtensionSearchHit]) {
+fn print_search_results(hits: &[pi::extension_index::ExtensionSearchHit], index: &ExtensionIndex) {
     // Column widths
     let name_w = hits
         .iter()
@@ -4020,18 +4030,30 @@ fn print_search_results(hits: &[pi::extension_index::ExtensionSearchHit]) {
         .unwrap_or(0)
         .max(4); // "Tags"
     let source_w = 6; // "Source"
+    let safety_w = hits
+        .iter()
+        .map(|h| {
+            ExtensionSafetyProvenance::from_index_entry(&h.entry, index, DEFAULT_INDEX_MAX_AGE)
+                .compact_label()
+                .len()
+                .min(44)
+        })
+        .max()
+        .unwrap_or(0)
+        .max(6); // "Safety"
 
     // Header
     println!(
-        "  {:<name_w$}  {:<desc_w$}  {:<tags_w$}  {:<source_w$}",
-        "Name", "Description", "Tags", "Source"
+        "  {:<name_w$}  {:<desc_w$}  {:<tags_w$}  {:<source_w$}  {:<safety_w$}",
+        "Name", "Description", "Tags", "Source", "Safety"
     );
     println!(
-        "  {:<name_w$}  {:<desc_w$}  {:<tags_w$}  {:<source_w$}",
+        "  {:<name_w$}  {:<desc_w$}  {:<tags_w$}  {:<source_w$}  {:<safety_w$}",
         "-".repeat(name_w),
         "-".repeat(desc_w),
         "-".repeat(tags_w),
-        "-".repeat(source_w)
+        "-".repeat(source_w),
+        "-".repeat(safety_w)
     );
 
     // Rows
@@ -4056,9 +4078,13 @@ fn print_search_results(hits: &[pi::extension_index::ExtensionSearchHit]) {
             Some(pi::extension_index::ExtensionIndexSource::Url { .. }) => "url",
             None => "-",
         };
+        let safety =
+            ExtensionSafetyProvenance::from_index_entry(&hit.entry, index, DEFAULT_INDEX_MAX_AGE)
+                .compact_label();
+        let safety_truncated = truncate_chars(&safety, 44);
         println!(
-            "  {:<name_w$}  {:<desc_w$}  {:<tags_w$}  {:<source_w$}",
-            hit.entry.name, desc_truncated, tags_truncated, source_label
+            "  {:<name_w$}  {:<desc_w$}  {:<tags_w$}  {:<source_w$}  {:<safety_w$}",
+            hit.entry.name, desc_truncated, tags_truncated, source_label, safety_truncated
         );
     }
 
@@ -4074,7 +4100,7 @@ fn print_search_results(hits: &[pi::extension_index::ExtensionSearchHit]) {
 fn handle_info_blocking(name: &str) -> Result<()> {
     let index = ExtensionIndexStore::default_store().load_or_seed()?;
     match find_index_entry_by_name_or_id(&index, name) {
-        ExtensionInfoLookup::Found(entry) => print_extension_info(entry),
+        ExtensionInfoLookup::Found(entry) => print_extension_info(entry, &index),
         ExtensionInfoLookup::Ambiguous => {
             println!("Extension query \"{name}\" is ambiguous.");
             println!("Try: pi search {name}");
@@ -4126,7 +4152,7 @@ fn find_index_entry_by_name_or_id<'a>(
         .map_or(ExtensionInfoLookup::NotFound, ExtensionInfoLookup::Found)
 }
 
-fn print_extension_info(entry: &pi::extension_index::ExtensionIndexEntry) {
+fn print_extension_info(entry: &ExtensionIndexEntry, index: &ExtensionIndex) {
     let width = 60;
     let bar = "─".repeat(width);
 
@@ -4192,6 +4218,14 @@ fn print_extension_info(entry: &pi::extension_index::ExtensionIndexEntry) {
         }
     }
 
+    // Safety provenance
+    let safety = ExtensionSafetyProvenance::from_index_entry(entry, index, DEFAULT_INDEX_MAX_AGE);
+    println!("  ├{bar}┤");
+    for line in extension_safety_lines(&safety) {
+        let padding = width.saturating_sub(line.len() + 1);
+        println!("  │ {line}{:padding$}│", "");
+    }
+
     // Install command
     println!("  ├{bar}┤");
     if let Some(install_source) = &entry.install_source {
@@ -4239,7 +4273,69 @@ fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
     lines
 }
 
-async fn print_package_entry(manager: &PackageManager, entry: &PackageEntry) -> Result<()> {
+fn load_extension_safety_index() -> Option<ExtensionIndex> {
+    ExtensionIndexStore::default_store().load_or_seed().ok()
+}
+
+fn extension_safety_for_source(
+    source: &str,
+    index: Option<&ExtensionIndex>,
+) -> ExtensionSafetyProvenance {
+    if let Some(index) = index {
+        if let Some(entry) = index
+            .entries
+            .iter()
+            .find(|entry| entry.install_source.as_deref() == Some(source))
+        {
+            return ExtensionSafetyProvenance::from_index_entry(
+                entry,
+                index,
+                DEFAULT_INDEX_MAX_AGE,
+            );
+        }
+    }
+    ExtensionSafetyProvenance::from_install_source(source)
+}
+
+fn extension_safety_lines(safety: &ExtensionSafetyProvenance) -> Vec<String> {
+    let capabilities = if safety.requested_capabilities.is_empty() {
+        "none".to_string()
+    } else {
+        safety.requested_capabilities.join(",")
+    };
+    let mut lines = vec![
+        format!(
+            "Safety: source={} license={} risk={} confidence={}",
+            safety.source_type,
+            safety.license_status,
+            safety.risk_profile,
+            safety.source_confidence
+        ),
+        format!(
+            "Signals: categories={} capabilities={} freshness={}",
+            safety.registration_categories.join(","),
+            capabilities,
+            safety.freshness
+        ),
+    ];
+    if !safety.degraded_reasons.is_empty() {
+        lines.push(format!("Degraded: {}", safety.degraded_reasons.join(",")));
+    }
+    lines
+}
+
+fn print_install_safety_advisory(source: &str, index: Option<&ExtensionIndex>) {
+    let safety = extension_safety_for_source(source, index);
+    for line in extension_safety_lines(&safety) {
+        println!("{line}");
+    }
+}
+
+async fn print_package_entry(
+    manager: &PackageManager,
+    entry: &PackageEntry,
+    index: Option<&ExtensionIndex>,
+) -> Result<()> {
     let display = if entry.filter.is_some() {
         format!("{} (filtered)", entry.source)
     } else {
@@ -4249,10 +4345,16 @@ async fn print_package_entry(manager: &PackageManager, entry: &PackageEntry) -> 
     if let Some(path) = manager.installed_path(&entry.source, entry.scope).await? {
         println!("    {}", path.display());
     }
+    let safety = extension_safety_for_source(&entry.source, index);
+    println!("    Safety: {}", safety.compact_label());
     Ok(())
 }
 
-fn print_package_entry_blocking(manager: &PackageManager, entry: &PackageEntry) -> Result<()> {
+fn print_package_entry_blocking(
+    manager: &PackageManager,
+    entry: &PackageEntry,
+    index: Option<&ExtensionIndex>,
+) -> Result<()> {
     let display = if entry.filter.is_some() {
         format!("{} (filtered)", entry.source)
     } else {
@@ -4262,6 +4364,8 @@ fn print_package_entry_blocking(manager: &PackageManager, entry: &PackageEntry) 
     if let Some(path) = manager.installed_path_blocking(&entry.source, entry.scope)? {
         println!("    {}", path.display());
     }
+    let safety = extension_safety_for_source(&entry.source, index);
+    println!("    Safety: {}", safety.compact_label());
     Ok(())
 }
 
@@ -7365,6 +7469,60 @@ mod tests {
             source: None,
             install_source: Some(format!("npm:{name}")),
         }
+    }
+
+    #[test]
+    fn extension_safety_for_source_prefers_offline_index_metadata() {
+        let mut index = test_extension_index(vec![pi::extension_index::ExtensionIndexEntry {
+            id: "official/provider".to_string(),
+            name: "provider".to_string(),
+            description: None,
+            tags: vec!["provider".to_string()],
+            license: Some("MIT".to_string()),
+            source: Some(pi::extension_index::ExtensionIndexSource::Git {
+                repo: "https://github.com/badlogic/pi-mono".to_string(),
+                path: Some("packages/coding-agent/examples/extensions/provider.ts".to_string()),
+                r#ref: None,
+            }),
+            install_source: Some("npm:provider".to_string()),
+        }]);
+        index.generated_at = Some("2026-05-01T00:00:00Z".to_string());
+
+        let safety = extension_safety_for_source("npm:provider", Some(&index));
+
+        assert_eq!(safety.source_type, "official");
+        assert_eq!(safety.license_status, "present");
+        assert!(
+            safety
+                .registration_categories
+                .contains(&"provider".to_string())
+        );
+        assert_eq!(safety.risk_profile, "elevated");
+        assert_eq!(safety.source_confidence, "high");
+    }
+
+    #[test]
+    fn extension_safety_lines_project_redacted_cli_provenance() {
+        let safety = pi::extension_index::ExtensionSafetyProvenance {
+            schema: pi::extension_index::EXTENSION_SAFETY_PROVENANCE_SCHEMA,
+            source_type: "npm".to_string(),
+            license_status: "present".to_string(),
+            registration_categories: vec!["tool".to_string()],
+            requested_capabilities: vec!["redacted-capability".to_string()],
+            risk_profile: "unknown".to_string(),
+            freshness: "offline".to_string(),
+            source_confidence: "degraded".to_string(),
+            degraded_reasons: vec!["redacted_capability_signal".to_string()],
+        };
+
+        let lines = extension_safety_lines(&safety);
+        let rendered = lines.join("\n");
+
+        assert!(rendered.contains("Safety: source=npm license=present"));
+        assert!(rendered.contains("Signals: categories=tool capabilities=redacted-capability"));
+        assert!(rendered.contains("Degraded: redacted_capability_signal"));
+        assert!(!rendered.contains("OPENAI_API_KEY"));
+        assert!(!rendered.contains("sk-should-not-appear"));
     }
 
     #[test]
