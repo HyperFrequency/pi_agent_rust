@@ -36,6 +36,8 @@ br ready --json
 bv --recipe actionable --robot-plan
 python3 scripts/report_empty_queue_convergence.py --json \
   --beads-jsonl .beads/issues.jsonl
+# When available, add:
+#   --validation-broker-json <validation-broker-status-or-plan.json>
 pi doctor --only swarm --format json > /data/tmp/pi_swarm_runpack/doctor.json
 scripts/cargo_headroom.sh --runner rch --admit-only check --all-targets \
   --decision-json /data/tmp/pi_swarm_runpack/cargo-admission.json
@@ -53,6 +55,10 @@ Green startup means:
   new/refined child Beads should be created, or
   `status=queue_clean` only when no ready/in-progress work remains and
   no deferred planning epic still needs child backlog.
+- If `--validation-broker-json` is supplied, stale slots, saturated slot
+  posture, malformed JSON, and duplicate expensive cargo gate opportunities
+  appear as advisory operator context. Malformed supplied broker JSON fails
+  closed with a warning; missing broker JSON remains optional.
 - `pi doctor --only swarm --format json` has no red finding that says new swarm work must stop.
 - `scripts/cargo_headroom.sh --runner rch --admit-only ...` returns
   `decision=allow` with `admission_action=allow`. `admission_action=defer`
