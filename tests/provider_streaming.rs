@@ -16,8 +16,8 @@ mod common;
 use common::TestHarness;
 use futures::{Stream, StreamExt};
 use pi::model::{
-    AssistantMessage, ContentBlock, Message, StopReason, StreamEvent, ToolCall, ToolResultMessage,
-    Usage, UserContent, UserMessage,
+    AssistantMessage, ContentBlock, Cost, Message, StopReason, StreamEvent, ToolCall,
+    ToolResultMessage, Usage, UserContent, UserMessage,
 };
 use pi::provider::ToolDef;
 use pi::vcr::{Cassette, VcrMode};
@@ -929,6 +929,774 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
         let _ = write!(out, "{byte:02x}");
     }
     out
+}
+
+#[cfg(test)]
+mod backpressure_tests {
+    use super::*;
+    use std::collections::{BTreeMap, VecDeque};
+
+    const BACKPRESSURE_SCHEMA: &str = "pi.test.provider_stream_backpressure.v1";
+    const PRESSURE_QUEUE_CAP: usize = 6;
+    const SLOW_CONSUMER_DRAIN_EVERY: usize = 4;
+
+    #[derive(Clone)]
+    enum ProviderPressureChunk {
+        Event(Box<StreamEvent>),
+        RetryableError {
+            class: &'static str,
+            message: &'static str,
+        },
+        MalformedChunk {
+            class: &'static str,
+            message: &'static str,
+        },
+    }
+
+    struct ProviderPressureFixture {
+        provider: &'static str,
+        fixture: &'static str,
+        expected_text: String,
+        expected_usage: Option<Usage>,
+        expected_stop_reason: Option<StopReason>,
+        expect_tool_call: bool,
+        expected_error_class: Option<&'static str>,
+        chunks: Vec<ProviderPressureChunk>,
+    }
+
+    #[derive(Default)]
+    struct BackpressureReplay {
+        events: Vec<StreamEvent>,
+        chunk_count: usize,
+        semantic_count: usize,
+        coalesced_or_buffered_count: usize,
+        max_queue_depth: usize,
+        latency_steps: usize,
+        retryable_error_count: usize,
+        malformed_chunk_count: usize,
+        error_classification: Option<&'static str>,
+        error_message: Option<String>,
+    }
+
+    struct PressureEventSummary<'a> {
+        event_count: usize,
+        has_start: bool,
+        has_done: bool,
+        text: String,
+        tool_call_deltas: usize,
+        stop_reason: Option<StopReason>,
+        stream_error: Option<&'a str>,
+    }
+
+    fn pressure_usage(seed: u64) -> Usage {
+        Usage {
+            input: 100 + seed,
+            output: 20 + seed,
+            cache_read: seed,
+            cache_write: 0,
+            total_tokens: 120 + (seed * 2),
+            cost: Cost::default(),
+        }
+    }
+
+    fn event(event: StreamEvent) -> ProviderPressureChunk {
+        ProviderPressureChunk::Event(Box::new(event))
+    }
+
+    fn base_assistant(provider: &str, model: &str) -> AssistantMessage {
+        AssistantMessage {
+            content: Vec::new(),
+            api: "stream".to_string(),
+            provider: provider.to_string(),
+            model: model.to_string(),
+            usage: Usage::default(),
+            stop_reason: StopReason::Stop,
+            error_message: None,
+            timestamp: 0,
+        }
+    }
+
+    fn final_assistant(
+        provider: &str,
+        model: &str,
+        text: &str,
+        tool_call: ToolCall,
+        usage: Usage,
+    ) -> AssistantMessage {
+        AssistantMessage {
+            content: vec![
+                ContentBlock::Text(pi::model::TextContent::new(text.to_string())),
+                ContentBlock::ToolCall(tool_call),
+            ],
+            api: "stream".to_string(),
+            provider: provider.to_string(),
+            model: model.to_string(),
+            usage,
+            stop_reason: StopReason::ToolUse,
+            error_message: None,
+            timestamp: 0,
+        }
+    }
+
+    fn streaming_pressure_fixture(
+        provider: &'static str,
+        fixture: &'static str,
+        model: &'static str,
+        seed: u64,
+    ) -> ProviderPressureFixture {
+        let tool_call = ToolCall {
+            id: format!("{provider}-tool-call"),
+            name: "echo".to_string(),
+            arguments: json!({ "query": format!("{provider}-pressure") }),
+            thought_signature: None,
+        };
+        let text_deltas = [
+            format!("{provider} "),
+            "stream ".to_string(),
+            "pressure ".to_string(),
+            "keeps ".to_string(),
+            "semantic ".to_string(),
+            "chunks ".to_string(),
+            "while ".to_string(),
+            "coalescing ".to_string(),
+            "low-value ".to_string(),
+            "text ".to_string(),
+            "deltas.".to_string(),
+        ];
+        let expected_text = text_deltas.concat();
+        let usage = pressure_usage(seed);
+        let mut chunks = vec![
+            ProviderPressureChunk::RetryableError {
+                class: "retryable_stream_error",
+                message: "SSE poll returned WouldBlock and recovered",
+            },
+            event(StreamEvent::Start {
+                partial: base_assistant(provider, model),
+            }),
+            event(StreamEvent::TextStart { content_index: 0 }),
+        ];
+        chunks.extend(text_deltas.iter().map(|delta| {
+            event(StreamEvent::TextDelta {
+                content_index: 0,
+                delta: delta.clone(),
+            })
+        }));
+        chunks.extend([
+            event(StreamEvent::TextEnd {
+                content_index: 0,
+                content: expected_text.clone(),
+            }),
+            event(StreamEvent::ToolCallStart { content_index: 1 }),
+            event(StreamEvent::ToolCallDelta {
+                content_index: 1,
+                delta: "{\"query\":\"".to_string(),
+            }),
+            event(StreamEvent::ToolCallDelta {
+                content_index: 1,
+                delta: format!("{provider}-pressure"),
+            }),
+            event(StreamEvent::ToolCallDelta {
+                content_index: 1,
+                delta: "\"}".to_string(),
+            }),
+            event(StreamEvent::ToolCallEnd {
+                content_index: 1,
+                tool_call: tool_call.clone(),
+            }),
+            event(StreamEvent::Done {
+                reason: StopReason::ToolUse,
+                message: final_assistant(provider, model, &expected_text, tool_call, usage.clone()),
+            }),
+        ]);
+
+        ProviderPressureFixture {
+            provider,
+            fixture,
+            expected_text,
+            expected_usage: Some(usage),
+            expected_stop_reason: Some(StopReason::ToolUse),
+            expect_tool_call: true,
+            expected_error_class: None,
+            chunks,
+        }
+    }
+
+    fn malformed_pressure_fixture() -> ProviderPressureFixture {
+        ProviderPressureFixture {
+            provider: "openai-responses",
+            fixture: "openai_responses_malformed_chunk_fail_closed",
+            expected_text: String::new(),
+            expected_usage: None,
+            expected_stop_reason: None,
+            expect_tool_call: false,
+            expected_error_class: Some("malformed_chunk"),
+            chunks: vec![
+                ProviderPressureChunk::RetryableError {
+                    class: "retryable_stream_error",
+                    message: "SSE poll returned TimedOut and recovered",
+                },
+                ProviderPressureChunk::MalformedChunk {
+                    class: "malformed_chunk",
+                    message: "SSE error: JSON parse error: expected value at line 1 column 1",
+                },
+            ],
+        }
+    }
+
+    fn native_pressure_fixtures() -> Vec<ProviderPressureFixture> {
+        let mut fixtures = [
+            (
+                1,
+                "anthropic",
+                "anthropic_tool_use_backpressure",
+                "claude-3-5-haiku-latest",
+            ),
+            (
+                2,
+                "azure-openai",
+                "azure_openai_tool_use_backpressure",
+                "gpt-4o-mini",
+            ),
+            (3, "cohere", "cohere_tool_use_backpressure", "command-r"),
+            (
+                4,
+                "gemini",
+                "gemini_tool_use_backpressure",
+                "gemini-1.5-flash",
+            ),
+            (5, "openai", "openai_tool_use_backpressure", "gpt-4o-mini"),
+            (
+                6,
+                "openai-responses",
+                "openai_responses_tool_use_backpressure",
+                "gpt-4o-mini",
+            ),
+        ]
+        .into_iter()
+        .map(|(seed, provider, fixture, model)| {
+            streaming_pressure_fixture(provider, fixture, model, seed)
+        })
+        .collect::<Vec<_>>();
+        fixtures.push(malformed_pressure_fixture());
+        fixtures
+    }
+
+    fn is_coalescible_event(event: &StreamEvent) -> bool {
+        matches!(
+            event,
+            StreamEvent::TextDelta { .. } | StreamEvent::ThinkingDelta { .. }
+        )
+    }
+
+    fn is_semantic_event(event: &StreamEvent) -> bool {
+        !matches!(
+            event,
+            StreamEvent::TextDelta { .. } | StreamEvent::ThinkingDelta { .. }
+        )
+    }
+
+    fn push_queue(
+        queue: &mut VecDeque<StreamEvent>,
+        replay: &mut BackpressureReplay,
+        event: StreamEvent,
+    ) {
+        queue.push_back(event);
+        replay.max_queue_depth = replay.max_queue_depth.max(queue.len());
+    }
+
+    fn flush_coalesced(
+        queue: &mut VecDeque<StreamEvent>,
+        pending_text: &mut BTreeMap<usize, String>,
+        pending_thinking: &mut BTreeMap<usize, String>,
+        replay: &mut BackpressureReplay,
+    ) {
+        for (content_index, delta) in std::mem::take(pending_text) {
+            push_queue(
+                queue,
+                replay,
+                StreamEvent::TextDelta {
+                    content_index,
+                    delta,
+                },
+            );
+        }
+        for (content_index, delta) in std::mem::take(pending_thinking) {
+            push_queue(
+                queue,
+                replay,
+                StreamEvent::ThinkingDelta {
+                    content_index,
+                    delta,
+                },
+            );
+        }
+    }
+
+    fn enqueue_or_coalesce(
+        queue: &mut VecDeque<StreamEvent>,
+        pending_text: &mut BTreeMap<usize, String>,
+        pending_thinking: &mut BTreeMap<usize, String>,
+        replay: &mut BackpressureReplay,
+        event: StreamEvent,
+    ) {
+        match event {
+            StreamEvent::TextDelta {
+                content_index,
+                delta,
+            } if pending_text.contains_key(&content_index) || queue.len() >= PRESSURE_QUEUE_CAP => {
+                pending_text
+                    .entry(content_index)
+                    .or_default()
+                    .push_str(&delta);
+                replay.coalesced_or_buffered_count += 1;
+            }
+            StreamEvent::ThinkingDelta {
+                content_index,
+                delta,
+            } if pending_thinking.contains_key(&content_index)
+                || queue.len() >= PRESSURE_QUEUE_CAP =>
+            {
+                pending_thinking
+                    .entry(content_index)
+                    .or_default()
+                    .push_str(&delta);
+                replay.coalesced_or_buffered_count += 1;
+            }
+            event => push_queue(queue, replay, event),
+        }
+    }
+
+    fn drain_one(
+        queue: &mut VecDeque<StreamEvent>,
+        output: &mut Vec<StreamEvent>,
+        replay: &mut BackpressureReplay,
+    ) {
+        if let Some(event) = queue.pop_front() {
+            output.push(event);
+            replay.latency_steps += 1;
+        }
+    }
+
+    fn drain_all(
+        queue: &mut VecDeque<StreamEvent>,
+        output: &mut Vec<StreamEvent>,
+        replay: &mut BackpressureReplay,
+    ) {
+        while !queue.is_empty() {
+            drain_one(queue, output, replay);
+        }
+    }
+
+    fn replay_under_pressure(fixture: &ProviderPressureFixture) -> BackpressureReplay {
+        let mut replay = BackpressureReplay::default();
+        let mut queue = VecDeque::new();
+        let mut pending_text = BTreeMap::new();
+        let mut pending_thinking = BTreeMap::new();
+        let mut output = Vec::new();
+        let chunks = fixture.chunks.clone();
+
+        for chunk in chunks {
+            replay.chunk_count += 1;
+            replay.latency_steps += 1;
+            match chunk {
+                ProviderPressureChunk::Event(event) => {
+                    let event = *event;
+                    if !is_coalescible_event(&event) {
+                        flush_coalesced(
+                            &mut queue,
+                            &mut pending_text,
+                            &mut pending_thinking,
+                            &mut replay,
+                        );
+                    }
+                    if is_semantic_event(&event) {
+                        replay.semantic_count += 1;
+                        if !queue.is_empty() {
+                            replay.coalesced_or_buffered_count += 1;
+                        }
+                    }
+                    enqueue_or_coalesce(
+                        &mut queue,
+                        &mut pending_text,
+                        &mut pending_thinking,
+                        &mut replay,
+                        event,
+                    );
+                }
+                ProviderPressureChunk::RetryableError { class, message } => {
+                    assert_eq!(class, "retryable_stream_error");
+                    assert!(
+                        message.contains("WouldBlock") || message.contains("TimedOut"),
+                        "{}: retryable fixture must identify the transient condition",
+                        fixture.fixture
+                    );
+                    replay.retryable_error_count += 1;
+                }
+                ProviderPressureChunk::MalformedChunk { class, message } => {
+                    flush_coalesced(
+                        &mut queue,
+                        &mut pending_text,
+                        &mut pending_thinking,
+                        &mut replay,
+                    );
+                    drain_all(&mut queue, &mut output, &mut replay);
+                    replay.malformed_chunk_count += 1;
+                    replay.error_classification = Some(class);
+                    replay.error_message = Some(message.to_string());
+                    break;
+                }
+            }
+
+            if replay.chunk_count % SLOW_CONSUMER_DRAIN_EVERY == 0 {
+                drain_one(&mut queue, &mut output, &mut replay);
+            }
+        }
+
+        flush_coalesced(
+            &mut queue,
+            &mut pending_text,
+            &mut pending_thinking,
+            &mut replay,
+        );
+        drain_all(&mut queue, &mut output, &mut replay);
+        replay.events = output;
+        replay
+    }
+
+    fn final_usage(events: &[StreamEvent]) -> Option<&Usage> {
+        events.iter().rev().find_map(|event| match event {
+            StreamEvent::Done { message, .. } => Some(&message.usage),
+            StreamEvent::Error { error, .. } => Some(&error.usage),
+            _ => None,
+        })
+    }
+
+    fn assert_usage_matches(provider: &str, fixture: &str, actual: &Usage, expected: &Usage) {
+        assert_eq!(
+            actual.input, expected.input,
+            "{provider}/{fixture}: input usage"
+        );
+        assert_eq!(
+            actual.output, expected.output,
+            "{provider}/{fixture}: output usage"
+        );
+        assert_eq!(
+            actual.total_tokens, expected.total_tokens,
+            "{provider}/{fixture}: total usage"
+        );
+        assert_eq!(
+            actual.cache_read, expected.cache_read,
+            "{provider}/{fixture}: cache read usage"
+        );
+    }
+
+    fn assert_tool_call_boundary(fixture: &ProviderPressureFixture, events: &[StreamEvent]) {
+        let start = events
+            .iter()
+            .position(|event| matches!(event, StreamEvent::ToolCallStart { .. }));
+        assert!(
+            start.is_some(),
+            "{}: missing tool-call start",
+            fixture.fixture
+        );
+        let Some(start) = start else {
+            return;
+        };
+        let first_delta = events
+            .iter()
+            .position(|event| matches!(event, StreamEvent::ToolCallDelta { .. }));
+        assert!(
+            first_delta.is_some(),
+            "{}: missing tool-call delta",
+            fixture.fixture
+        );
+        let Some(first_delta) = first_delta else {
+            return;
+        };
+        let last_delta = events
+            .iter()
+            .rposition(|event| matches!(event, StreamEvent::ToolCallDelta { .. }));
+        assert!(
+            last_delta.is_some(),
+            "{}: missing tool-call delta",
+            fixture.fixture
+        );
+        let Some(last_delta) = last_delta else {
+            return;
+        };
+        let end = events
+            .iter()
+            .position(|event| matches!(event, StreamEvent::ToolCallEnd { .. }));
+        assert!(end.is_some(), "{}: missing tool-call end", fixture.fixture);
+        let Some(end) = end else {
+            return;
+        };
+        let done = events
+            .iter()
+            .position(|event| matches!(event, StreamEvent::Done { .. }));
+        assert!(done.is_some(), "{}: missing done event", fixture.fixture);
+        let Some(done) = done else {
+            return;
+        };
+
+        assert!(
+            start < first_delta && last_delta < end && end < done,
+            "{}: tool-call boundary ordering was lost",
+            fixture.fixture
+        );
+
+        let tool_call = events.iter().find_map(|event| match event {
+            StreamEvent::ToolCallEnd { tool_call, .. } => Some(tool_call),
+            _ => None,
+        });
+        assert!(
+            tool_call.is_some(),
+            "{}: tool-call end should carry a tool call",
+            fixture.fixture
+        );
+        let Some(tool_call) = tool_call else {
+            return;
+        };
+        assert_eq!(tool_call.name, "echo");
+        assert_eq!(
+            tool_call.arguments,
+            json!({ "query": format!("{}-pressure", fixture.provider) })
+        );
+    }
+
+    fn usage_json(usage: &Usage) -> Value {
+        json!({
+            "input": usage.input,
+            "output": usage.output,
+            "cacheRead": usage.cache_read,
+            "cacheWrite": usage.cache_write,
+            "totalTokens": usage.total_tokens,
+        })
+    }
+
+    fn pressure_report_record(
+        fixture: &ProviderPressureFixture,
+        replay: &BackpressureReplay,
+        summary: &PressureEventSummary<'_>,
+    ) -> Value {
+        let verdict = if fixture.expected_error_class.is_some() {
+            "fail_closed"
+        } else {
+            "pass"
+        };
+        json!({
+            "schema": BACKPRESSURE_SCHEMA,
+            "provider": fixture.provider,
+            "fixture": fixture.fixture,
+            "chunk_count": replay.chunk_count,
+            "semantic_count": replay.semantic_count,
+            "coalesced_or_buffered_count": replay.coalesced_or_buffered_count,
+            "max_queue_depth": replay.max_queue_depth,
+            "latency_steps": replay.latency_steps,
+            "retryable_error_count": replay.retryable_error_count,
+            "malformed_chunk_count": replay.malformed_chunk_count,
+            "event_count": summary.event_count,
+            "tool_call_delta_count": summary.tool_call_deltas,
+            "stop_reason": summary.stop_reason.as_ref().map(|reason| format!("{reason:?}")),
+            "usage": final_usage(&replay.events).map(usage_json),
+            "error_classification": replay.error_classification,
+            "stream_error": replay.error_message.as_deref(),
+            "verdict": verdict,
+        })
+    }
+
+    fn summarize_pressure_events<'a>(
+        events: &[StreamEvent],
+        stream_error: Option<&'a str>,
+    ) -> PressureEventSummary<'a> {
+        let mut summary = PressureEventSummary {
+            event_count: events.len(),
+            has_start: false,
+            has_done: false,
+            text: String::new(),
+            tool_call_deltas: 0,
+            stop_reason: None,
+            stream_error,
+        };
+
+        for event in events {
+            match event {
+                StreamEvent::Start { .. } => {
+                    summary.has_start = true;
+                }
+                StreamEvent::TextDelta { delta, .. } => {
+                    summary.text.push_str(delta);
+                }
+                StreamEvent::TextEnd { content, .. } => {
+                    summary.text.clone_from(content);
+                }
+                StreamEvent::ToolCallDelta { .. } => {
+                    summary.tool_call_deltas += 1;
+                }
+                StreamEvent::Done { reason, .. } => {
+                    summary.has_done = true;
+                    summary.stop_reason = Some(*reason);
+                }
+                StreamEvent::Error { reason, .. } => {
+                    summary.stop_reason = Some(*reason);
+                }
+                StreamEvent::ThinkingStart { .. }
+                | StreamEvent::ThinkingDelta { .. }
+                | StreamEvent::ThinkingEnd { .. }
+                | StreamEvent::TextStart { .. }
+                | StreamEvent::ToolCallStart { .. }
+                | StreamEvent::ToolCallEnd { .. } => {}
+            }
+        }
+
+        summary
+    }
+
+    fn assert_pressure_fixture(fixture: &ProviderPressureFixture, replay: &BackpressureReplay) {
+        let summary = summarize_pressure_events(&replay.events, replay.error_message.as_deref());
+
+        if let Some(expected_error_class) = fixture.expected_error_class {
+            assert_eq!(
+                replay.error_classification,
+                Some(expected_error_class),
+                "{}: malformed stream error classification was lost",
+                fixture.fixture
+            );
+            assert!(
+                summary.stream_error.is_some(),
+                "{}: malformed stream did not fail closed with a stream error",
+                fixture.fixture
+            );
+            assert!(
+                !summary.has_done,
+                "{}: malformed stream must not synthesize Done",
+                fixture.fixture
+            );
+            return;
+        }
+
+        assert!(
+            summary.stream_error.is_none(),
+            "{}: unexpected stream error {:?}",
+            fixture.fixture,
+            summary.stream_error
+        );
+        assert!(
+            summary.has_start,
+            "{}: missing start event",
+            fixture.fixture
+        );
+        assert!(summary.has_done, "{}: missing done event", fixture.fixture);
+        assert_eq!(
+            summary.text, fixture.expected_text,
+            "{}: replayed text changed under pressure",
+            fixture.fixture
+        );
+        assert_eq!(
+            summary.stop_reason, fixture.expected_stop_reason,
+            "{}: final stop reason was lost",
+            fixture.fixture
+        );
+        assert!(
+            replay.retryable_error_count > 0,
+            "{}: retryable stream errors were not exercised",
+            fixture.fixture
+        );
+        assert!(
+            replay.coalesced_or_buffered_count > 0,
+            "{}: slow-consumer pressure did not buffer or coalesce",
+            fixture.fixture
+        );
+        assert!(
+            replay.max_queue_depth >= PRESSURE_QUEUE_CAP,
+            "{}: replay never reached queue pressure",
+            fixture.fixture
+        );
+
+        let expected_usage = fixture.expected_usage.as_ref();
+        assert!(
+            expected_usage.is_some(),
+            "{}: streaming fixtures carry final usage",
+            fixture.fixture
+        );
+        let Some(expected_usage) = expected_usage else {
+            return;
+        };
+        let usage = final_usage(&replay.events);
+        assert!(usage.is_some(), "{}: missing final usage", fixture.fixture);
+        let Some(usage) = usage else {
+            return;
+        };
+        assert_usage_matches(fixture.provider, fixture.fixture, usage, expected_usage);
+
+        if fixture.expect_tool_call {
+            assert_tool_call_boundary(fixture, &replay.events);
+            assert!(
+                summary.tool_call_deltas >= 3,
+                "{}: expected fragmented tool-call deltas",
+                fixture.fixture
+            );
+        }
+    }
+
+    fn record_backpressure_artifact(harness: &TestHarness, records: &[Value]) {
+        let artifact_path = harness.temp_path("provider_stream_backpressure.jsonl");
+        let mut jsonl = String::new();
+        for record in records {
+            let encoded = serde_json::to_string(record);
+            assert!(
+                encoded.is_ok(),
+                "provider stream backpressure record should serialize"
+            );
+            let Ok(line) = encoded else {
+                continue;
+            };
+            let _ = writeln!(jsonl, "{line}");
+        }
+        let write_result = std::fs::write(&artifact_path, jsonl);
+        assert!(
+            write_result.is_ok(),
+            "write provider stream backpressure artifact {}: {:?}",
+            artifact_path.display(),
+            write_result.as_ref().err()
+        );
+        harness.record_artifact("provider-stream-backpressure.jsonl", &artifact_path);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn provider_backpressure_replay_preserves_semantics_across_native_fixtures() {
+        let harness = TestHarness::new(
+            "provider_backpressure_replay_preserves_semantics_across_native_fixtures",
+        );
+        let mut records = Vec::new();
+
+        for fixture in native_pressure_fixtures() {
+            let replay = replay_under_pressure(&fixture);
+            let summary =
+                summarize_pressure_events(&replay.events, replay.error_message.as_deref());
+            assert_pressure_fixture(&fixture, &replay);
+            records.push(pressure_report_record(&fixture, &replay, &summary));
+        }
+
+        assert!(
+            records
+                .iter()
+                .any(|record| record.get("verdict") == Some(&json!("fail_closed"))),
+            "expected a fail-closed malformed chunk replay record"
+        );
+        assert!(
+            records.iter().all(|record| {
+                record
+                    .get("retryable_error_count")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|count| count > 0)
+            }),
+            "every fixture should exercise recovered retryable stream errors"
+        );
+
+        record_backpressure_artifact(&harness, &records);
+    }
 }
 
 #[cfg(test)]
