@@ -93,6 +93,12 @@ FOURTH_WAVE_CLOSEOUT_GATE_SCHEMA = "pi.swarm.fourth_wave_self_healing.closeout_g
 FOURTH_WAVE_CLOSEOUT_GATE_CONTRACT_SCHEMA = (
     "pi.swarm.fourth_wave_self_healing.closeout_gate_contract.v1"
 )
+ADAPTIVE_EXECUTION_CLOSEOUT_GATE_SCHEMA = (
+    "pi.swarm.adaptive_execution.closeout_gate.v1"
+)
+ADAPTIVE_EXECUTION_CLOSEOUT_GATE_CONTRACT_SCHEMA = (
+    "pi.swarm.adaptive_execution.closeout_gate_contract.v1"
+)
 SWARM_REPLAY_PREVIEW_SCHEMA = "pi.swarm.replay_preview.v1"
 RUNPACK_CONTRACT_PATH = Path("docs/contracts/swarm-operator-runpack-contract.json")
 TURN_PRESSURE_LEDGER_CONTRACT_PATH = Path(
@@ -117,6 +123,9 @@ RUNTIME_INTELLIGENCE_CLOSEOUT_GATE_CONTRACT_PATH = Path(
 )
 FOURTH_WAVE_CLOSEOUT_GATE_CONTRACT_PATH = Path(
     "docs/contracts/fourth-wave-self-healing-closeout-gate-contract.json"
+)
+ADAPTIVE_EXECUTION_CLOSEOUT_GATE_CONTRACT_PATH = Path(
+    "docs/contracts/adaptive-execution-closeout-gate-contract.json"
 )
 GOLDEN_REPORT_DIRECTORY = Path("tests/golden_corpus/swarm_operator_runpack")
 COMPLETE_RUNPACK_GOLDEN = "complete_runpack_projection.json"
@@ -512,6 +521,45 @@ FOURTH_WAVE_CLOSEOUT_REQUIRED_QUALITY_GATES = (
     "git_diff_check",
     "cargo_check_all_targets_rch",
     "cargo_clippy_all_targets_rch",
+    "staged_ubs",
+    "beads_ledger_reconcile",
+)
+ADAPTIVE_EXECUTION_CLOSEOUT_CHILD_BEADS = (
+    "bd-63x3v.8.1",
+    "bd-63x3v.8.2",
+    "bd-63x3v.8.3",
+    "bd-63x3v.8.4",
+    "bd-63x3v.8.5",
+    "bd-63x3v.8.6",
+)
+ADAPTIVE_EXECUTION_CLOSEOUT_REQUIRED_CHECKS = (
+    "child_beads_closed",
+    "child_artifact_mapping",
+    "provider_streaming_backpressure",
+    "tool_artifact_lifecycle",
+    "branch_replay_minimization",
+    "tui_degradation_drill",
+    "permission_drift_detector",
+    "validation_refresh_scheduler",
+    "source_boundaries",
+    "pushed_commits",
+    "quality_gates",
+)
+ADAPTIVE_EXECUTION_CLOSEOUT_REQUIRED_SOURCE_BOUNDARIES = (
+    "beads_are_source_of_truth",
+    "agent_mail_is_coordination_only",
+    "read_only_gate",
+    "rch_required_for_heavy_cargo",
+    "staged_ubs_required",
+    "beads_ledger_required",
+    "no_release_or_dropin_claims",
+    "closeout_does_not_replace_child_artifacts",
+)
+ADAPTIVE_EXECUTION_CLOSEOUT_REQUIRED_QUALITY_GATES = (
+    "py_compile",
+    "runpack_self_test",
+    "json_contracts",
+    "git_diff_check",
     "staged_ubs",
     "beads_ledger_reconcile",
 )
@@ -14140,6 +14188,598 @@ def write_fourth_wave_closeout_gate_output(
     output_path.write_text(json_dumps(summary, pretty=True), encoding="utf-8")
 
 
+def adaptive_execution_child_artifact_map(
+    issues: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = [
+        {
+            "bead_id": "bd-63x3v.8.1",
+            "commit": "cb28654244cd3dc7041c30d1787361d667e8f952",
+            "code_paths": ["tests/provider_streaming.rs"],
+            "test_paths": ["tests/provider_streaming.rs"],
+            "docs_or_evidence_paths": ["tests/provider_streaming.rs"],
+            "validation_commands": [
+                "rch exec -- env CARGO_TARGET_DIR=/data/tmp/pi_agent_rust_cargo/<agent>/target TMPDIR=/data/tmp/pi_agent_rust_cargo/<agent>/tmp cargo test provider_streaming -- --nocapture",
+                "rch exec -- env CARGO_TARGET_DIR=/data/tmp/pi_agent_rust_cargo/<agent>/target TMPDIR=/data/tmp/pi_agent_rust_cargo/<agent>/tmp cargo check --all-targets",
+            ],
+            "claim_boundary_text": (
+                "Provider backpressure replay evidence does not cover RPC, TUI, "
+                "or session pressure surfaces."
+            ),
+        },
+        {
+            "bead_id": "bd-63x3v.8.2",
+            "commit": "8341d6873e425e147ad3ff00c085fbaa13b8b05e",
+            "code_paths": ["src/tools.rs"],
+            "test_paths": ["src/tools.rs"],
+            "docs_or_evidence_paths": ["src/tools.rs"],
+            "validation_commands": [
+                "rch exec -- env CARGO_TARGET_DIR=/data/tmp/pi_agent_rust_cargo/<agent>/target TMPDIR=/data/tmp/pi_agent_rust_cargo/<agent>/tmp cargo test tools::tests conformance::test_read conformance::test_grep conformance::test_bash",
+            ],
+            "claim_boundary_text": (
+                "Tool artifact lifecycle evidence does not delete user files or "
+                "authorize cleanup without operator confirmation."
+            ),
+        },
+        {
+            "bead_id": "bd-63x3v.8.3",
+            "commit": "f8699c73461d8a0838c643362a34ba283ac8e134",
+            "code_paths": ["src/session.rs"],
+            "test_paths": ["src/session.rs"],
+            "docs_or_evidence_paths": ["src/session.rs"],
+            "validation_commands": [
+                "rch exec -- env CARGO_TARGET_DIR=/data/tmp/pi_agent_rust_cargo/<agent>/target TMPDIR=/data/tmp/pi_agent_rust_cargo/<agent>/tmp cargo test session::tests session_index::tests",
+            ],
+            "claim_boundary_text": (
+                "Branch-heavy replay minimization evidence does not replace "
+                "session persistence correctness tests."
+            ),
+        },
+        {
+            "bead_id": "bd-63x3v.8.4",
+            "commit": "5662cb8ba4a7fc4c2f9ba75483f8b78c4534f618",
+            "code_paths": ["src/interactive/tests.rs"],
+            "test_paths": ["src/interactive/tests.rs"],
+            "docs_or_evidence_paths": ["src/interactive/tests.rs"],
+            "validation_commands": [
+                "rch exec -- env CARGO_TARGET_DIR=/data/tmp/pi_agent_rust_cargo/<agent>/target TMPDIR=/data/tmp/pi_agent_rust_cargo/<agent>/tmp cargo test interactive tui -- --nocapture",
+            ],
+            "claim_boundary_text": (
+                "TUI degradation drill evidence does not claim visual perfection "
+                "for every terminal or bypass accessibility review."
+            ),
+        },
+        {
+            "bead_id": "bd-63x3v.8.5",
+            "commit": "190cd9993f6335efb1c0a57022afccafbd8ba295",
+            "code_paths": ["src/extensions.rs"],
+            "test_paths": ["src/extensions.rs"],
+            "docs_or_evidence_paths": ["src/extensions.rs"],
+            "validation_commands": [
+                "rch exec -- env CARGO_TARGET_DIR=/data/tmp/pi_agent_rust_cargo/<agent>/target TMPDIR=/data/tmp/pi_agent_rust_cargo/<agent>/tmp cargo test extension_policy ext_conformance",
+            ],
+            "claim_boundary_text": (
+                "Permission drift detection does not mutate installed extensions, "
+                "manifests, user config, or vendored artifacts."
+            ),
+        },
+        {
+            "bead_id": "bd-63x3v.8.6",
+            "commit": "f9fdfc063ee0e94002f491b4f4c499d7c788cc49",
+            "code_paths": ["scripts/schedule_validation_evidence_refresh.py"],
+            "test_paths": ["scripts/schedule_validation_evidence_refresh.py"],
+            "docs_or_evidence_paths": ["scripts/schedule_validation_evidence_refresh.py"],
+            "validation_commands": [
+                "python3 scripts/schedule_validation_evidence_refresh.py --self-test",
+            ],
+            "claim_boundary_text": (
+                "Validation refresh scheduling does not run cargo, overwrite "
+                "evidence, or weaken strict drop-in claim gates."
+            ),
+        },
+    ]
+    for row in rows:
+        issue = issues.get(row["bead_id"]) or {}
+        row["status"] = issue.get("status")
+        row["title"] = issue.get("title")
+        row["close_reason"] = issue.get("close_reason")
+    return rows
+
+
+def adaptive_execution_source_boundary_checks() -> list[dict[str, Any]]:
+    return [
+        {
+            "id": "beads_are_source_of_truth",
+            "status": "pass",
+            "evidence": [".beads/issues.jsonl"],
+            "boundary": "Beads issue state and close reasons remain the work ledger.",
+        },
+        {
+            "id": "agent_mail_is_coordination_only",
+            "status": "pass",
+            "evidence": ["AGENTS.md"],
+            "boundary": (
+                "Agent Mail coordinates ownership but does not replace Beads, git, "
+                "source inspection, or validation evidence."
+            ),
+        },
+        {
+            "id": "read_only_gate",
+            "status": "pass",
+            "evidence": ["scripts/build_swarm_operator_runpack.py"],
+            "boundary": "The closeout gate summarizes existing evidence and does not mutate runtime sources.",
+        },
+        {
+            "id": "rch_required_for_heavy_cargo",
+            "status": "pass",
+            "evidence": ["AGENTS.md"],
+            "boundary": "Heavy Cargo validation evidence for child work must prove RCH execution.",
+        },
+        {
+            "id": "staged_ubs_required",
+            "status": "pass",
+            "evidence": ["AGENTS.md"],
+            "boundary": "Staged UBS remains mandatory before closeout commit.",
+        },
+        {
+            "id": "beads_ledger_required",
+            "status": "pass",
+            "evidence": ["scripts/reconcile_beads_ledger.sh"],
+            "boundary": "Beads ledger reconciliation remains mandatory before closeout commit.",
+        },
+        {
+            "id": "no_release_or_dropin_claims",
+            "status": "pass",
+            "evidence": [
+                "docs/contracts/dropin-certification-contract.json",
+                "docs/evidence/dropin-certification-verdict.json",
+            ],
+            "boundary": (
+                "Fifth-wave adaptive execution closeout evidence is advisory and "
+                "does not authorize release, benchmark, capacity, performance, or strict drop-in claims."
+            ),
+        },
+        {
+            "id": "closeout_does_not_replace_child_artifacts",
+            "status": "pass",
+            "evidence": ["docs/evidence/adaptive-execution-closeout-gate.json"],
+            "boundary": (
+                "The closeout gate summarizes child evidence and does not replace "
+                "source tests, contracts, Beads, pushed commits, RCH, UBS, or CI."
+            ),
+        },
+    ]
+
+
+def build_adaptive_execution_closeout_gate_summary(
+    *,
+    generated_at: str,
+    quality_gate_results: list[dict[str, Any]],
+    issue_export_path: Path | None = None,
+    git_refs: dict[str, str | None] | None = None,
+    commit_check_override: bool | None = None,
+) -> dict[str, Any]:
+    root = repo_root()
+    script_path = root / "scripts/build_swarm_operator_runpack.py"
+    provider_streaming_path = root / "tests/provider_streaming.rs"
+    tools_path = root / "src/tools.rs"
+    session_path = root / "src/session.rs"
+    interactive_tests_path = root / "src/interactive/tests.rs"
+    extensions_path = root / "src/extensions.rs"
+    refresh_scheduler_path = root / "scripts/schedule_validation_evidence_refresh.py"
+    closeout_contract_path = root / ADAPTIVE_EXECUTION_CLOSEOUT_GATE_CONTRACT_PATH
+
+    issues = load_beads_issue_map(issue_export_path or (root / ".beads/issues.jsonl"))
+    child_artifacts = adaptive_execution_child_artifact_map(issues)
+    checklist: list[dict[str, Any]] = []
+
+    child_states = {
+        issue_id: (issues.get(issue_id) or {}).get("status")
+        for issue_id in ADAPTIVE_EXECUTION_CLOSEOUT_CHILD_BEADS
+    }
+    child_close_reasons = {
+        issue_id: (issues.get(issue_id) or {}).get("close_reason")
+        for issue_id in ADAPTIVE_EXECUTION_CLOSEOUT_CHILD_BEADS
+    }
+    missing_children = [
+        issue_id for issue_id, status in child_states.items() if status != "closed"
+    ]
+    checklist.append(
+        gate_check(
+            "child_beads_closed",
+            "All fifth-wave adaptive-execution child Beads are closed before closeout.",
+            not missing_children,
+            [
+                {
+                    "path": ".beads/issues.jsonl",
+                    "child_statuses": child_states,
+                    "close_reasons": child_close_reasons,
+                }
+            ],
+            issue=f"children not closed: {', '.join(missing_children)}"
+            if missing_children
+            else None,
+        )
+    )
+
+    commits = [
+        str(row.get("commit"))
+        for row in child_artifacts
+        if isinstance(row.get("commit"), str)
+    ]
+    artifact_paths = sorted(
+        {
+            path
+            for row in child_artifacts
+            for key in ("code_paths", "test_paths", "docs_or_evidence_paths")
+            for path in row.get(key, [])
+        }
+    )
+    artifact_paths_exist = paths_exist(root, artifact_paths)
+    commits_present = (
+        commit_check_override
+        if commit_check_override is not None
+        else commits_exist(root, commits)
+    )
+    weak_child_rows = [
+        row["bead_id"]
+        for row in child_artifacts
+        if row.get("status") != "closed"
+        or not row.get("validation_commands")
+        or not str(row.get("claim_boundary_text") or "").strip()
+    ]
+    checklist.append(
+        gate_check(
+            "child_artifact_mapping",
+            "Every fifth-wave child bead maps to pushed commits, source paths, validation commands, and claim-boundary text.",
+            artifact_paths_exist and bool(commits_present) and not weak_child_rows,
+            [
+                {
+                    "child_artifact_map": child_artifacts,
+                    "artifact_paths_exist": artifact_paths_exist,
+                    "commits_present": bool(commits_present),
+                    "weak_child_rows": weak_child_rows,
+                }
+            ],
+            issue=(
+                "missing paths, commits, validation commands, or claim boundaries"
+                if not artifact_paths_exist or not commits_present or weak_child_rows
+                else None
+            ),
+        )
+    )
+
+    checklist.append(
+        gate_check(
+            "provider_streaming_backpressure",
+            "Provider streaming replay preserves semantic chunks while bounding low-value backpressure deltas.",
+            all(
+                (
+                    file_contains(provider_streaming_path, "BACKPRESSURE_SCHEMA"),
+                    file_contains(provider_streaming_path, "semantic_count"),
+                    file_contains(provider_streaming_path, "coalesced_or_buffered_count"),
+                    file_contains(provider_streaming_path, "max_queue_depth"),
+                )
+            ),
+            [{"path": "tests/provider_streaming.rs"}],
+        )
+    )
+    checklist.append(
+        gate_check(
+            "tool_artifact_lifecycle",
+            "Tool output artifacts have bounded lifecycle metadata, redaction, retention, and safe-delete classification.",
+            all(
+                (
+                    file_contains(tools_path, "TOOL_OUTPUT_ARTIFACT_SCHEMA_V1"),
+                    file_contains(tools_path, "retention_class"),
+                    file_contains(tools_path, "safe_delete_candidate"),
+                    file_contains(tools_path, "redact_tool_output_artifact"),
+                    file_contains(tools_path, "ensure_artifact_path_under_root"),
+                )
+            ),
+            [{"path": "src/tools.rs"}],
+        )
+    )
+    checklist.append(
+        gate_check(
+            "branch_replay_minimization",
+            "Branch-heavy session replay emits bounded selected-branch evidence and explicit fallback behavior.",
+            all(
+                (
+                    file_contains(session_path, "pi.session.replay_minimization_trace.v1"),
+                    file_contains(session_path, "skipped_sibling_entries"),
+                    file_contains(session_path, "bounded_selected_branch"),
+                    file_contains(session_path, "cold_start_replay_minimization_bounds_branch_heavy"),
+                )
+            ),
+            [{"path": "src/session.rs"}],
+        )
+    )
+    checklist.append(
+        gate_check(
+            "tui_degradation_drill",
+            "TUI degradation drill preserves semantic output and user input under sustained event pressure.",
+            all(
+                (
+                    file_contains(interactive_tests_path, "pi.tui.degradation_drill.v1"),
+                    file_contains(interactive_tests_path, "redraw_count"),
+                    file_contains(interactive_tests_path, "coalesced_count"),
+                    file_contains(interactive_tests_path, "preserved_input_count"),
+                    file_contains(interactive_tests_path, "tui_degradation_drill_preserves_input"),
+                )
+            ),
+            [{"path": "src/interactive/tests.rs"}],
+        )
+    )
+    checklist.append(
+        gate_check(
+            "permission_drift_detector",
+            "Extension permission drift detector fails closed on capability expansion without trustworthy provenance.",
+            all(
+                (
+                    file_contains(extensions_path, "ExtensionPermissionDriftReport"),
+                    file_contains(extensions_path, "ExtensionPermissionDriftClass"),
+                    file_contains(extensions_path, "ExtensionPermissionDriftVerdict"),
+                    file_contains(extensions_path, "detect_extension_permission_drift"),
+                    file_contains(extensions_path, "ExtensionPermissionDriftVerdict::FailClosed"),
+                )
+            ),
+            [{"path": "src/extensions.rs"}],
+        )
+    )
+    checklist.append(
+        gate_check(
+            "validation_refresh_scheduler",
+            "Validation refresh scheduler ranks stale evidence by value, cost, duplicate coverage, headroom, and dirty state without running validation.",
+            all(
+                (
+                    file_contains(refresh_scheduler_path, "pi.validation.refresh_scheduler.v1"),
+                    file_contains(refresh_scheduler_path, "must-refresh"),
+                    file_contains(refresh_scheduler_path, "duplicate-covered"),
+                    file_contains(refresh_scheduler_path, "blocked-by-headroom"),
+                    file_contains(refresh_scheduler_path, "blocked-by-dirty-worktree"),
+                )
+            ),
+            [{"path": "scripts/schedule_validation_evidence_refresh.py"}],
+        )
+    )
+
+    source_boundaries = adaptive_execution_source_boundary_checks()
+    boundary_ids = {item["id"] for item in source_boundaries}
+    missing_boundaries = set(ADAPTIVE_EXECUTION_CLOSEOUT_REQUIRED_SOURCE_BOUNDARIES) - boundary_ids
+    checklist.append(
+        gate_check(
+            "source_boundaries",
+            "Closeout source boundaries preserve Beads, Agent Mail, RCH, UBS, ledger, child-artifact, and release-claim authorities.",
+            not missing_boundaries,
+            source_boundaries,
+            issue=(
+                "missing source boundary checks: " + ", ".join(sorted(missing_boundaries))
+                if missing_boundaries
+                else None
+            ),
+        )
+    )
+
+    if git_refs is None:
+        head = git_value(["git", "rev-parse", "HEAD"], root)
+        origin_main = git_value(["git", "rev-parse", "origin/main"], root)
+        origin_master = git_value(["git", "rev-parse", "origin/master"], root)
+    else:
+        head = git_refs.get("head")
+        origin_main = git_refs.get("origin_main")
+        origin_master = git_refs.get("origin_master")
+    pushed = bool(head and head == origin_main == origin_master)
+    checklist.append(
+        gate_check(
+            "pushed_commits",
+            "All prerequisite child commits are pushed to origin/main and legacy origin/master before final closeout generation.",
+            pushed,
+            [
+                {
+                    "head_before_closeout_commit": head,
+                    "origin_main_before_closeout_commit": origin_main,
+                    "origin_legacy_mirror_before_closeout_commit": origin_master,
+                    "pushed_remote_refs_equal_head": pushed,
+                    "child_commits": commits,
+                }
+            ],
+            issue=None if pushed else "HEAD is not synchronized with both remotes",
+        )
+    )
+
+    quality_by_id = {item["id"]: item for item in quality_gate_results}
+    missing_quality = [
+        gate_id
+        for gate_id in ADAPTIVE_EXECUTION_CLOSEOUT_REQUIRED_QUALITY_GATES
+        if quality_by_id.get(gate_id, {}).get("status") != "pass"
+    ]
+    checklist.append(
+        gate_check(
+            "quality_gates",
+            "Required closeout quality gates passed for the script, contract, UBS, and Beads ledger.",
+            not missing_quality,
+            [
+                {
+                    "required_quality_gates": list(
+                        ADAPTIVE_EXECUTION_CLOSEOUT_REQUIRED_QUALITY_GATES
+                    ),
+                    "provided_quality_gates": quality_gate_results,
+                    "heavy_cargo_required_for_closeout_script": False,
+                }
+            ],
+            issue=(
+                "missing or failing quality gates: " + ", ".join(missing_quality)
+                if missing_quality
+                else None
+            ),
+        )
+    )
+
+    missing_checks = [
+        item["id"]
+        for item in checklist
+        if item.get("status") != "pass"
+    ]
+    final_gate_issue = issues.get("bd-63x3v.8.7") or {}
+    parent_issue = issues.get("bd-63x3v.8") or {}
+    status = "pass" if not missing_checks else "fail"
+    summary = {
+        "schema": ADAPTIVE_EXECUTION_CLOSEOUT_GATE_SCHEMA,
+        "generated_at": generated_at,
+        "status": status,
+        "purpose": "prompt_to_artifact_adaptive_execution_closeout_gate_not_source_of_truth",
+        "parent_epic": {
+            "id": "bd-63x3v.8",
+            "status": parent_issue.get("status"),
+            "title": parent_issue.get("title"),
+        },
+        "final_gate_bead": {
+            "id": "bd-63x3v.8.7",
+            "status": final_gate_issue.get("status"),
+            "assignee": final_gate_issue.get("assignee"),
+        },
+        "required_checks": list(ADAPTIVE_EXECUTION_CLOSEOUT_REQUIRED_CHECKS),
+        "child_artifact_map": child_artifacts,
+        "source_boundary_checks": source_boundaries,
+        "quality_gate_results": quality_gate_results,
+        "checklist": checklist,
+        "missing_checks": missing_checks,
+        "remaining_follow_ups": [],
+        "known_limitations": [
+            "Fifth-wave adaptive execution closeout evidence is advisory operator evidence only.",
+            "Provider, tool, session, TUI, extension, and validation-refresh proofs remain their own sources of truth.",
+            "This closeout does not authorize release, benchmark, capacity, performance, or strict drop-in claims.",
+        ],
+        "claim_boundaries": {
+            "strict_dropin_or_release_claim_authorized": False,
+            "performance_or_capacity_claim_authorized": False,
+            "closeout_mutates_sources": False,
+            "closeout_replaces_child_artifacts": False,
+            "allowed_claim": "advisory fifth-wave adaptive execution closeout evidence only",
+        },
+        "follow_up_required": bool(missing_checks),
+        "follow_up_beads": [
+            {
+                "title": f"[ADAPTIVE-EXECUTION-GATE] Fix missing {check_id}",
+                "type": "task",
+                "priority": 2,
+                "source_check": check_id,
+            }
+            for check_id in missing_checks
+        ],
+        "decision": (
+            "close_final_gate_and_parent_epic"
+            if status == "pass"
+            else "file_follow_up_beads_before_closing_epic"
+        ),
+        "epic_can_close_after_this_commit": status == "pass",
+    }
+    assert_adaptive_execution_closeout_gate_contract(summary)
+    return summary
+
+
+def assert_adaptive_execution_closeout_gate_contract(summary: dict[str, Any]) -> None:
+    root = repo_root()
+    contract_path = root / ADAPTIVE_EXECUTION_CLOSEOUT_GATE_CONTRACT_PATH
+    try:
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise AssertionError(f"missing adaptive execution closeout gate contract: {contract_path}") from exc
+    except json.JSONDecodeError as exc:
+        raise AssertionError(
+            f"adaptive execution closeout gate contract is malformed JSON: {contract_path}: {exc}"
+        ) from exc
+    assert contract.get("schema") == ADAPTIVE_EXECUTION_CLOSEOUT_GATE_CONTRACT_SCHEMA
+    assert contract.get("decision_gate_schema") == ADAPTIVE_EXECUTION_CLOSEOUT_GATE_SCHEMA
+    assert summary.get("schema") == contract["decision_gate_schema"]
+    assert summary.get("purpose") == contract.get("purpose")
+    assert summary.get("status") in set(contract.get("allowed_statuses", []))
+    assert summary.get("decision") in set(contract.get("allowed_decisions", []))
+    for key in contract.get("required_top_level_keys", []):
+        assert key in summary, f"missing top-level adaptive execution closeout-gate key: {key}"
+    checks = summary.get("checklist")
+    assert isinstance(checks, list) and checks
+    check_by_id = {
+        item.get("id"): item
+        for item in checks
+        if isinstance(item, dict)
+    }
+    missing_required = set(contract.get("required_check_ids", [])) - set(check_by_id)
+    assert not missing_required, (
+        f"adaptive execution closeout gate missing checks: {sorted(missing_required)}"
+    )
+    for check in checks:
+        assert isinstance(check, dict)
+        assert check.get("status") in set(contract.get("allowed_check_statuses", []))
+        assert check.get("requirement")
+        evidence = check.get("evidence")
+        assert isinstance(evidence, list) and evidence
+    child_map = summary.get("child_artifact_map")
+    assert isinstance(child_map, list) and child_map
+    mapped_children = {
+        row.get("bead_id")
+        for row in child_map
+        if isinstance(row, dict)
+    }
+    missing_children = set(contract.get("required_child_bead_ids", [])) - mapped_children
+    assert not missing_children, (
+        f"adaptive execution closeout gate missing child mapping: {sorted(missing_children)}"
+    )
+    for row in child_map:
+        assert isinstance(row.get("validation_commands"), list) and row.get(
+            "validation_commands"
+        )
+        assert str(row.get("claim_boundary_text") or "").strip()
+    source_boundaries = summary.get("source_boundary_checks")
+    assert isinstance(source_boundaries, list) and source_boundaries
+    boundary_ids = {
+        row.get("id")
+        for row in source_boundaries
+        if isinstance(row, dict)
+    }
+    missing_boundaries = set(contract.get("required_source_boundary_ids", [])) - boundary_ids
+    assert not missing_boundaries, (
+        f"adaptive execution closeout gate missing source boundaries: {sorted(missing_boundaries)}"
+    )
+    quality = check_by_id.get("quality_gates", {})
+    evidence = quality.get("evidence", [])
+    assert isinstance(evidence, list) and evidence
+    payload = evidence[0]
+    assert isinstance(payload, dict)
+    required_quality = set(contract.get("required_quality_gate_ids", []))
+    provided = {
+        item.get("id")
+        for item in payload.get("provided_quality_gates", [])
+        if isinstance(item, dict) and item.get("status") == "pass"
+    }
+    if summary.get("status") == "pass":
+        assert set(summary.get("missing_checks", [])) == set()
+        assert provided.issuperset(required_quality)
+        assert summary.get("epic_can_close_after_this_commit") is True
+        claim_boundaries = summary.get("claim_boundaries")
+        assert isinstance(claim_boundaries, dict)
+        assert claim_boundaries.get("strict_dropin_or_release_claim_authorized") is False
+        assert claim_boundaries.get("performance_or_capacity_claim_authorized") is False
+        assert claim_boundaries.get("closeout_mutates_sources") is False
+        assert claim_boundaries.get("closeout_replaces_child_artifacts") is False
+
+
+def write_adaptive_execution_closeout_gate_output(
+    args: argparse.Namespace,
+    summary: dict[str, Any],
+) -> None:
+    output_path = getattr(args, "out_adaptive_execution_final_gate_json", None)
+    if output_path is None:
+        return
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.exists():
+        raise RunpackError(
+            f"refusing to overwrite adaptive execution final gate: {output_path}"
+        )
+    output_path.write_text(json_dumps(summary, pretty=True), encoding="utf-8")
+
+
 def run_self_test() -> int:
     workspace = Path(tempfile.mkdtemp(prefix="pi_swarm_runpack_"))
     generated_at = "2026-05-09T09:00:00+00:00"
@@ -17413,6 +18053,92 @@ def run_self_test() -> int:
         assert fourth_wave_final_gate["follow_up_required"] is False
         assert not fourth_wave_final_gate["follow_up_beads"]
         assert fourth_wave_final_gate["child_artifact_map"]
+        adaptive_execution_gate_issues = [
+            {
+                "id": "bd-63x3v.8",
+                "title": "Swarm adaptive execution fifth-wave roadmap",
+                "status": "deferred",
+            },
+            {
+                "id": "bd-63x3v.8.7",
+                "title": "Add fifth-wave adaptive execution closeout gate",
+                "status": "in_progress",
+                "assignee": "AmberStone",
+            },
+        ]
+        adaptive_execution_gate_issues.extend(
+            {
+                "id": issue_id,
+                "status": "closed",
+                "close_reason": f"{issue_id} self-test evidence closed",
+            }
+            for issue_id in ADAPTIVE_EXECUTION_CLOSEOUT_CHILD_BEADS
+        )
+        adaptive_execution_gate_issues_path = (
+            workspace / "adaptive-execution-final-gate-issues.jsonl"
+        )
+        adaptive_execution_gate_issues_path.write_text(
+            "\n".join(json_dumps(issue) for issue in adaptive_execution_gate_issues) + "\n",
+            encoding="utf-8",
+        )
+        adaptive_execution_final_gate_quality = [
+            {
+                "id": "py_compile",
+                "status": "pass",
+                "command": "python3 -m py_compile scripts/build_swarm_operator_runpack.py",
+            },
+            {
+                "id": "runpack_self_test",
+                "status": "pass",
+                "command": "python3 scripts/build_swarm_operator_runpack.py --self-test",
+            },
+            {
+                "id": "json_contracts",
+                "status": "pass",
+                "command": (
+                    "python3 -m json.tool "
+                    "docs/contracts/adaptive-execution-closeout-gate-contract.json"
+                ),
+            },
+            {
+                "id": "git_diff_check",
+                "status": "pass",
+                "command": "git diff --check",
+            },
+            {
+                "id": "staged_ubs",
+                "status": "pass",
+                "command": "timeout 120s ubs --staged --only=rust .",
+            },
+            {
+                "id": "beads_ledger_reconcile",
+                "status": "pass",
+                "command": "./scripts/reconcile_beads_ledger.sh",
+            },
+        ]
+        adaptive_execution_final_gate = build_adaptive_execution_closeout_gate_summary(
+            generated_at=generated_at,
+            quality_gate_results=adaptive_execution_final_gate_quality,
+            issue_export_path=adaptive_execution_gate_issues_path,
+            git_refs={
+                "head": "adaptiveexecutionfinalgatefixture",
+                "origin_main": "adaptiveexecutionfinalgatefixture",
+                "origin_master": "adaptiveexecutionfinalgatefixture",
+            },
+            commit_check_override=True,
+        )
+        assert (
+            adaptive_execution_final_gate["schema"]
+            == ADAPTIVE_EXECUTION_CLOSEOUT_GATE_SCHEMA
+        )
+        assert adaptive_execution_final_gate["status"] == "pass"
+        assert (
+            adaptive_execution_final_gate["decision"]
+            == "close_final_gate_and_parent_epic"
+        )
+        assert adaptive_execution_final_gate["follow_up_required"] is False
+        assert not adaptive_execution_final_gate["follow_up_beads"]
+        assert adaptive_execution_final_gate["child_artifact_map"]
         no_tail_args = argparse.Namespace(**{**vars(args), "tail_latency_json": None})
         no_tail_runpack = build_runpack(no_tail_args)
         assert "tail_latency" not in no_tail_runpack
@@ -17822,6 +18548,21 @@ def parse_args() -> argparse.Namespace:
         help="print the final fourth-wave self-healing closeout gate JSON",
     )
     parser.add_argument(
+        "--run-adaptive-execution-final-gate",
+        action="store_true",
+        help="build the final prompt-to-artifact fifth-wave adaptive execution closeout gate",
+    )
+    parser.add_argument(
+        "--out-adaptive-execution-final-gate-json",
+        type=Path,
+        help="write pi.swarm.adaptive_execution.closeout_gate.v1 JSON; refuses to overwrite",
+    )
+    parser.add_argument(
+        "--print-adaptive-execution-final-gate",
+        action="store_true",
+        help="print the final fifth-wave adaptive execution closeout gate JSON",
+    )
+    parser.add_argument(
         "--quality-gate-result",
         dest="quality_gate_results",
         action="append",
@@ -17890,11 +18631,16 @@ def main() -> int:
         args.out_fourth_wave_final_gate_json
         or args.print_fourth_wave_final_gate
     )
+    adaptive_execution_final_gate_options_used = (
+        args.out_adaptive_execution_final_gate_json
+        or args.print_adaptive_execution_final_gate
+    )
     final_gate_modes = [
         args.run_autopilot_final_gate,
         args.run_context_intelligence_final_gate,
         args.run_runtime_intelligence_final_gate,
         args.run_fourth_wave_final_gate,
+        args.run_adaptive_execution_final_gate,
     ]
     if sum(1 for used in final_gate_modes if used) > 1:
         print("ERROR: run only one final-gate mode at a time", file=sys.stderr)
@@ -17923,11 +18669,21 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
+    if (
+        adaptive_execution_final_gate_options_used
+        and not args.run_adaptive_execution_final_gate
+    ):
+        print(
+            "ERROR: adaptive-execution final-gate options require --run-adaptive-execution-final-gate",
+            file=sys.stderr,
+        )
+        return 2
     if args.quality_gate_results and not (
         args.run_autopilot_final_gate
         or args.run_context_intelligence_final_gate
         or args.run_runtime_intelligence_final_gate
         or args.run_fourth_wave_final_gate
+        or args.run_adaptive_execution_final_gate
     ):
         print("ERROR: --quality-gate-result requires a final-gate run mode", file=sys.stderr)
         return 2
@@ -17939,6 +18695,18 @@ def main() -> int:
         )
         return 2
     try:
+        if args.run_adaptive_execution_final_gate:
+            summary = build_adaptive_execution_closeout_gate_summary(
+                generated_at=args.generated_at or utc_now_iso(),
+                quality_gate_results=parse_quality_gate_results(args.quality_gate_results),
+            )
+            write_adaptive_execution_closeout_gate_output(args, summary)
+            if (
+                args.print_adaptive_execution_final_gate
+                or args.out_adaptive_execution_final_gate_json is None
+            ):
+                print(json_dumps(summary, pretty=True))
+            return 0
         if args.run_fourth_wave_final_gate:
             summary = build_fourth_wave_closeout_gate_summary(
                 generated_at=args.generated_at or utc_now_iso(),
@@ -18088,6 +18856,7 @@ def main() -> int:
         and not args.out_context_intelligence_final_gate_json
         and not args.out_runtime_intelligence_final_gate_json
         and not args.out_fourth_wave_final_gate_json
+        and not args.out_adaptive_execution_final_gate_json
         and not args.print_autopilot_input_pack
         and not args.print_autopilot_plan
         and not args.print_action_plan
@@ -18095,6 +18864,7 @@ def main() -> int:
         and not args.print_context_intelligence_final_gate
         and not args.print_runtime_intelligence_final_gate
         and not args.print_fourth_wave_final_gate
+        and not args.print_adaptive_execution_final_gate
     ):
         print(json_dumps(runpack, pretty=True))
     return 0
