@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -43,6 +44,7 @@ DEFERRED_PLANNING_TERMS = (
 AGENT_MAIL_SCHEMA_CORRUPT_FIXTURE = Path(
     "tests/fixtures/agent_mail/schema_corrupt_health.json"
 )
+CLOSEOUT_FRESHNESS_CHECKER = Path("scripts/check_closeout_gate_freshness.py")
 
 
 @dataclass(frozen=True)
@@ -98,6 +100,46 @@ def read_json(path: Path | None) -> LoadedJson:
 
 def read_fixture_json(repo_root: Path, relative_path: Path) -> LoadedJson:
     return read_json(repo_root / relative_path)
+
+
+def run_default_closeout_freshness(repo_root: Path) -> LoadedJson:
+    checker_path = repo_root / CLOSEOUT_FRESHNESS_CHECKER
+    source = f"generated:{CLOSEOUT_FRESHNESS_CHECKER.as_posix()}"
+    if not checker_path.exists():
+        return LoadedJson(path=source, payload=None, error=f"{checker_path}: file does not exist")
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(checker_path),
+            "--repo-root",
+            str(repo_root),
+            "--compact",
+        ],
+        cwd=repo_root,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    stdout = completed.stdout.strip()
+    if not stdout:
+        message = f"closeout freshness checker emitted no JSON (exit {completed.returncode})"
+        if completed.stderr.strip():
+            message = f"{message}: {completed.stderr.strip()}"
+        return LoadedJson(path=source, payload=None, error=message)
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        message = f"closeout freshness checker emitted malformed JSON: {exc}"
+        if completed.stderr.strip():
+            message = f"{message}: {completed.stderr.strip()}"
+        return LoadedJson(path=source, payload=None, error=message)
+    if completed.returncode not in {0, 1}:
+        message = f"closeout freshness checker exited {completed.returncode}"
+        if completed.stderr.strip():
+            message = f"{message}: {completed.stderr.strip()}"
+        return LoadedJson(path=source, payload=payload, error=message)
+    return LoadedJson(path=source, payload=payload, error=None)
 
 
 def read_issues(path: Path) -> tuple[list[dict[str, Any]], str | None]:
@@ -1150,6 +1192,58 @@ def run_self_test() -> int:
             clean_report,
         )
 
+        missing_closeout_report = build_report(
+            repo_root=root,
+            beads_path=clean_beads,
+            br_ready_json=LoadedJson(None, [], None),
+            bv_plan_json=LoadedJson(None, {"plan": {"tracks": []}}, None),
+            agent_mail_health_json=LoadedJson(None, None, None),
+            validation_broker_json=LoadedJson(None, None, None),
+            rch_json=LoadedJson(None, None, None),
+            closeout_freshness_json=LoadedJson(None, None, None),
+            now=now,
+            stale_hours=DEFAULT_STALE_IN_PROGRESS_HOURS,
+        )
+        assert_condition(
+            missing_closeout_report["status"] == "needs_attention",
+            "missing closeout freshness should block queue_clean",
+            missing_closeout_report,
+        )
+        assert_condition(
+            missing_closeout_report["next_actions"][0]["action"] == "create_or_finish_audit_bead",
+            "missing closeout freshness should produce an audit/freshness action",
+            missing_closeout_report,
+        )
+
+        failing_closeout_json = write_json(
+            root / "closeout-failing.json",
+            {"schema": "fixture.closeout.v1", "status": "fail"},
+        )
+        failing_closeout_report = build_report(
+            repo_root=root,
+            beads_path=clean_beads,
+            br_ready_json=LoadedJson(None, [], None),
+            bv_plan_json=LoadedJson(None, {"plan": {"tracks": []}}, None),
+            agent_mail_health_json=LoadedJson(None, None, None),
+            validation_broker_json=LoadedJson(None, None, None),
+            rch_json=LoadedJson(None, None, None),
+            closeout_freshness_json=read_json(failing_closeout_json),
+            now=now,
+            stale_hours=DEFAULT_STALE_IN_PROGRESS_HOURS,
+        )
+        assert_condition(
+            failing_closeout_report["status"] == "needs_attention",
+            "failing closeout freshness should block queue_clean",
+            failing_closeout_report,
+        )
+        assert_condition(
+            failing_closeout_report["closeout_freshness"]["warnings"] == [
+                "closeout freshness is not passing"
+            ],
+            "failing closeout freshness should preserve warning text",
+            failing_closeout_report,
+        )
+
         malformed_ready_json = root / "malformed-ready.json"
         malformed_ready_json.write_text("{", encoding="utf-8")
         malformed_ready_report = build_report(
@@ -1635,6 +1729,11 @@ def main() -> int:
     repo_root = args.repo_root.resolve()
     beads_path = resolve_input_path(repo_root, args.beads_jsonl) or repo_root / ".beads/issues.jsonl"
     assert beads_path is not None
+    closeout_freshness_json = (
+        read_json(resolve_input_path(repo_root, args.closeout_freshness_json))
+        if args.closeout_freshness_json is not None
+        else run_default_closeout_freshness(repo_root)
+    )
     report = build_report(
         repo_root=repo_root,
         beads_path=beads_path,
@@ -1643,7 +1742,7 @@ def main() -> int:
         agent_mail_health_json=read_json(resolve_input_path(repo_root, args.agent_mail_health_json)),
         validation_broker_json=read_json(resolve_input_path(repo_root, args.validation_broker_json)),
         rch_json=read_json(resolve_input_path(repo_root, args.rch_json)),
-        closeout_freshness_json=read_json(resolve_input_path(repo_root, args.closeout_freshness_json)),
+        closeout_freshness_json=closeout_freshness_json,
         now=utc_now(),
         stale_hours=args.stale_in_progress_hours,
     )
