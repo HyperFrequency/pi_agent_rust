@@ -41,6 +41,10 @@ PREDICTIVE_TELEMETRY_LEDGER_SCHEMA = "pi.swarm.predictive_telemetry_ledger.v1"
 PREDICTIVE_TELEMETRY_LEDGER_CONTRACT_SCHEMA = (
     "pi.swarm.predictive_telemetry_ledger_contract.v1"
 )
+VALIDATION_SCHEDULER_PLAN_SCHEMA = "pi.swarm.validation_scheduler_plan.v1"
+VALIDATION_SCHEDULER_PLAN_CONTRACT_SCHEMA = (
+    "pi.swarm.validation_scheduler_plan_contract.v1"
+)
 TEMP_ARTIFACT_INVENTORY_SCHEMA = "pi.swarm.temp_artifact_inventory.v1"
 STALE_EVIDENCE_RENEWAL_QUEUE_SCHEMA = "pi.swarm.stale_evidence_renewal_queue.v1"
 FLIGHT_RECORDER_REPORT_SCHEMA = "pi.swarm.flight_recorder.report.v1"
@@ -142,6 +146,9 @@ TURN_PRESSURE_LEDGER_CONTRACT_PATH = Path(
 )
 PREDICTIVE_TELEMETRY_LEDGER_CONTRACT_PATH = Path(
     "docs/contracts/predictive-swarm-telemetry-ledger-contract.json"
+)
+VALIDATION_SCHEDULER_PLAN_CONTRACT_PATH = Path(
+    "docs/contracts/validation-scheduler-plan-contract.json"
 )
 AUTOPILOT_INPUT_PACK_CONTRACT_PATH = Path(
     "docs/contracts/swarm-autopilot-input-pack-contract.json"
@@ -371,6 +378,16 @@ PREDICTIVE_TELEMETRY_ALLOWED_STATUSES = (
     "missing",
 )
 PREDICTIVE_TELEMETRY_CONFIDENCE = ("high", "medium", "low")
+VALIDATION_SCHEDULER_GROUP_IDS = (
+    "fast_script_checks",
+    "evidence_regeneration",
+    "focused_tests",
+    "e2e_conformance",
+    "all_targets_check",
+    "clippy",
+)
+VALIDATION_SCHEDULER_ACTIONS = ("would_run", "defer", "block")
+VALIDATION_SCHEDULER_STATUSES = ("ready", "degraded", "blocked")
 PREDICTIVE_OBSERVATION_SOURCE_IDS: dict[str, tuple[str, ...]] = {
     "validation_pressure": ("cargo_admission", "rch_artifact_sync"),
     "coordination_pressure": ("doctor_swarm", "smoke_harness", "beads"),
@@ -4413,6 +4430,443 @@ def build_predictive_telemetry_ledger(
     return ledger
 
 
+def validation_scheduler_changed_paths(
+    runpack: dict[str, Any], max_items: int
+) -> list[str]:
+    git_state = runpack.get("git_state") if isinstance(runpack.get("git_state"), dict) else {}
+    lines = (
+        git_state.get("porcelain_lines")
+        if isinstance(git_state.get("porcelain_lines"), list)
+        else []
+    )
+    paths: list[str] = []
+    for line in lines:
+        text = str(line)
+        path = text[3:] if len(text) > 3 else text
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        path = path.strip()
+        if path:
+            paths.append(path)
+    if not paths:
+        sample = git_state.get("sample") if isinstance(git_state.get("sample"), list) else []
+        for entry in sample:
+            if not isinstance(entry, dict):
+                continue
+            path = str(entry.get("path") or "").strip()
+            if " -> " in path:
+                path = path.split(" -> ", 1)[1].strip()
+            if path:
+                paths.append(path)
+    return bounded(paths, max_items)
+
+
+def validation_scheduler_change_profile(
+    runpack: dict[str, Any],
+    max_items: int,
+) -> dict[str, Any]:
+    paths = validation_scheduler_changed_paths(runpack, max_items)
+    rust_paths = [
+        path
+        for path in paths
+        if path.endswith(".rs")
+        or path in {"Cargo.toml", "Cargo.lock", "rust-toolchain.toml"}
+    ]
+    python_paths = [path for path in paths if path.endswith(".py")]
+    docs_paths = [
+        path
+        for path in paths
+        if path.endswith((".md", ".json", ".jsonl", ".yaml", ".yml"))
+        or path.startswith("docs/")
+    ]
+    if not paths:
+        profile_id = "empty_queue"
+    elif rust_paths and python_paths:
+        profile_id = "mixed_python_rust"
+    elif rust_paths:
+        profile_id = "rust_only"
+    elif python_paths:
+        profile_id = "python_only"
+    elif len(docs_paths) == len(paths):
+        profile_id = "docs_only"
+    else:
+        profile_id = "mixed_non_rust"
+    return {
+        "profile_id": profile_id,
+        "changed_path_count": len(paths),
+        "changed_paths": paths,
+        "rust_changed": bool(rust_paths),
+        "python_changed": bool(python_paths),
+        "docs_only": profile_id == "docs_only",
+        "mixed_python_rust": profile_id == "mixed_python_rust",
+    }
+
+
+def validation_scheduler_rch_posture(runpack: dict[str, Any]) -> dict[str, Any]:
+    rch = runpack.get("rch_admission") if isinstance(runpack.get("rch_admission"), dict) else {}
+    queue = rch.get("queue_forecast") if isinstance(rch.get("queue_forecast"), dict) else {}
+    decision = rch.get("decision")
+    recommended_action = queue.get("recommended_action")
+    slot_pressure = queue.get("slot_pressure")
+    workers_healthy = int_value(queue.get("workers_healthy"))
+    source_status = rch.get("status")
+    backoff_reasons: list[str] = []
+    if source_status not in {None, "ok"}:
+        backoff_reasons.append(f"cargo_admission_status={source_status}")
+    if decision in {"backoff", "degraded", "deny"}:
+        backoff_reasons.append(f"decision={decision}")
+    if recommended_action in {"backoff", "split"}:
+        backoff_reasons.append(f"queue_recommended_action={recommended_action}")
+    if slot_pressure in {"saturated", "high"}:
+        backoff_reasons.append(f"slot_pressure={slot_pressure}")
+    if workers_healthy is not None and workers_healthy <= 0:
+        backoff_reasons.append("workers_healthy=0")
+    heavy_allowed = not backoff_reasons and decision in {"allow", "admit", None}
+    return {
+        "source_status": source_status,
+        "decision": decision,
+        "recommended_action": recommended_action,
+        "slot_pressure": slot_pressure,
+        "queue_depth": queue.get("queue_depth"),
+        "active_builds": queue.get("active_builds"),
+        "queued_builds": queue.get("queued_builds"),
+        "workers_healthy": queue.get("workers_healthy"),
+        "workers_total": queue.get("workers_total"),
+        "heavy_validation_allowed": heavy_allowed,
+        "backoff_reasons": backoff_reasons,
+    }
+
+
+def validation_scheduler_predictive_summary(runpack: dict[str, Any]) -> dict[str, Any]:
+    ledger = (
+        runpack.get("predictive_telemetry_ledger")
+        if isinstance(runpack.get("predictive_telemetry_ledger"), dict)
+        else {}
+    )
+    observations = (
+        ledger.get("observations") if isinstance(ledger.get("observations"), list) else []
+    )
+    by_id = {
+        str(item.get("id")): item
+        for item in observations
+        if isinstance(item, dict) and item.get("id")
+    }
+    first_hypothesis = None
+    hypotheses = (
+        ledger.get("next_bottleneck_hypotheses")
+        if isinstance(ledger.get("next_bottleneck_hypotheses"), list)
+        else []
+    )
+    if hypotheses and isinstance(hypotheses[0], dict):
+        first_hypothesis = hypotheses[0]
+    return {
+        "schema": ledger.get("schema"),
+        "status": ledger.get("status"),
+        "validation_pressure": by_id.get("validation_pressure", {}).get("status"),
+        "coordination_pressure": by_id.get("coordination_pressure", {}).get("status"),
+        "work_queue_pressure": by_id.get("work_queue_pressure", {}).get("status"),
+        "next_bottleneck_observation": first_hypothesis.get("source_observation_id")
+        if isinstance(first_hypothesis, dict)
+        else None,
+    }
+
+
+def validation_scheduler_required_env() -> dict[str, str]:
+    return {
+        "CARGO_TARGET_DIR": "/data/tmp/pi_agent_rust_cargo/${USER:-agent}/target",
+        "TMPDIR": "/data/tmp/pi_agent_rust_cargo/${USER:-agent}/tmp",
+    }
+
+
+def rch_command(cargo_args: str) -> str:
+    env = validation_scheduler_required_env()
+    return (
+        "rch exec -- env "
+        f"CARGO_TARGET_DIR={env['CARGO_TARGET_DIR']} "
+        f"TMPDIR={env['TMPDIR']} "
+        f"cargo {cargo_args}"
+    )
+
+
+def validation_scheduler_command_catalog() -> list[dict[str, Any]]:
+    return [
+        {
+            "id": "fast_script_checks",
+            "title": "Fast script and metadata checks",
+            "command_class": "fast_script",
+            "risk": "low",
+            "estimated_cost": "low",
+            "dependency_rank": 1,
+            "cache_reuse": "not_applicable",
+            "requires_rch": False,
+            "no_local_fallback": False,
+            "exact_commands": [
+                "python3 -m py_compile scripts/build_swarm_operator_runpack.py",
+                "python3 -m json.tool docs/contracts/validation-scheduler-plan-contract.json >/dev/null",
+                "git diff --check",
+                "./scripts/reconcile_beads_ledger.sh",
+            ],
+            "evidence_paths": [
+                "git_state.porcelain_lines",
+                "validation_scheduler_plan.contract",
+            ],
+        },
+        {
+            "id": "evidence_regeneration",
+            "title": "Runpack evidence regeneration self-test",
+            "command_class": "script_self_test",
+            "risk": "low",
+            "estimated_cost": "medium",
+            "dependency_rank": 2,
+            "cache_reuse": "not_applicable",
+            "requires_rch": False,
+            "no_local_fallback": False,
+            "exact_commands": [
+                "python3 scripts/build_swarm_operator_runpack.py --self-test"
+            ],
+            "evidence_paths": [
+                "predictive_telemetry_ledger.status",
+                "validation_scheduler_plan.summary",
+            ],
+        },
+        {
+            "id": "focused_tests",
+            "title": "Focused Rust tests for touched surfaces",
+            "command_class": "cargo_test_focused",
+            "risk": "medium",
+            "estimated_cost": "medium",
+            "dependency_rank": 3,
+            "cache_reuse": "target_dir_reuse_if_clean",
+            "requires_rch": True,
+            "no_local_fallback": True,
+            "exact_commands": [rch_command("test conformance")],
+            "evidence_paths": [
+                "git_state.porcelain_lines",
+                "rch_admission.queue_forecast",
+            ],
+        },
+        {
+            "id": "e2e_conformance",
+            "title": "E2E and conformance validation",
+            "command_class": "cargo_test_e2e_conformance",
+            "risk": "medium",
+            "estimated_cost": "high",
+            "dependency_rank": 4,
+            "cache_reuse": "target_dir_reuse_if_clean",
+            "requires_rch": True,
+            "no_local_fallback": True,
+            "exact_commands": [rch_command("test e2e")],
+            "evidence_paths": [
+                "smoke_harness.scenario_statuses",
+                "rch_admission.queue_forecast",
+            ],
+        },
+        {
+            "id": "all_targets_check",
+            "title": "All-targets compiler check",
+            "command_class": "cargo_check_all_targets",
+            "risk": "high",
+            "estimated_cost": "high",
+            "dependency_rank": 5,
+            "cache_reuse": "target_dir_reuse_if_clean",
+            "requires_rch": True,
+            "no_local_fallback": True,
+            "exact_commands": [rch_command("check --all-targets")],
+            "evidence_paths": [
+                "rch_admission.decision",
+                "remote_validation_proof_ledger.summary",
+            ],
+        },
+        {
+            "id": "clippy",
+            "title": "All-targets clippy",
+            "command_class": "cargo_clippy_all_targets",
+            "risk": "high",
+            "estimated_cost": "high",
+            "dependency_rank": 6,
+            "cache_reuse": "target_dir_reuse_if_clean",
+            "requires_rch": True,
+            "no_local_fallback": True,
+            "exact_commands": [rch_command("clippy --all-targets -- -D warnings")],
+            "evidence_paths": [
+                "rch_admission.decision",
+                "remote_validation_proof_ledger.summary",
+            ],
+        },
+    ]
+
+
+def stale_target_cache_reasons(runpack: dict[str, Any]) -> list[str]:
+    inventory = (
+        runpack.get("temp_artifact_inventory")
+        if isinstance(runpack.get("temp_artifact_inventory"), dict)
+        else {}
+    )
+    entries = inventory.get("entries") if isinstance(inventory.get("entries"), list) else []
+    reasons: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("kind") not in {"cargo_target_dir", "rch_remote_target_dir"}:
+            continue
+        if entry.get("state") == "stale_candidate" or entry.get(
+            "deletion_policy"
+        ) == "deletion_protected_unknown_owner":
+            reasons.append(f"stale_target_cache={entry.get('path')}")
+    return bounded(reasons, 4)
+
+
+def schedule_validation_group(
+    group: dict[str, Any],
+    *,
+    change_profile: dict[str, Any],
+    rch_posture: dict[str, Any],
+    cache_reasons: list[str],
+) -> dict[str, Any]:
+    action = "would_run"
+    reasons: list[str] = []
+    if group.get("requires_rch"):
+        if change_profile.get("docs_only") or change_profile.get("profile_id") in {
+            "empty_queue",
+            "python_only",
+        }:
+            action = "defer"
+            reasons.append(f"change_profile={change_profile.get('profile_id')}")
+        if not rch_posture.get("heavy_validation_allowed"):
+            action = "block" if rch_posture.get("decision") == "deny" else "defer"
+            reasons.extend(rch_posture.get("backoff_reasons") or [])
+        if cache_reasons:
+            action = "defer" if action == "would_run" else action
+            reasons.extend(cache_reasons)
+    elif group.get("id") == "evidence_regeneration" and not (
+        change_profile.get("python_changed")
+        or change_profile.get("docs_only")
+        or change_profile.get("mixed_python_rust")
+    ):
+        action = "defer"
+        reasons.append("no runpack or evidence source change detected")
+    return {
+        **group,
+        "action": action,
+        "backoff_reasons": sorted(set(reasons)),
+        "required_env": validation_scheduler_required_env() if group.get("requires_rch") else {},
+        "local_fallback_rejection_reason": (
+            "RCH-required validation must not fail open into a local cargo build."
+            if group.get("requires_rch")
+            else None
+        ),
+    }
+
+
+def build_validation_scheduler_plan(
+    runpack: dict[str, Any],
+    *,
+    generated_at: datetime,
+    max_items: int,
+) -> dict[str, Any]:
+    change_profile = validation_scheduler_change_profile(runpack, max_items)
+    rch_posture = validation_scheduler_rch_posture(runpack)
+    predictive = validation_scheduler_predictive_summary(runpack)
+    cache_reasons = stale_target_cache_reasons(runpack)
+    command_groups = [
+        schedule_validation_group(
+            group,
+            change_profile=change_profile,
+            rch_posture=rch_posture,
+            cache_reasons=cache_reasons,
+        )
+        for group in validation_scheduler_command_catalog()
+    ]
+    schedule: list[dict[str, Any]] = []
+    safe_to_defer: list[dict[str, Any]] = []
+    local_fallback_rejections: list[dict[str, Any]] = []
+    for group in sorted(command_groups, key=lambda item: int_value(item["dependency_rank"])):
+        if group["action"] == "would_run":
+            for command in group["exact_commands"]:
+                schedule.append(
+                    {
+                        "rank": len(schedule) + 1,
+                        "group_id": group["id"],
+                        "action": "would_run",
+                        "command": command,
+                        "requires_rch": group["requires_rch"],
+                        "required_env": group["required_env"],
+                        "local_fallback_rejection_reason": group[
+                            "local_fallback_rejection_reason"
+                        ],
+                        "rationale": (
+                            f"{group['title']} is admitted for "
+                            f"{change_profile['profile_id']} changes."
+                        ),
+                    }
+                )
+        else:
+            safe_to_defer.append(
+                {
+                    "group_id": group["id"],
+                    "action": group["action"],
+                    "commands": group["exact_commands"],
+                    "reasons": group["backoff_reasons"],
+                    "requires_rch": group["requires_rch"],
+                    "required_env": group["required_env"],
+                    "local_fallback_rejection_reason": group[
+                        "local_fallback_rejection_reason"
+                    ],
+                }
+            )
+        if group.get("requires_rch") and group["action"] != "would_run":
+            for command in group["exact_commands"]:
+                local_fallback_rejections.append(
+                    {
+                        "group_id": group["id"],
+                        "command": command,
+                        "reason": group["local_fallback_rejection_reason"],
+                    }
+                )
+    actions = [str(group["action"]) for group in command_groups]
+    status = "ready"
+    if "block" in actions:
+        status = "blocked"
+    elif "defer" in actions:
+        status = "degraded"
+    plan = {
+        "schema": VALIDATION_SCHEDULER_PLAN_SCHEMA,
+        "generated_at": generated_at.isoformat(),
+        "status": status,
+        "purpose": "read_only_validation_scheduler_not_execution_or_rch_authority",
+        "source_runpack_schema": runpack.get("schema"),
+        "change_profile": change_profile,
+        "rch_posture": rch_posture,
+        "predictive_summary": predictive,
+        "command_groups": command_groups,
+        "would_run_order": schedule,
+        "safe_to_defer": safe_to_defer,
+        "local_fallback_rejections": local_fallback_rejections,
+        "summary": {
+            "would_run_count": len(schedule),
+            "deferred_group_count": sum(1 for group in command_groups if group["action"] == "defer"),
+            "blocked_group_count": sum(1 for group in command_groups if group["action"] == "block"),
+            "local_fallback_rejection_count": len(local_fallback_rejections),
+            "heavy_validation_allowed": rch_posture["heavy_validation_allowed"],
+        },
+        "guards": {
+            "read_only": True,
+            "no_command_execution": True,
+            "no_rch_worker_mutation": True,
+            "no_agent_mail_mutation": True,
+            "no_beads_mutation": True,
+            "no_temp_artifact_deletion": True,
+            "heavy_cargo_requires_rch": True,
+            "local_fallback_rejected": True,
+            "advisory_only": True,
+            "not_release_or_capacity_claim_evidence": True,
+            "does_not_replace_rch_or_validation_broker": True,
+        },
+    }
+    assert_validation_scheduler_plan_contract(plan)
+    return plan
+
+
 def parse_issue_list(payload: Any) -> list[dict[str, Any]]:
     if isinstance(payload, dict) and isinstance(payload.get("issues"), list):
         return [item for item in payload["issues"] if isinstance(item, dict)]
@@ -6768,6 +7222,7 @@ def summarize_git_status(source: SourcePayload, max_items: int) -> dict[str, Any
         },
         "dirty": bool(lines),
         "change_count": len(lines),
+        "porcelain_lines": bounded([str(line) for line in lines], max_items),
         "sample": bounded(entries, max_items),
         "recent_commits": bounded(payload.get("recent_commits") or [], max_items),
         "recent_remote_commits": bounded(
@@ -9614,6 +10069,12 @@ def derive_status(runpack: dict[str, Any]) -> str:
         "missing",
     }:
         status = "degraded"
+    validation_scheduler = runpack.get("validation_scheduler_plan")
+    if isinstance(validation_scheduler, dict) and validation_scheduler.get("status") in {
+        "blocked",
+        "degraded",
+    }:
+        status = "degraded"
     scorecard = runpack.get("swarm_scale_safety_scorecard")
     if isinstance(scorecard, dict) and scorecard.get("overall_status") != "ready":
         status = "degraded"
@@ -9731,6 +10192,11 @@ def build_runpack(args: argparse.Namespace) -> dict[str, Any]:
         generated_at=generated_at,
         max_items=args.max_items,
     )
+    runpack["validation_scheduler_plan"] = build_validation_scheduler_plan(
+        runpack,
+        generated_at=generated_at,
+        max_items=args.max_items,
+    )
     runpack["swarm_scale_safety_scorecard"] = build_swarm_scale_safety_scorecard(runpack)
     runpack["status"] = derive_status(runpack)
     runpack["operator_next_actions"] = operator_next_actions(runpack)
@@ -9775,6 +10241,19 @@ def operator_next_actions(runpack: dict[str, Any]) -> list[str]:
             actions.append(
                 "Inspect predictive telemetry ledger next bottleneck: "
                 f"{first.get('source_observation_id')} ({first.get('status')})"
+            )
+    validation_scheduler = runpack.get("validation_scheduler_plan")
+    if isinstance(validation_scheduler, dict):
+        summary = (
+            validation_scheduler.get("summary")
+            if isinstance(validation_scheduler.get("summary"), dict)
+            else {}
+        )
+        if validation_scheduler.get("status") in {"blocked", "degraded"}:
+            actions.append(
+                "Follow validation scheduler plan before running cargo gates: "
+                f"{summary.get('blocked_group_count')} blocked groups, "
+                f"{summary.get('deferred_group_count')} deferred groups"
             )
     proof_ledger = runpack.get("remote_validation_proof_ledger")
     if isinstance(proof_ledger, dict):
@@ -10034,6 +10513,18 @@ def render_markdown(runpack: dict[str, Any]) -> str:
             f"- Replay preview: `{preview.get('recommended_policy_id')}` "
             f"({preview.get('comparison_count')} policy comparisons)"
         )
+    validation_scheduler = runpack.get("validation_scheduler_plan")
+    if isinstance(validation_scheduler, dict):
+        summary = (
+            validation_scheduler.get("summary")
+            if isinstance(validation_scheduler.get("summary"), dict)
+            else {}
+        )
+        lines.append(
+            f"- Validation scheduler: `{validation_scheduler.get('status')}` "
+            f"({summary.get('would_run_count')} commands admitted, "
+            f"{summary.get('deferred_group_count')} groups deferred)"
+        )
     turn_pressure = runpack.get("turn_pressure_ledger")
     if isinstance(turn_pressure, dict):
         summary = (
@@ -10144,6 +10635,23 @@ def render_markdown(runpack: dict[str, Any]) -> str:
                 f"- Hypothesis `{hypothesis.get('rank')}`: "
                 f"`{hypothesis.get('source_observation_id')}` "
                 f"({hypothesis.get('confidence')})"
+            )
+    if isinstance(runpack.get("validation_scheduler_plan"), dict):
+        plan = runpack["validation_scheduler_plan"]
+        lines.extend(["", "## Validation Scheduler Plan"])
+        lines.append(f"- Schema: `{plan.get('schema')}`")
+        lines.append(f"- Status: `{plan.get('status')}`")
+        profile = plan.get("change_profile") if isinstance(plan.get("change_profile"), dict) else {}
+        lines.append(f"- Change profile: `{profile.get('profile_id')}`")
+        for item in plan.get("would_run_order", []):
+            lines.append(
+                f"- Run `{item.get('rank')}`: `{item.get('group_id')}` "
+                f"({item.get('command')})"
+            )
+        for item in plan.get("safe_to_defer", []):
+            lines.append(
+                f"- Defer `{item.get('group_id')}`: `{item.get('action')}` "
+                f"({', '.join(item.get('reasons') or [])})"
             )
     if isinstance(runpack.get("temp_artifact_inventory"), dict):
         inventory = runpack["temp_artifact_inventory"]
@@ -10273,6 +10781,21 @@ def write_predictive_telemetry_ledger_output(
             f"refusing to overwrite existing predictive telemetry ledger: {output_path}"
         )
     output_path.write_text(json_dumps(ledger, pretty=True), encoding="utf-8")
+
+
+def write_validation_scheduler_plan_output(
+    args: argparse.Namespace,
+    plan: dict[str, Any],
+) -> None:
+    output_path = getattr(args, "out_validation_scheduler_plan_json", None)
+    if output_path is None:
+        return
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.exists():
+        raise RunpackError(
+            f"refusing to overwrite existing validation scheduler plan: {output_path}"
+        )
+    output_path.write_text(json_dumps(plan, pretty=True), encoding="utf-8")
 
 
 def artifact_path(value: Path | None) -> str | None:
@@ -10549,6 +11072,9 @@ def assert_runpack_contract(runpack: dict[str, Any]) -> None:
     predictive_ledger = runpack.get("predictive_telemetry_ledger")
     assert isinstance(predictive_ledger, dict)
     assert_predictive_telemetry_ledger_contract(predictive_ledger)
+    validation_scheduler = runpack.get("validation_scheduler_plan")
+    assert isinstance(validation_scheduler, dict)
+    assert_validation_scheduler_plan_contract(validation_scheduler)
     for field in contract.get("required_source_status_fields", []):
         for source in runpack.get("source_statuses", []):
             if isinstance(source, dict) and source.get("status") == "ok":
@@ -10626,6 +11152,126 @@ def assert_predictive_telemetry_ledger_contract(ledger: dict[str, Any]) -> None:
     assert isinstance(guards, dict)
     for key in contract.get("required_true_guards", []):
         assert guards.get(key) is True, f"predictive guard not true: {key}"
+
+
+def assert_validation_scheduler_plan_contract(plan: dict[str, Any]) -> None:
+    repo_root = Path(__file__).resolve().parent.parent
+    contract_path = repo_root / VALIDATION_SCHEDULER_PLAN_CONTRACT_PATH
+    try:
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise AssertionError(
+            f"missing validation scheduler plan contract: {contract_path}"
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise AssertionError(
+            f"validation scheduler plan contract is malformed JSON: {contract_path}: {exc}"
+        ) from exc
+    assert contract.get("schema") == VALIDATION_SCHEDULER_PLAN_CONTRACT_SCHEMA
+    assert contract.get("plan_schema") == VALIDATION_SCHEDULER_PLAN_SCHEMA
+    assert plan.get("schema") == contract["plan_schema"]
+    assert plan.get("purpose") == contract.get("purpose")
+    assert plan.get("status") in set(contract.get("allowed_statuses", []))
+    for key in contract.get("required_top_level_keys", []):
+        assert key in plan, f"validation scheduler plan missing key: {key}"
+
+    change_profile = plan.get("change_profile")
+    assert isinstance(change_profile, dict)
+    for key in contract.get("required_change_profile_keys", []):
+        assert key in change_profile, f"validation scheduler change profile missing key: {key}"
+    assert change_profile.get("profile_id") in set(
+        contract.get("allowed_change_profiles", [])
+    )
+
+    rch_posture = plan.get("rch_posture")
+    assert isinstance(rch_posture, dict)
+    for key in contract.get("required_rch_posture_keys", []):
+        assert key in rch_posture, f"validation scheduler RCH posture missing key: {key}"
+
+    predictive = plan.get("predictive_summary")
+    assert isinstance(predictive, dict)
+    for key in contract.get("required_predictive_summary_keys", []):
+        assert key in predictive, f"validation scheduler predictive summary missing key: {key}"
+
+    command_groups = plan.get("command_groups")
+    assert isinstance(command_groups, list) and command_groups
+    group_ids = {item.get("id") for item in command_groups if isinstance(item, dict)}
+    assert group_ids == set(contract.get("required_group_ids", [])), (
+        f"validation scheduler groups mismatch: {sorted(group_ids)}"
+    )
+    allowed_actions = set(contract.get("allowed_actions", []))
+    allowed_costs = set(contract.get("allowed_cost_classes", []))
+    allowed_risks = set(contract.get("allowed_risk_classes", []))
+    heavy_deferred_or_blocked = False
+    for group in command_groups:
+        assert isinstance(group, dict)
+        for key in contract.get("required_group_keys", []):
+            assert key in group, f"validation scheduler group missing key: {key}"
+        assert group.get("action") in allowed_actions
+        assert group.get("estimated_cost") in allowed_costs
+        assert group.get("risk") in allowed_risks
+        assert isinstance(group.get("exact_commands"), list) and group["exact_commands"]
+        assert all(isinstance(command, str) and command for command in group["exact_commands"])
+        assert isinstance(group.get("evidence_paths"), list) and group["evidence_paths"]
+        assert isinstance(group.get("backoff_reasons"), list)
+        if group.get("requires_rch"):
+            assert group.get("no_local_fallback") is True
+            assert group.get("local_fallback_rejection_reason")
+            required_env = group.get("required_env")
+            assert isinstance(required_env, dict)
+            assert required_env.get("CARGO_TARGET_DIR")
+            assert required_env.get("TMPDIR")
+            assert all(
+                command.startswith("rch exec -- env ")
+                for command in group.get("exact_commands", [])
+            )
+            if group.get("action") != "would_run":
+                heavy_deferred_or_blocked = True
+    if rch_posture.get("heavy_validation_allowed") is False:
+        assert all(
+            group.get("action") != "would_run"
+            for group in command_groups
+            if isinstance(group, dict) and group.get("requires_rch")
+        )
+
+    ranks = [
+        item.get("rank")
+        for item in plan.get("would_run_order", [])
+        if isinstance(item, dict)
+    ]
+    assert ranks == sorted(ranks), "validation scheduler would-run order must be ranked"
+    for item in plan.get("would_run_order", []):
+        assert isinstance(item, dict)
+        for key in contract.get("required_would_run_keys", []):
+            assert key in item, f"validation scheduler would-run item missing key: {key}"
+        assert item.get("action") == "would_run"
+        assert isinstance(item.get("command"), str) and item["command"]
+    for item in plan.get("safe_to_defer", []):
+        assert isinstance(item, dict)
+        for key in contract.get("required_defer_keys", []):
+            assert key in item, f"validation scheduler defer item missing key: {key}"
+        assert item.get("action") in {"defer", "block"}
+        assert isinstance(item.get("commands"), list) and item["commands"]
+    for item in plan.get("local_fallback_rejections", []):
+        assert isinstance(item, dict)
+        for key in contract.get("required_local_fallback_rejection_keys", []):
+            assert key in item, (
+                f"validation scheduler local fallback rejection missing key: {key}"
+            )
+        assert item.get("reason")
+    if heavy_deferred_or_blocked:
+        assert plan.get("local_fallback_rejections"), (
+            "deferred or blocked RCH groups must emit local fallback rejections"
+        )
+
+    summary = plan.get("summary")
+    assert isinstance(summary, dict)
+    for key in contract.get("required_summary_keys", []):
+        assert key in summary, f"validation scheduler summary missing key: {key}"
+    guards = plan.get("guards")
+    assert isinstance(guards, dict)
+    for key in contract.get("required_true_guards", []):
+        assert guards.get(key) is True, f"validation scheduler guard not true: {key}"
 
 
 def assert_autopilot_input_pack_contract(input_pack: dict[str, Any]) -> None:
@@ -19269,6 +19915,8 @@ def run_self_test() -> int:
         out_md=workspace / "runpack.md",
         out_predictive_telemetry_ledger_json=None,
         print_predictive_telemetry_ledger=False,
+        out_validation_scheduler_plan_json=None,
+        print_validation_scheduler_plan=False,
         operator_runpack_json=None,
         out_autopilot_input_pack_json=None,
         out_autopilot_plan_json=None,
@@ -20233,6 +20881,57 @@ def run_self_test() -> int:
             predictive_ledger,
         )
         assert predictive_output_args.out_predictive_telemetry_ledger_json.exists()
+        validation_scheduler = runpack["validation_scheduler_plan"]
+        assert validation_scheduler["schema"] == VALIDATION_SCHEDULER_PLAN_SCHEMA
+        assert validation_scheduler["purpose"] == (
+            "read_only_validation_scheduler_not_execution_or_rch_authority"
+        )
+        assert validation_scheduler["status"] == "degraded"
+        assert validation_scheduler["change_profile"]["profile_id"] == "mixed_python_rust"
+        validation_groups = {
+            group["id"]: group for group in validation_scheduler["command_groups"]
+        }
+        assert set(validation_groups) == set(VALIDATION_SCHEDULER_GROUP_IDS)
+        heavy_group_ids = {
+            "focused_tests",
+            "e2e_conformance",
+            "all_targets_check",
+            "clippy",
+        }
+        for group_id in heavy_group_ids:
+            group = validation_groups[group_id]
+            assert group["action"] == "defer"
+            assert group["no_local_fallback"] is True
+            assert group["required_env"] == validation_scheduler_required_env()
+            assert group["local_fallback_rejection_reason"]
+            assert all(
+                command.startswith("rch exec -- env ")
+                for command in group["exact_commands"]
+            )
+        assert validation_groups["all_targets_check"]["exact_commands"] == [
+            rch_command("check --all-targets")
+        ]
+        assert validation_groups["clippy"]["exact_commands"] == [
+            rch_command("clippy --all-targets -- -D warnings")
+        ]
+        assert validation_scheduler["summary"]["local_fallback_rejection_count"] == 4
+        assert all(
+            not item["command"].startswith("cargo ")
+            for item in validation_scheduler["local_fallback_rejections"]
+        )
+        assert any(
+            "Follow validation scheduler plan" in action
+            for action in runpack["operator_next_actions"]
+        )
+        scheduler_output_args = argparse.Namespace(
+            out_validation_scheduler_plan_json=workspace
+            / "validation-scheduler-plan.json"
+        )
+        write_validation_scheduler_plan_output(
+            scheduler_output_args,
+            validation_scheduler,
+        )
+        assert scheduler_output_args.out_validation_scheduler_plan_json.exists()
 
         def predictive_fixture_runpack(**overrides: Any) -> dict[str, Any]:
             source_statuses = [
@@ -20442,6 +21141,178 @@ def run_self_test() -> int:
             pass
         else:
             raise AssertionError("predictive ledger must fail closed on disabled guards")
+
+        def scheduler_plan_for_fixture(
+            *,
+            git_lines: list[str],
+            rch_admission: dict[str, Any] | None = None,
+            temp_entries: list[dict[str, Any]] | None = None,
+        ) -> dict[str, Any]:
+            fixture = predictive_fixture_runpack(
+                rch_admission=rch_admission
+                or {
+                    "status": "ok",
+                    "decision": "admit",
+                    "queue_forecast": {
+                        "status": "ok",
+                        "recommended_action": "proceed",
+                        "slot_pressure": "available",
+                        "workers_healthy": 8,
+                        "workers_total": 8,
+                    },
+                }
+            )
+            fixture["git_state"] = {
+                "dirty": bool(git_lines),
+                "porcelain_lines": git_lines,
+                "sample": [
+                    {"status": line[:2], "path": line[3:] if len(line) > 3 else line}
+                    for line in git_lines
+                ],
+            }
+            fixture["temp_artifact_inventory"] = {
+                "entries": temp_entries or [],
+                "summary": {"entry_count": len(temp_entries or [])},
+            }
+            fixture["predictive_telemetry_ledger"] = build_predictive_telemetry_ledger(
+                fixture,
+                generated_at=parse_utc(generated_at),
+                max_items=8,
+            )
+            return build_validation_scheduler_plan(
+                fixture,
+                generated_at=parse_utc(generated_at),
+                max_items=8,
+            )
+
+        scheduler_empty = scheduler_plan_for_fixture(git_lines=[])
+        assert scheduler_empty["change_profile"]["profile_id"] == "empty_queue"
+        assert scheduler_empty["command_groups"][0]["id"] == "fast_script_checks"
+        assert scheduler_empty["command_groups"][0]["action"] == "would_run"
+        assert any(
+            group["requires_rch"] and group["action"] == "defer"
+            for group in scheduler_empty["command_groups"]
+        )
+
+        scheduler_docs = scheduler_plan_for_fixture(
+            git_lines=[
+                " M docs/swarm-operations-runbook.md",
+                " M docs/contracts/swarm-operator-runpack-contract.json",
+            ]
+        )
+        assert scheduler_docs["change_profile"]["profile_id"] == "docs_only"
+        assert any(
+            item["group_id"] == "evidence_regeneration"
+            for item in scheduler_docs["would_run_order"]
+        )
+        assert all(
+            group["action"] != "would_run"
+            for group in scheduler_docs["command_groups"]
+            if group["requires_rch"]
+        )
+
+        scheduler_rust = scheduler_plan_for_fixture(git_lines=[" M src/tools.rs"])
+        rust_groups = {
+            group["id"]: group for group in scheduler_rust["command_groups"]
+        }
+        assert scheduler_rust["change_profile"]["profile_id"] == "rust_only"
+        assert rust_groups["focused_tests"]["action"] == "would_run"
+        assert rust_groups["all_targets_check"]["action"] == "would_run"
+        assert rust_groups["clippy"]["exact_commands"][0] == (
+            "rch exec -- env "
+            "CARGO_TARGET_DIR=/data/tmp/pi_agent_rust_cargo/${USER:-agent}/target "
+            "TMPDIR=/data/tmp/pi_agent_rust_cargo/${USER:-agent}/tmp "
+            "cargo clippy --all-targets -- -D warnings"
+        )
+
+        scheduler_mixed = scheduler_plan_for_fixture(
+            git_lines=[" M scripts/build_swarm_operator_runpack.py", " M src/lib.rs"]
+        )
+        assert scheduler_mixed["change_profile"]["profile_id"] == "mixed_python_rust"
+        mixed_order = [item["group_id"] for item in scheduler_mixed["would_run_order"]]
+        assert mixed_order[:2] == ["fast_script_checks", "fast_script_checks"]
+        assert "evidence_regeneration" in mixed_order
+        assert "focused_tests" in mixed_order
+
+        scheduler_unavailable = scheduler_plan_for_fixture(
+            git_lines=[" M src/agent.rs"],
+            rch_admission={
+                "status": "ok",
+                "decision": "deny",
+                "queue_forecast": {
+                    "status": "error",
+                    "recommended_action": "backoff",
+                    "slot_pressure": "saturated",
+                    "workers_healthy": 0,
+                    "workers_total": 8,
+                },
+            },
+        )
+        assert scheduler_unavailable["status"] == "blocked"
+        unavailable_groups = {
+            group["id"]: group for group in scheduler_unavailable["command_groups"]
+        }
+        assert unavailable_groups["all_targets_check"]["action"] == "block"
+        assert scheduler_unavailable["local_fallback_rejections"]
+        assert all(
+            item["group_id"] != "all_targets_check"
+            for item in scheduler_unavailable["would_run_order"]
+        )
+        assert any(
+            "workers_healthy=0" in group["backoff_reasons"]
+            for group in scheduler_unavailable["command_groups"]
+            if group["requires_rch"]
+        )
+
+        scheduler_stale_cache = scheduler_plan_for_fixture(
+            git_lines=[" M src/session.rs"],
+            temp_entries=[
+                {
+                    "kind": "cargo_target_dir",
+                    "path": "/data/tmp/pi_agent_rust_cargo/stale/target",
+                    "state": "stale_candidate",
+                    "deletion_policy": "manual_review",
+                }
+            ],
+        )
+        assert scheduler_stale_cache["status"] == "degraded"
+        assert any(
+            "stale_target_cache=/data/tmp/pi_agent_rust_cargo/stale/target"
+            in group["backoff_reasons"]
+            for group in scheduler_stale_cache["command_groups"]
+            if group["requires_rch"]
+        )
+        bad_scheduler = json.loads(json_dumps(scheduler_rust))
+        bad_scheduler["guards"]["no_command_execution"] = False
+        try:
+            assert_validation_scheduler_plan_contract(bad_scheduler)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError("validation scheduler must fail closed on disabled guards")
+        missing_group_scheduler = json.loads(json_dumps(scheduler_rust))
+        missing_group_scheduler["command_groups"] = missing_group_scheduler[
+            "command_groups"
+        ][1:]
+        try:
+            assert_validation_scheduler_plan_contract(missing_group_scheduler)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError("validation scheduler must fail closed on missing groups")
+        bad_local_fallback_scheduler = json.loads(json_dumps(scheduler_rust))
+        for group in bad_local_fallback_scheduler["command_groups"]:
+            if group["requires_rch"]:
+                group["no_local_fallback"] = False
+                break
+        try:
+            assert_validation_scheduler_plan_contract(bad_local_fallback_scheduler)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError(
+                "validation scheduler must fail closed on local cargo fallback"
+            )
         for source in runpack["source_statuses"]:
             assert source["size_bytes"] is not None
             assert len(source["sha256"]) == 64
@@ -20452,6 +21323,7 @@ def run_self_test() -> int:
         assert "Bottleneck Attribution" in markdown
         assert "Turn Pressure Ledger" in markdown
         assert "Predictive Telemetry Ledger" in markdown
+        assert "Validation Scheduler Plan" in markdown
         assert "Context intelligence" in markdown
         assert "Progress SLO" in markdown
         assert "Resume Commands" in markdown
@@ -22797,6 +23669,11 @@ def parse_args() -> argparse.Namespace:
         help="write pi.swarm.predictive_telemetry_ledger.v1 JSON; refuses to overwrite",
     )
     parser.add_argument(
+        "--out-validation-scheduler-plan-json",
+        type=Path,
+        help="write pi.swarm.validation_scheduler_plan.v1 JSON; refuses to overwrite",
+    )
+    parser.add_argument(
         "--run-autopilot-e2e",
         action="store_true",
         help="run no-mock swarm autopilot E2E scenarios with JSONL evidence",
@@ -23022,6 +23899,11 @@ def parse_args() -> argparse.Namespace:
         "--print-predictive-telemetry-ledger",
         action="store_true",
         help="print the advisory predictive swarm telemetry ledger JSON",
+    )
+    parser.add_argument(
+        "--print-validation-scheduler-plan",
+        action="store_true",
+        help="print the advisory RCH-aware validation scheduler plan JSON",
     )
     parser.add_argument("--self-test", action="store_true", help="run fixture-backed self-test")
     return parser.parse_args()
@@ -23384,6 +24266,12 @@ def main() -> int:
         )
         if args.print_predictive_telemetry_ledger:
             print(json_dumps(runpack["predictive_telemetry_ledger"], pretty=True))
+        write_validation_scheduler_plan_output(
+            args,
+            runpack["validation_scheduler_plan"],
+        )
+        if args.print_validation_scheduler_plan:
+            print(json_dumps(runpack["validation_scheduler_plan"], pretty=True))
     except (RunpackError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
@@ -23395,6 +24283,7 @@ def main() -> int:
         and not args.out_action_plan_json
         and not args.out_work_admission_gate_json
         and not args.out_predictive_telemetry_ledger_json
+        and not args.out_validation_scheduler_plan_json
         and not args.out_context_intelligence_final_gate_json
         and not args.out_runtime_intelligence_final_gate_json
         and not args.out_fourth_wave_final_gate_json
@@ -23408,6 +24297,7 @@ def main() -> int:
         and not args.print_action_plan
         and not args.print_work_admission_gate
         and not args.print_predictive_telemetry_ledger
+        and not args.print_validation_scheduler_plan
         and not args.print_context_intelligence_final_gate
         and not args.print_runtime_intelligence_final_gate
         and not args.print_fourth_wave_final_gate

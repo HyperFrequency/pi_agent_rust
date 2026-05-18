@@ -597,12 +597,14 @@ python3 scripts/build_swarm_operator_runpack.py \
   --out-json "$capture_dir/operator-runpack.json" \
   --out-md "$capture_dir/operator-runpack.md" \
   --out-predictive-telemetry-ledger-json "$capture_dir/predictive-telemetry-ledger.json" \
+  --out-validation-scheduler-plan-json "$capture_dir/validation-scheduler-plan.json" \
   --out-autopilot-input-pack-json "$capture_dir/autopilot-input-pack.json" \
   --out-autopilot-plan-json "$capture_dir/autopilot-plan.json"
 ```
 
 The runpack schema is governed by `docs/contracts/swarm-operator-runpack-contract.json`. The runpack is a redacted index over existing evidence, not a release performance claim and not a replacement for the source artifacts.
 The predictive telemetry ledger schema is governed by `docs/contracts/predictive-swarm-telemetry-ledger-contract.json`; checked-in advisory fixture evidence lives at `docs/evidence/predictive-swarm-telemetry-ledger.json`. It ranks validation, coordination, work-queue, turn-context, bottleneck-source, and evidence-freshness pressure from existing runpack signals only, and it must not be used as release performance, capacity, Agent Mail, RCH, scheduler, Beads, git, or claim-readiness authority.
+The validation scheduler plan schema is governed by `docs/contracts/validation-scheduler-plan-contract.json`; checked-in advisory fixture evidence lives at `docs/evidence/validation-scheduler-plan.json`. It ranks exact script and RCH-backed cargo command strings from the runpack's git, predictive telemetry, RCH admission, remote proof, and target-cache signals. It is read-only: it does not execute cargo, reserve workers, mutate Agent Mail or Beads, delete temp artifacts, or permit heavy cargo to fall back to local execution when RCH is unavailable.
 The autopilot input pack schema is governed by `docs/contracts/swarm-autopilot-input-pack-contract.json`. It normalizes source statuses for the dry-run planner, but it is still advisory and never replaces Doctor, Beads, Agent Mail, RCH, git, or the source artifacts themselves.
 The autopilot plan schema is governed by `docs/contracts/swarm-autopilot-plan-contract.json`. It maps the input pack to ordered dry-run actions such as `claim_ready_bead`, `wait_for_rch`, `adjust_swarm_budget`, `use_beads_soft_lock`, `reopen_stale_bead_candidate`, `run_docs_only_work`, `capture_handoff`, or `stop_and_surface_blocker`.
 When the command emits the companion input pack and plan, the runpack also includes `autopilot_handoff` with schema `pi.swarm.autopilot_handoff.v1`. That section names the input-pack and plan schemas, artifact paths, selected advisory action, and source provenance so a new agent can inspect one handoff bundle without treating the runpack as a new source of truth.
@@ -828,6 +830,7 @@ python3 scripts/build_swarm_operator_runpack.py \
   --out-autopilot-e2e-json "$e2e_dir/summary.json" \
   --out-autopilot-e2e-events-jsonl "$e2e_dir/events.jsonl"
 python3 -m json.tool docs/contracts/swarm-operator-runpack-contract.json >/dev/null
+python3 -m json.tool docs/contracts/validation-scheduler-plan-contract.json >/dev/null
 python3 -m json.tool docs/contracts/swarm-autopilot-input-pack-contract.json >/dev/null
 python3 -m json.tool docs/contracts/swarm-autopilot-plan-contract.json >/dev/null
 python3 -m json.tool docs/contracts/swarm-autopilot-decision-gate-contract.json >/dev/null

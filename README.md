@@ -1931,6 +1931,17 @@ bottleneck-attribution, and claim-readiness signals into ordered pressure
 observations and next-bottleneck hypotheses, but it does not mutate the
 scheduler, Agent Mail, RCH, Beads, git, or release/capacity claims.
 
+The runpack also embeds `validation_scheduler_plan`
+(`pi.swarm.validation_scheduler_plan.v1`) and can write it separately with
+`--out-validation-scheduler-plan-json` or print it with
+`--print-validation-scheduler-plan`. This is an advisory RCH-aware simulator:
+it ranks fast script checks, evidence regeneration, focused tests,
+E2E/conformance, `cargo check --all-targets`, and clippy from the current git
+change profile, predictive telemetry, RCH admission, remote proof, and target
+cache evidence. It preserves exact command strings and required RCH env, but it
+does not execute cargo, mutate RCH, reserve Agent Mail, claim Beads, delete temp
+artifacts, or allow heavy cargo to fail open into a local build.
+
 If validation-broker status or plan JSON is supplied with
 `--validation-broker-json`, the runpack projects source status, slot counts,
 stale slot warnings, duplicate-gate opportunities, and recommended next actions
