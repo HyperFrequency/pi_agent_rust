@@ -1394,9 +1394,9 @@ def run_self_test() -> int:
         planning_beads = root / "planning/.beads/issues.jsonl"
         planning_epic = fixture_issue(
             "bd-plan",
-            "Swarm operations follow-up roadmap",
+            "Swarm responsiveness follow-up roadmap",
             status="deferred",
-            labels=["idea-wizard", "swarm"],
+            labels=["idea-wizard", "performance", "reliability", "swarm"],
         )
         planning_epic["issue_type"] = "epic"
         closed_child = fixture_issue(
@@ -1452,6 +1452,16 @@ def run_self_test() -> int:
             planning_report,
         )
         assert_condition(
+            create_templates[0]["title"] == "Extract next swarm responsiveness regression from roadmap",
+            "swarm responsiveness roadmap should produce the concrete responsiveness regression template",
+            planning_report,
+        )
+        assert_condition(
+            "explicit validation evidence" in create_templates[0]["command"],
+            "create template should require explicit validation evidence",
+            planning_report,
+        )
+        assert_condition(
             "--parent bd-plan" in create_templates[0]["command"],
             "create template should include an exact parent argument",
             planning_report,
@@ -1460,6 +1470,45 @@ def run_self_test() -> int:
             "br create --title" in create_templates[0]["command"],
             "create template should include an executable br create command",
             planning_report,
+        )
+
+        active_planning_beads = root / "active-planning/.beads/issues.jsonl"
+        active_child = fixture_issue(
+            "bd-plan.2",
+            "Active swarm responsiveness child",
+            status="in_progress",
+            updated_at="2026-05-15T11:45:00Z",
+        )
+        active_child["dependencies"] = [
+            {"type": "parent-child", "depends_on_id": "bd-plan"},
+        ]
+        write_issues(active_planning_beads, [planning_epic, closed_child, active_child])
+        active_planning_report = build_report(
+            repo_root=root,
+            beads_path=active_planning_beads,
+            br_ready_json=LoadedJson(None, [], None),
+            bv_plan_json=LoadedJson(None, {"plan": {"tracks": []}}, None),
+            agent_mail_health_json=LoadedJson(None, None, None),
+            validation_broker_json=LoadedJson(None, None, None),
+            rch_json=LoadedJson(None, None, None),
+            closeout_freshness_json=read_json(closeout_json),
+            now=now,
+            stale_hours=DEFAULT_STALE_IN_PROGRESS_HOURS,
+        )
+        assert_condition(
+            active_planning_report["status"] == "work_in_progress",
+            "active roadmap child should be treated as work in progress",
+            active_planning_report,
+        )
+        assert_condition(
+            active_planning_report["summary"]["deferred_planning_count"] == 0,
+            "active roadmap child should suppress duplicate planning templates",
+            active_planning_report,
+        )
+        assert_condition(
+            active_planning_report["next_actions"][0]["action"] == "continue_monitoring",
+            "active roadmap child should not ask operators to create another child",
+            active_planning_report,
         )
 
         stale_beads = root / "stale/.beads/issues.jsonl"
