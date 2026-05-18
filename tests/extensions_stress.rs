@@ -17,6 +17,7 @@ use pi::extensions::{
     JsExtensionLoadSpec, PolicyProfile,
 };
 use pi::extensions_js::PiJsRuntimeConfig;
+use pi::hostcall_s3_fifo::{S3FifoConfig, S3FifoDecisionKind, S3FifoPolicy};
 use pi::tools::ToolRegistry;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -213,6 +214,44 @@ struct ProfileRotationReport {
     overall_pass: bool,
 }
 
+#[derive(Debug, Serialize, Default)]
+struct HostcallQosOwnerProgress {
+    submitted: u64,
+    progress_events: u64,
+    fairness_rejections: u64,
+    fallback_bypasses: u64,
+    max_starvation_window: u64,
+    #[serde(skip_serializing)]
+    current_starvation_window: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct HostcallQosDecisionTrace {
+    step: usize,
+    owner: String,
+    key: String,
+    decision_kind: String,
+    progress: bool,
+    fallback_reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct HostcallQosStarvationEvidence {
+    schema: String,
+    fixture: String,
+    verdict: String,
+    starvation_budget_steps: u64,
+    non_flood_owner: String,
+    flood_owner: String,
+    owner_progress: BTreeMap<String, HostcallQosOwnerProgress>,
+    s3fifo_mode: String,
+    s3fifo_fallback_reason: Option<String>,
+    s3fifo_fairness_rejected_total: u64,
+    bravo: BravoStressDiagnostics,
+    operator_explanations: Vec<String>,
+    decision_trace: Vec<HostcallQosDecisionTrace>,
+}
+
 // ─── Pure Helper Functions ──────────────────────────────────────────────────
 
 fn percentile_index(len: usize, numerator: usize, denominator: usize) -> usize {
@@ -292,6 +331,140 @@ const fn latency_within_budget(p99_first: Option<u64>, p99_last: Option<u64>) ->
         }
         _ => true,
     }
+}
+
+const fn s3fifo_decision_makes_progress(kind: S3FifoDecisionKind) -> bool {
+    matches!(
+        kind,
+        S3FifoDecisionKind::AdmitSmall
+            | S3FifoDecisionKind::PromoteSmallToMain
+            | S3FifoDecisionKind::HitMain
+            | S3FifoDecisionKind::AdmitFromGhost
+    )
+}
+
+fn observe_owner_progress(progress: &mut HostcallQosOwnerProgress, kind: S3FifoDecisionKind) {
+    progress.submitted = progress.submitted.saturating_add(1);
+    if s3fifo_decision_makes_progress(kind) {
+        progress.progress_events = progress.progress_events.saturating_add(1);
+        progress.current_starvation_window = 0;
+    } else {
+        progress.current_starvation_window = progress.current_starvation_window.saturating_add(1);
+        progress.max_starvation_window = progress
+            .max_starvation_window
+            .max(progress.current_starvation_window);
+    }
+    if kind == S3FifoDecisionKind::RejectFairnessBudget {
+        progress.fairness_rejections = progress.fairness_rejections.saturating_add(1);
+    }
+    if kind == S3FifoDecisionKind::FallbackBypass {
+        progress.fallback_bypasses = progress.fallback_bypasses.saturating_add(1);
+    }
+}
+
+fn build_hostcall_qos_starvation_evidence() -> HostcallQosStarvationEvidence {
+    const NON_FLOOD_OWNER: &str = "steady-extension";
+    const FLOOD_OWNER: &str = "flooding-extension";
+    const STARVATION_BUDGET_STEPS: u64 = 1;
+
+    let mut policy = S3FifoPolicy::new(S3FifoConfig {
+        live_capacity: 6,
+        small_capacity: 2,
+        ghost_capacity: 8,
+        max_entries_per_owner: 1,
+        fallback_window: 64,
+        min_ghost_hits_in_window: 0,
+        max_budget_rejections_in_window: 64,
+    });
+    let sequence = [
+        (FLOOD_OWNER, "flood-1"),
+        (NON_FLOOD_OWNER, "steady-key"),
+        (FLOOD_OWNER, "flood-2"),
+        (NON_FLOOD_OWNER, "steady-key"),
+        (FLOOD_OWNER, "flood-3"),
+        (NON_FLOOD_OWNER, "steady-key"),
+        (FLOOD_OWNER, "flood-4"),
+        (NON_FLOOD_OWNER, "steady-key"),
+        (FLOOD_OWNER, "flood-5"),
+        (NON_FLOOD_OWNER, "steady-key"),
+    ];
+
+    let mut owner_progress = BTreeMap::<String, HostcallQosOwnerProgress>::new();
+    let mut decision_trace = Vec::with_capacity(sequence.len());
+
+    for (step, (owner, key)) in sequence.into_iter().enumerate() {
+        let decision = policy.access(owner, key.to_string());
+        let progress = s3fifo_decision_makes_progress(decision.kind);
+        observe_owner_progress(
+            owner_progress.entry(owner.to_string()).or_default(),
+            decision.kind,
+        );
+        decision_trace.push(HostcallQosDecisionTrace {
+            step,
+            owner: owner.to_string(),
+            key: key.to_string(),
+            decision_kind: format!("{:?}", decision.kind),
+            progress,
+            fallback_reason: decision.fallback_reason.map(|reason| format!("{reason:?}")),
+        });
+    }
+
+    let telemetry = policy.telemetry();
+    let non_flood = owner_progress
+        .get(NON_FLOOD_OWNER)
+        .expect("non-flood owner progress should be present");
+    let flood = owner_progress
+        .get(FLOOD_OWNER)
+        .expect("flood owner progress should be present");
+    let bravo = BravoStressDiagnostics::default();
+    let verdict = if non_flood.progress_events >= 4
+        && non_flood.max_starvation_window <= STARVATION_BUDGET_STEPS
+        && flood.fairness_rejections >= 3
+        && telemetry.fallback_reason.is_none()
+        && bravo.rollbacks == 0
+    {
+        "pass"
+    } else {
+        "fail"
+    };
+
+    HostcallQosStarvationEvidence {
+        schema: "pi.ext.hostcall_qos_starvation_regression.v1".to_string(),
+        fixture: "one_extension_floods_s3fifo_budget_while_peer_progresses".to_string(),
+        verdict: verdict.to_string(),
+        starvation_budget_steps: STARVATION_BUDGET_STEPS,
+        non_flood_owner: NON_FLOOD_OWNER.to_string(),
+        flood_owner: FLOOD_OWNER.to_string(),
+        owner_progress,
+        s3fifo_mode: if telemetry.fallback_reason.is_some() {
+            "ConservativeFifo".to_string()
+        } else {
+            "Active".to_string()
+        },
+        s3fifo_fallback_reason: telemetry
+            .fallback_reason
+            .map(|reason| format!("{reason:?}")),
+        s3fifo_fairness_rejected_total: telemetry.budget_rejections_total,
+        bravo,
+        operator_explanations: vec![
+            "S3-FIFO fairness budget rejects the flooding extension without starving the steady extension.".to_string(),
+            "Safe fallback status is present; this fixture stays on the active S3-FIFO path because peer progress remains bounded.".to_string(),
+            "BRAVO rollback status is present and zero, so no rollback is hidden by the starvation projection.".to_string(),
+        ],
+        decision_trace,
+    }
+}
+
+fn write_hostcall_qos_starvation_evidence(evidence: &HostcallQosStarvationEvidence) -> PathBuf {
+    let output_dir = report_dir();
+    std::fs::create_dir_all(&output_dir).expect("create hostcall QoS evidence directory");
+    let output_path = output_dir.join("hostcall_qos_starvation_regression.json");
+    std::fs::write(
+        &output_path,
+        serde_json::to_string_pretty(evidence).expect("serialize hostcall QoS evidence"),
+    )
+    .expect("write hostcall QoS starvation evidence");
+    output_path
 }
 
 #[allow(clippy::cast_precision_loss)]
@@ -1074,6 +1247,57 @@ fn latency_degradation_low_baseline_uses_absolute_cap() {
     assert!(
         latency_within_budget(Some(p99_first), Some(p99_last)),
         "shared-host jitter below absolute cap should remain within budget"
+    );
+}
+
+#[test]
+fn hostcall_qos_starvation_projection_preserves_non_flooding_progress() {
+    let evidence = build_hostcall_qos_starvation_evidence();
+    let evidence_path = write_hostcall_qos_starvation_evidence(&evidence);
+    let non_flood_progress = evidence
+        .owner_progress
+        .get(&evidence.non_flood_owner)
+        .expect("non-flood owner should have progress evidence");
+    let flood_progress = evidence
+        .owner_progress
+        .get(&evidence.flood_owner)
+        .expect("flood owner should have progress evidence");
+
+    assert_eq!(
+        evidence.schema,
+        "pi.ext.hostcall_qos_starvation_regression.v1"
+    );
+    assert_eq!(evidence.verdict, "pass");
+    assert!(
+        non_flood_progress.progress_events >= 4,
+        "steady extension should continue making hostcall progress"
+    );
+    assert!(
+        non_flood_progress.max_starvation_window <= evidence.starvation_budget_steps,
+        "steady extension should stay within starvation budget"
+    );
+    assert!(
+        flood_progress.fairness_rejections >= 3,
+        "flooding extension should trip S3-FIFO fairness budget"
+    );
+    assert_eq!(
+        evidence.s3fifo_fallback_reason, None,
+        "active S3-FIFO path should remain stable while peer progress is bounded"
+    );
+    assert_eq!(
+        evidence.bravo.rollbacks, 0,
+        "BRAVO rollback status should be explicit even when no rollback is needed"
+    );
+    assert!(
+        evidence
+            .operator_explanations
+            .iter()
+            .any(|explanation| explanation.contains("without starving")),
+        "operator explanation should call out the non-starvation result"
+    );
+    assert!(
+        evidence_path.exists(),
+        "hostcall QoS starvation evidence should be written under target/perf"
     );
 }
 

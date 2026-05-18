@@ -2697,6 +2697,11 @@ def run_self_test() -> int:
             hostcall["summary"]["bravo_rollbacks_total"] == 3,
             "hostcall summary should include BRAVO rollbacks",
         )
+        fallback_source = hostcall_source(report, "perf_stress_triage")
+        assert_condition(
+            "Inspect S3-FIFO fairness" in fallback_source["recommended_operator_action"],
+            "fallback-heavy hostcall telemetry should surface the next safe action",
+        )
 
         repo_root = fixture_root()
         make_complete_fixture(repo_root, now)
@@ -2719,6 +2724,11 @@ def run_self_test() -> int:
         assert_condition(
             "bravo_rollbacks_total" in missing_source["missing_required_fields"],
             "missing source should list absent BRAVO counters",
+        )
+        assert_condition(
+            "missing telemetry is reported explicitly"
+            in missing_source["recommended_operator_action"],
+            "missing hostcall telemetry should explain that absence is not zero pressure",
         )
 
         repo_root = fixture_root()
@@ -2758,6 +2768,11 @@ def run_self_test() -> int:
         assert_condition(
             "s3fifo_fairness_rejected_total" in missing_source["missing_required_fields"],
             "partial telemetry should list absent S3-FIFO fairness counter",
+        )
+        assert_condition(
+            "Regenerate tests/perf/reports/stress_triage.json"
+            in missing_source["recommended_operator_action"],
+            "partial hostcall telemetry should surface the exact regeneration action",
         )
 
         repo_root = fixture_root()
