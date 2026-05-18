@@ -6,13 +6,21 @@ This document pins the **exact legacy environment** used for extension reference
 
 ## 1) Repo Pin
 
-**Local snapshot:** `legacy_pi_mono_code/pi-mono/`  
+**Source repo:** `https://github.com/badlogic/pi-mono`
+**Local vendored snapshot:** `legacy_pi_mono_code/pi-mono/`
 **Commit:** `df5b0f76c026b35fdd7f0fb78cb0dbaaf939c1b5`
 
 Verify:
 ```bash
-git -C legacy_pi_mono_code/pi-mono rev-parse HEAD
+cat legacy_pi_mono_code/pi-mono/PINNED_COMMIT
+test -f legacy_pi_mono_code/pi-mono/package-lock.json
+test -x legacy_pi_mono_code/pi-mono/pi-test.sh
+test -f legacy_pi_mono_code/pi-mono/packages/coding-agent/src/cli.ts
 ```
+
+The snapshot is vendored as source files, not as a nested Git checkout, so
+`git -C legacy_pi_mono_code/pi-mono rev-parse HEAD` resolves the parent Rust
+repository and is not a valid pin check.
 
 ---
 
