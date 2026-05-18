@@ -126,6 +126,11 @@ struct ApiUsageSummary {
 
 #[derive(Debug, Deserialize)]
 struct ApiUsageShimCompleteness {
+    real: usize,
+    partial: usize,
+    stub: usize,
+    external: usize,
+    error_throw: usize,
     missing_from_corpus: usize,
 }
 
@@ -177,6 +182,40 @@ fn parse_markdown_npm_package_rows(markdown: &str) -> BTreeMap<&str, String> {
     }
 
     rows
+}
+
+fn parse_markdown_shim_summary_counts(markdown: &str) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    let mut in_section = false;
+
+    for line in markdown.lines() {
+        if line.trim() == "## Shim Coverage Summary" {
+            in_section = true;
+            continue;
+        }
+        if in_section && line.starts_with("## ") {
+            break;
+        }
+        if !in_section || !line.starts_with('|') || line.contains("---") || line.contains("Status")
+        {
+            continue;
+        }
+
+        let mut cells = line.trim_matches('|').split('|').map(str::trim);
+        let Some(raw_status) = cells.next() else {
+            continue;
+        };
+        let Some(raw_count) = cells.next() else {
+            continue;
+        };
+        let Ok(count) = raw_count.parse::<usize>() else {
+            continue;
+        };
+
+        counts.insert(normalize_markdown_status(raw_status), count);
+    }
+
+    counts
 }
 
 #[test]
@@ -489,6 +528,43 @@ fn test_api_usage_matrix_markdown_npm_table_matches_json() {
         missing_json_rows.is_empty(),
         "Markdown npm packages should exist in JSON rows: {missing_json_rows:?}"
     );
+}
+
+#[test]
+fn test_api_usage_matrix_markdown_summary_counts_match_json() {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let matrix_path = repo_root.join("tests/ext_conformance/api_usage_matrix.json");
+    let markdown_path = repo_root.join("tests/ext_conformance/API_USAGE_MATRIX.md");
+    let bytes = fs::read(&matrix_path).expect("read api_usage_matrix.json");
+    let matrix: ApiUsageMatrix =
+        serde_json::from_slice(&bytes).expect("parse api_usage_matrix.json");
+    let markdown = fs::read_to_string(&markdown_path).expect("read API_USAGE_MATRIX.md");
+    let markdown_counts = parse_markdown_shim_summary_counts(&markdown);
+
+    assert!(
+        !markdown_counts.is_empty(),
+        "API_USAGE_MATRIX.md Shim Coverage Summary should have parsed rows"
+    );
+
+    let expected_counts = [
+        ("real", matrix.summary.shim_completeness.real),
+        ("partial", matrix.summary.shim_completeness.partial),
+        ("stub", matrix.summary.shim_completeness.stub),
+        ("external", matrix.summary.shim_completeness.external),
+        ("error_throw", matrix.summary.shim_completeness.error_throw),
+        (
+            "missing",
+            matrix.summary.shim_completeness.missing_from_corpus,
+        ),
+    ];
+
+    for (status, expected_count) in expected_counts {
+        assert_eq!(
+            markdown_counts.get(status).copied(),
+            Some(expected_count),
+            "{status} Markdown summary count should match api_usage_matrix.json"
+        );
+    }
 }
 
 #[test]
