@@ -12,6 +12,8 @@ rustc-ice-*.txt
 # br local history backups and quarantine
 .beads/.br_history/
 .beads/.br_history_quarantine/
+# `br` recovery scratch directory (in-progress repair workspace).
+.beads/.br_recovery/
 .beads/beads.db.rebuild_*
 
 # local Pi agent config (may contain API keys)
