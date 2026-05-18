@@ -240,6 +240,35 @@ The index never mutates RCH, Agent Mail, Beads, git, source files, temp
 artifacts, or runtime scheduling policy. It does not authorize release
 performance, benchmark, capacity, or strict drop-in claims.
 
+### Operator Work Recommender
+
+The operator work recommender is governed by
+`docs/contracts/operator-work-recommendation-contract.json` and emits
+`pi.swarm.operator_work_recommendation.v1`. It consumes the incident replay and
+validation proof-memory artifacts, then ranks advisory next-work decisions for
+healthy ready Beads, no ready work, Agent Mail corruption, RCH saturation, stale
+proof refresh, duplicate-work risk, and dirty-worktree admission denial.
+
+Use it to inspect the next safe operator posture before claiming work:
+
+```bash
+python3 scripts/build_swarm_operator_runpack.py \
+  --run-operator-work-recommendation \
+  --print-operator-work-recommendation
+```
+
+The current fixture artifact is
+`docs/evidence/operator-work-recommendation.json`. Every recommendation cites
+exact evidence paths, names rejected unsafe alternatives, gives a confidence
+score, and includes an operator-facing explanation. Missing, stale,
+contradictory, unredacted, or authority-confused source evidence fails closed
+to `refresh_or_surface_operator_blocker`.
+
+The recommender is read-only. It never claims Beads, writes Agent Mail
+reservations, launches RCH, runs cargo, mutates git, deletes files, or replaces
+source systems. Operators still execute any selected action through the normal
+Beads, Agent Mail, RCH, git, and validation workflows.
+
 ## Temp Artifact Inventory
 
 Swarm runpacks include `temp_artifact_inventory` with schema

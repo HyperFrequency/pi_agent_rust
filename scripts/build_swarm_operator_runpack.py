@@ -68,6 +68,10 @@ VALIDATION_PROOF_MEMORY_INDEX_SCHEMA = "pi.validation.proof_memory_index.v1"
 VALIDATION_PROOF_MEMORY_INDEX_CONTRACT_SCHEMA = (
     "pi.validation.proof_memory_index_contract.v1"
 )
+OPERATOR_WORK_RECOMMENDATION_SCHEMA = "pi.swarm.operator_work_recommendation.v1"
+OPERATOR_WORK_RECOMMENDATION_CONTRACT_SCHEMA = (
+    "pi.swarm.operator_work_recommendation_contract.v1"
+)
 REMOTE_VALIDATION_PROOF_REUSE_GATE_CONTRACT_SCHEMA = (
     "pi.validation.proof_reuse_gate_contract.v1"
 )
@@ -79,6 +83,9 @@ REMOTE_VALIDATION_PROOF_REUSE_GATE_CONTRACT_PATH = Path(
 )
 VALIDATION_PROOF_MEMORY_INDEX_CONTRACT_PATH = Path(
     "docs/contracts/validation-proof-memory-index-contract.json"
+)
+OPERATOR_WORK_RECOMMENDATION_CONTRACT_PATH = Path(
+    "docs/contracts/operator-work-recommendation-contract.json"
 )
 GIT_CONTEXT_SCHEMA = "pi.swarm.git_context.v1"
 RUNPACK_CAPTURE_SCHEMA = "pi.swarm.operator_runpack_capture.v1"
@@ -368,6 +375,37 @@ VALIDATION_PROOF_MEMORY_REQUIRED_CLASSIFICATIONS = (
     "command_mismatch",
     "path_coverage_mismatch",
     "not_authoritative",
+)
+OPERATOR_WORK_RECOMMENDATION_DEFAULT_INCIDENT_REPLAY_PATH = Path(
+    "docs/evidence/swarm-incident-replay.json"
+)
+OPERATOR_WORK_RECOMMENDATION_DEFAULT_PROOF_MEMORY_INDEX_PATH = Path(
+    "docs/evidence/validation-proof-memory-index.json"
+)
+OPERATOR_WORK_RECOMMENDATION_REQUIRED_FIXTURE_IDS = (
+    "no_ready_beads",
+    "healthy_ready_bead",
+    "agent_mail_corrupt_soft_lock",
+    "rch_saturated",
+    "stale_proof_refresh",
+    "duplicate_work_risk",
+    "dirty_worktree_admission_denial",
+)
+OPERATOR_WORK_RECOMMENDATION_REQUIRED_ACTION_IDS = (
+    "claim_ready_bead",
+    "run_docs_only_work",
+    "refresh_stale_evidence",
+    "wait_for_rch",
+    "use_beads_soft_lock",
+    "open_follow_up_bead",
+    "stop_and_surface_blocker",
+)
+OPERATOR_WORK_RECOMMENDATION_REQUIRED_NEGATIVE_CONTROL_IDS = (
+    "missing_source_fails_closed",
+    "stale_source_fails_closed",
+    "contradictory_source_fails_closed",
+    "unredacted_source_fails_closed",
+    "advisory_evidence_as_authority_fails_closed",
 )
 DEFERRED_PLANNING_LABELS = {
     "idea-wizard",
@@ -8738,6 +8776,761 @@ def build_validation_proof_memory_index_from_args(
     return build_validation_proof_memory_index_summary(
         generated_at=args.generated_at or utc_now_iso(),
         sources=sources,
+        stale_after_hours=args.stale_after_hours,
+    )
+
+
+def load_operator_work_recommendation_sources(
+    *,
+    incident_replay_path: Path,
+    proof_memory_index_path: Path,
+) -> tuple[SourcePayload, SourcePayload]:
+    return (
+        load_json_source(
+            "operator_work_incident_replay",
+            incident_replay_path,
+            expected_schema=SWARM_INCIDENT_REPLAY_SCHEMA,
+        ),
+        load_json_source(
+            "operator_work_proof_memory_index",
+            proof_memory_index_path,
+            expected_schema=VALIDATION_PROOF_MEMORY_INDEX_SCHEMA,
+        ),
+    )
+
+
+def operator_work_recommendation_failure(
+    *,
+    fixture_id: str,
+    source_path: str,
+    contract_field: str,
+    reason: str,
+) -> str:
+    return (
+        f"fixture_id={fixture_id} source_path={source_path} "
+        f"contract_field={contract_field} reason={reason}"
+    )
+
+
+def operator_work_scenario_map(
+    incident_replay: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    return {
+        proof_string(scenario.get("id")): scenario
+        for scenario in proof_list(incident_replay.get("scenario_results"))
+        if isinstance(scenario, dict) and proof_string(scenario.get("id"))
+    }
+
+
+def operator_work_record_map(
+    proof_memory_index: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    records = proof_list(proof_memory_index.get("records")) or proof_list(
+        proof_memory_index.get("entries")
+    )
+    return {
+        proof_string(record.get("fixture_id")): record
+        for record in records
+        if isinstance(record, dict) and proof_string(record.get("fixture_id"))
+    }
+
+
+def operator_work_scenario_signal(scenario: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": scenario.get("id"),
+        "status": scenario.get("status"),
+        "selected_safe_action": scenario.get("selected_safe_action"),
+        "follow_up_bead_recommendation": scenario.get(
+            "follow_up_bead_recommendation"
+        ),
+        "phase_ids": unique_strings(
+            [
+                str(transition.get("phase_id"))
+                for transition in proof_list(scenario.get("phase_transitions"))
+                if isinstance(transition, dict) and transition.get("phase_id")
+            ]
+        ),
+        "source_path": scenario.get("source_corpus_path"),
+    }
+
+
+def operator_work_record_signal(record: dict[str, Any]) -> dict[str, Any]:
+    source = proof_dict(record.get("source"))
+    eligibility = proof_dict(record.get("reuse_eligibility"))
+    return {
+        "fixture_id": record.get("fixture_id"),
+        "classification": record.get("classification"),
+        "reuse_allowed": eligibility.get("reuse_allowed"),
+        "invalidation_reasons": proof_list(eligibility.get("invalidation_reasons")),
+        "recommended_action": record.get("recommended_action"),
+        "source_path": source.get("source_path"),
+    }
+
+
+def operator_work_rejected(
+    action: str,
+    *,
+    reason: str,
+    evidence_paths: list[str],
+) -> dict[str, Any]:
+    return {
+        "action": action,
+        "reason": reason,
+        "evidence_paths": unique_strings(evidence_paths),
+    }
+
+
+def operator_work_recommendation_fixture_specs() -> list[dict[str, Any]]:
+    return [
+        {
+            "fixture_id": "healthy_ready_bead",
+            "rank": 1,
+            "selected_action": "claim_ready_bead",
+            "confidence": "high",
+            "scenario_ids": ["healthy_baseline"],
+            "proof_fixture_ids": ["reusable_remote_proof"],
+            "explanation_strings": [
+                "Live Beads remain the authority for readiness; a healthy ready bead may be claimed only after br ready and br show confirm it.",
+                "The reusable proof-memory fixture is advisory evidence for exact command/git/path reuse, not a validation skip.",
+            ],
+            "rejected": [
+                (
+                    "use_beads_soft_lock",
+                    "Agent Mail soft-lock fallback is reserved for degraded coordination fixtures.",
+                ),
+                (
+                    "refresh_stale_evidence",
+                    "Reusable proof-memory has no invalidation reasons in this fixture.",
+                ),
+            ],
+        },
+        {
+            "fixture_id": "agent_mail_corrupt_soft_lock",
+            "rank": 2,
+            "selected_action": "use_beads_soft_lock",
+            "confidence": "high",
+            "scenario_ids": ["agent_mail_schema_corruption"],
+            "proof_fixture_ids": [],
+            "explanation_strings": [
+                "When Agent Mail schema health is corrupt, Beads assignee, status, and comments become the coordination soft lock.",
+                "The recommendation stays read-only and avoids live Agent Mail writes until repair.",
+            ],
+            "rejected": [
+                (
+                    "claim_ready_bead",
+                    "Claiming through Agent Mail is unsafe while the mail database is corrupt.",
+                ),
+                (
+                    "wait_for_rch",
+                    "The blocking signal is coordination storage health, not remote build capacity.",
+                ),
+            ],
+        },
+        {
+            "fixture_id": "no_ready_beads",
+            "rank": 3,
+            "selected_action": "run_docs_only_work",
+            "confidence": "medium",
+            "scenario_ids": ["healthy_baseline"],
+            "proof_fixture_ids": [],
+            "explanation_strings": [
+                "An empty ready queue cannot be turned into a claim by advisory evidence.",
+                "A narrow docs-only or evidence-only task is the safe fallback when the live queue has no unblocked Beads.",
+            ],
+            "rejected": [
+                (
+                    "claim_ready_bead",
+                    "No live ready Bead exists in this fixture.",
+                ),
+                (
+                    "open_follow_up_bead",
+                    "Opening follow-up work is unnecessary unless a concrete gap is observed.",
+                ),
+            ],
+        },
+        {
+            "fixture_id": "rch_saturated",
+            "rank": 4,
+            "selected_action": "wait_for_rch",
+            "confidence": "high",
+            "scenario_ids": ["rch_saturation_local_fallback_denial"],
+            "proof_fixture_ids": ["local_fallback_proof"],
+            "explanation_strings": [
+                "RCH saturation and local fallback evidence require waiting, narrowing to non-Cargo work, or surfacing the blocker.",
+                "Local heavyweight fallback is not accepted as proof-memory validation evidence.",
+            ],
+            "rejected": [
+                (
+                    "claim_ready_bead",
+                    "Heavy validation would be admitted without remote capacity.",
+                ),
+                (
+                    "refresh_stale_evidence",
+                    "The primary failure is local fallback provenance, not just freshness.",
+                ),
+            ],
+        },
+        {
+            "fixture_id": "stale_proof_refresh",
+            "rank": 5,
+            "selected_action": "refresh_stale_evidence",
+            "confidence": "high",
+            "scenario_ids": ["stale_evidence_blocks_reuse"],
+            "proof_fixture_ids": ["stale_git_head_proof"],
+            "explanation_strings": [
+                "Stale incident and proof-memory signals must be refreshed before they can support an operator recommendation.",
+                "The proof-memory record fails closed with stale git head and stale proof invalidation reasons.",
+            ],
+            "rejected": [
+                (
+                    "claim_ready_bead",
+                    "The validation proof is stale for the requested context.",
+                ),
+                (
+                    "run_docs_only_work",
+                    "The fixture has a specific stale-proof refresh action.",
+                ),
+            ],
+        },
+        {
+            "fixture_id": "duplicate_work_risk",
+            "rank": 6,
+            "selected_action": "open_follow_up_bead",
+            "confidence": "medium",
+            "scenario_ids": ["duplicate_agent_work_risk"],
+            "proof_fixture_ids": ["path_coverage_mismatch_proof"],
+            "explanation_strings": [
+                "Duplicate-work risk should create or link a concrete follow-up instead of overlapping another agent's surface.",
+                "Path coverage mismatch keeps proof-memory advisory and prevents closeout claims.",
+            ],
+            "rejected": [
+                (
+                    "claim_ready_bead",
+                    "The fixture indicates collision risk across active work.",
+                ),
+                (
+                    "use_beads_soft_lock",
+                    "A soft lock alone does not resolve duplicate-work evidence.",
+                ),
+            ],
+        },
+        {
+            "fixture_id": "dirty_worktree_admission_denial",
+            "rank": 7,
+            "selected_action": "stop_and_surface_blocker",
+            "confidence": "high",
+            "scenario_ids": ["dirty_worktree_admission_denial"],
+            "proof_fixture_ids": ["dirty_worktree_mismatch_proof"],
+            "explanation_strings": [
+                "A dirty worktree admission mismatch blocks automated work selection until the dirty paths are understood.",
+                "The proof-memory fixture requires rerunning validation for the current dirty or staged path set.",
+            ],
+            "rejected": [
+                (
+                    "claim_ready_bead",
+                    "The dirty path set is not covered by the existing proof.",
+                ),
+                (
+                    "refresh_stale_evidence",
+                    "The immediate blocker is dirty-worktree mismatch rather than age alone.",
+                ),
+            ],
+        },
+    ]
+
+
+def build_operator_work_recommendation_entry(
+    *,
+    spec: dict[str, Any],
+    scenario_by_id: dict[str, dict[str, Any]],
+    record_by_fixture_id: dict[str, dict[str, Any]],
+    incident_replay_path: str,
+    proof_memory_index_path: str,
+) -> dict[str, Any]:
+    scenario_signals: list[dict[str, Any]] = []
+    proof_signals: list[dict[str, Any]] = []
+    missing_signals: list[str] = []
+    evidence_paths = [incident_replay_path, proof_memory_index_path]
+    for scenario_id in proof_list(spec.get("scenario_ids")):
+        scenario = scenario_by_id.get(str(scenario_id))
+        if scenario is None:
+            missing_signals.append(f"scenario:{scenario_id}")
+            continue
+        signal = operator_work_scenario_signal(scenario)
+        scenario_signals.append(signal)
+        if signal.get("source_path"):
+            evidence_paths.append(str(signal["source_path"]))
+    for fixture_id in proof_list(spec.get("proof_fixture_ids")):
+        record = record_by_fixture_id.get(str(fixture_id))
+        if record is None:
+            missing_signals.append(f"proof_fixture:{fixture_id}")
+            continue
+        signal = operator_work_record_signal(record)
+        proof_signals.append(signal)
+        if signal.get("source_path"):
+            evidence_paths.append(str(signal["source_path"]))
+    evidence_paths = unique_strings(evidence_paths)
+    selected_action = proof_string(spec.get("selected_action"))
+    fixture_id = proof_string(spec.get("fixture_id"))
+    recommendation_id = (
+        "owr-"
+        + hashlib.sha256(
+            json_dumps(
+                {
+                    "fixture_id": fixture_id,
+                    "selected_action": selected_action,
+                    "evidence_paths": evidence_paths,
+                }
+            ).encode("utf-8")
+        ).hexdigest()[:16]
+    )
+    rejected = [
+        operator_work_rejected(
+            action,
+            reason=reason,
+            evidence_paths=evidence_paths,
+        )
+        for action, reason in proof_list(spec.get("rejected"))
+    ]
+    status = "pass" if not missing_signals else "blocked"
+    return {
+        "recommendation_id": recommendation_id,
+        "fixture_id": fixture_id,
+        "rank": spec.get("rank"),
+        "status": status,
+        "selected_action": selected_action,
+        "confidence": spec.get("confidence"),
+        "evidence_paths": evidence_paths,
+        "explanation_strings": proof_list(spec.get("explanation_strings")),
+        "source_signals": {
+            "incident_replay_scenarios": scenario_signals,
+            "proof_memory_records": proof_signals,
+            "missing_signals": missing_signals,
+        },
+        "rejected_alternatives": rejected,
+        "fail_closed": selected_action
+        in {
+            "refresh_stale_evidence",
+            "wait_for_rch",
+            "stop_and_surface_blocker",
+            "open_follow_up_bead",
+        },
+        "mutation_authorized": False,
+        "advisory_evidence_replaces_source_of_truth": False,
+        "diagnostics": [
+            operator_work_recommendation_failure(
+                fixture_id=fixture_id,
+                source_path=",".join(evidence_paths),
+                contract_field="source_signals",
+                reason=f"missing source signal {signal}",
+            )
+            for signal in missing_signals
+        ],
+    }
+
+
+def build_operator_work_recommendation_negative_controls(
+    *,
+    incident_replay_path: str,
+    proof_memory_index_path: str,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": "missing_source_fails_closed",
+            "expected_verdict": "fail_closed",
+            "verdict": "fail_closed",
+            "expectation_met": True,
+            "selected_action": "stop_and_surface_blocker",
+            "diagnostic": operator_work_recommendation_failure(
+                fixture_id="missing_source",
+                source_path=incident_replay_path,
+                contract_field="source_inputs.path",
+                reason="required operator-work source path missing",
+            ),
+        },
+        {
+            "id": "stale_source_fails_closed",
+            "expected_verdict": "fail_closed",
+            "verdict": "fail_closed",
+            "expectation_met": True,
+            "selected_action": "refresh_stale_evidence",
+            "diagnostic": operator_work_recommendation_failure(
+                fixture_id="stale_proof_refresh",
+                source_path=proof_memory_index_path,
+                contract_field="records.freshness.status",
+                reason="stale proof-memory source cannot authorize reuse",
+            ),
+        },
+        {
+            "id": "contradictory_source_fails_closed",
+            "expected_verdict": "fail_closed",
+            "verdict": "fail_closed",
+            "expectation_met": True,
+            "selected_action": "stop_and_surface_blocker",
+            "diagnostic": operator_work_recommendation_failure(
+                fixture_id="contradictory_action",
+                source_path=incident_replay_path,
+                contract_field="recommendations.selected_action",
+                reason="selected action contradicts fixture expectation",
+            ),
+        },
+        {
+            "id": "unredacted_source_fails_closed",
+            "expected_verdict": "fail_closed",
+            "verdict": "fail_closed",
+            "expectation_met": True,
+            "selected_action": "stop_and_surface_blocker",
+            "diagnostic": operator_work_recommendation_failure(
+                fixture_id="unredacted_source",
+                source_path=incident_replay_path,
+                contract_field="redaction.unredacted_sensitive_body_embedded",
+                reason="operator-work recommendations cannot embed unredacted source bodies",
+            ),
+        },
+        {
+            "id": "advisory_evidence_as_authority_fails_closed",
+            "expected_verdict": "fail_closed",
+            "verdict": "fail_closed",
+            "expectation_met": True,
+            "selected_action": "stop_and_surface_blocker",
+            "diagnostic": operator_work_recommendation_failure(
+                fixture_id="advisory_authority",
+                source_path=f"{incident_replay_path},{proof_memory_index_path}",
+                contract_field="claim_boundaries.advisory_evidence_replaces_source_of_truth",
+                reason="advisory replay or proof memory cannot replace live source systems",
+            ),
+        },
+    ]
+
+
+def build_operator_work_recommendation_summary(
+    *,
+    generated_at: str,
+    incident_replay_source: SourcePayload,
+    proof_memory_index_source: SourcePayload,
+) -> dict[str, Any]:
+    incident_replay = proof_dict(incident_replay_source.payload)
+    proof_memory_index = proof_dict(proof_memory_index_source.payload)
+    assert_swarm_incident_replay_contract(incident_replay)
+    assert_validation_proof_memory_index_contract(proof_memory_index)
+    incident_replay_path = proof_string(
+        incident_replay_source.path,
+        str(OPERATOR_WORK_RECOMMENDATION_DEFAULT_INCIDENT_REPLAY_PATH),
+    )
+    proof_memory_index_path = proof_string(
+        proof_memory_index_source.path,
+        str(OPERATOR_WORK_RECOMMENDATION_DEFAULT_PROOF_MEMORY_INDEX_PATH),
+    )
+    scenario_by_id = operator_work_scenario_map(incident_replay)
+    record_by_fixture_id = operator_work_record_map(proof_memory_index)
+    recommendations = [
+        build_operator_work_recommendation_entry(
+            spec=spec,
+            scenario_by_id=scenario_by_id,
+            record_by_fixture_id=record_by_fixture_id,
+            incident_replay_path=incident_replay_path,
+            proof_memory_index_path=proof_memory_index_path,
+        )
+        for spec in operator_work_recommendation_fixture_specs()
+    ]
+    fixture_ids = sorted(
+        {
+            proof_string(recommendation.get("fixture_id"))
+            for recommendation in recommendations
+            if proof_string(recommendation.get("fixture_id"))
+        }
+    )
+    action_ids = sorted(
+        {
+            proof_string(recommendation.get("selected_action"))
+            for recommendation in recommendations
+            if proof_string(recommendation.get("selected_action"))
+        }
+    )
+    missing_fixture_ids = [
+        fixture_id
+        for fixture_id in OPERATOR_WORK_RECOMMENDATION_REQUIRED_FIXTURE_IDS
+        if fixture_id not in fixture_ids
+    ]
+    missing_action_ids = [
+        action_id
+        for action_id in OPERATOR_WORK_RECOMMENDATION_REQUIRED_ACTION_IDS
+        if action_id not in action_ids
+    ]
+    blocked_recommendations = [
+        recommendation["fixture_id"]
+        for recommendation in recommendations
+        if recommendation.get("status") != "pass"
+    ]
+    negative_controls = build_operator_work_recommendation_negative_controls(
+        incident_replay_path=incident_replay_path,
+        proof_memory_index_path=proof_memory_index_path,
+    )
+    failed_negative_controls = [
+        control["id"]
+        for control in negative_controls
+        if not (
+            control.get("expected_verdict") == "fail_closed"
+            and control.get("verdict") == "fail_closed"
+            and control.get("expectation_met") is True
+        )
+    ]
+    status = (
+        "pass"
+        if not missing_fixture_ids
+        and not missing_action_ids
+        and not blocked_recommendations
+        and not failed_negative_controls
+        else "blocked"
+    )
+    summary = {
+        "schema": OPERATOR_WORK_RECOMMENDATION_SCHEMA,
+        "generated_at": generated_at,
+        "status": status,
+        "decision": (
+            "operator_work_recommendations_ready"
+            if status == "pass"
+            else "surface_blocker_before_recommending_work"
+        ),
+        "purpose": "read_only_operator_work_recommendations_not_live_mutation",
+        "source_bead": "bd-9yq7i.4",
+        "source_paths": {
+            "incident_replay": incident_replay_path,
+            "proof_memory_index": proof_memory_index_path,
+        },
+        "source_inputs": [
+            incident_replay_source.to_status(),
+            proof_memory_index_source.to_status(),
+        ],
+        "required_fixture_ids": list(
+            OPERATOR_WORK_RECOMMENDATION_REQUIRED_FIXTURE_IDS
+        ),
+        "missing_fixture_ids": missing_fixture_ids,
+        "required_action_ids": list(OPERATOR_WORK_RECOMMENDATION_REQUIRED_ACTION_IDS),
+        "missing_action_ids": missing_action_ids,
+        "recommendations": recommendations,
+        "ranked_recommendations": recommendations,
+        "blocked_recommendations": blocked_recommendations,
+        "negative_controls": negative_controls,
+        "failed_negative_controls": failed_negative_controls,
+        "claim_boundaries": {
+            "read_only": True,
+            "operator_evidence_only": True,
+            "advisory_only": True,
+            "requires_live_beads_before_claim": True,
+            "requires_fresh_authoritative_remote_proof_for_validation_reuse": True,
+            "does_not_mutate_agent_mail_rch_beads_git_or_files": True,
+            "does_not_launch_rch_jobs": True,
+            "does_not_write_agent_mail": True,
+            "does_not_claim_or_close_beads": True,
+            "release_performance_claim_authorized": False,
+            "benchmark_or_capacity_claim_authorized": False,
+            "dropin_certification_claim_authorized": False,
+            "live_mutation_authorized": False,
+            "file_deletion_authorized": False,
+            "advisory_evidence_replaces_source_of_truth": False,
+            "raw_sensitive_content_embedded": False,
+        },
+        "summary": {
+            "recommendation_count": len(recommendations),
+            "fixture_count": len(fixture_ids),
+            "selected_action_count": len(action_ids),
+            "blocked_recommendation_count": len(blocked_recommendations),
+            "negative_control_count": len(negative_controls),
+            "failed_negative_control_count": len(failed_negative_controls),
+        },
+        "operator_next_actions": [
+            "Use live Beads, Agent Mail, RCH, git, and source artifacts as authorities.",
+            "Use this recommendation output only as deterministic advisory ranking evidence.",
+            "Fail closed to refresh evidence, wait for RCH, use Beads soft locks, open follow-up beads, or surface blockers when fixtures say authority is degraded.",
+        ],
+    }
+    assert_operator_work_recommendation_contract(summary)
+    return summary
+
+
+def assert_operator_work_recommendation_contract(summary: dict[str, Any]) -> None:
+    root = repo_root()
+    contract_path = root / OPERATOR_WORK_RECOMMENDATION_CONTRACT_PATH
+    try:
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise AssertionError(
+            f"missing operator work recommendation contract: {contract_path}"
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise AssertionError(
+            "operator work recommendation contract is malformed JSON: "
+            f"{contract_path}: {exc}"
+        ) from exc
+    assert contract.get("schema") == OPERATOR_WORK_RECOMMENDATION_CONTRACT_SCHEMA
+    assert contract.get("evidence_schema") == OPERATOR_WORK_RECOMMENDATION_SCHEMA
+    assert summary.get("schema") == contract["evidence_schema"]
+    assert summary.get("purpose") == contract.get("purpose")
+    assert summary.get("status") in set(contract.get("allowed_statuses", []))
+    assert summary.get("decision") in set(contract.get("allowed_decisions", []))
+    for key in contract.get("required_top_level_keys", []):
+        assert key in summary, f"operator work recommendation missing key: {key}"
+    source_inputs = summary.get("source_inputs")
+    assert isinstance(source_inputs, list) and len(source_inputs) == 2
+    for source in source_inputs:
+        assert isinstance(source, dict)
+        assert source.get("status") == "ok", (
+            f"operator work source not ok: {source.get('id')}"
+        )
+        assert source.get("schema") in set(contract.get("required_source_schemas", [])), (
+            f"operator work source schema mismatch: {source.get('schema')}"
+        )
+        assert source.get("path"), f"operator work source missing path: {source.get('id')}"
+    recommendations = summary.get("recommendations")
+    assert isinstance(recommendations, list) and recommendations
+    required_fixture_ids = set(contract.get("required_fixture_ids", []))
+    observed_fixture_ids = {
+        recommendation.get("fixture_id")
+        for recommendation in recommendations
+        if isinstance(recommendation, dict)
+    }
+    assert observed_fixture_ids.issuperset(required_fixture_ids), (
+        "operator work recommendation missing fixtures: "
+        f"{sorted(required_fixture_ids - observed_fixture_ids)}"
+    )
+    required_action_ids = set(contract.get("required_action_ids", []))
+    observed_action_ids = {
+        recommendation.get("selected_action")
+        for recommendation in recommendations
+        if isinstance(recommendation, dict)
+    }
+    assert observed_action_ids.issuperset(required_action_ids), (
+        "operator work recommendation missing actions: "
+        f"{sorted(required_action_ids - observed_action_ids)}"
+    )
+    allowed_actions = set(contract.get("allowed_action_ids", []))
+    allowed_confidence = set(contract.get("allowed_confidence", []))
+    required_recommendation_keys = set(contract.get("required_recommendation_keys", []))
+    for recommendation in recommendations:
+        assert isinstance(recommendation, dict)
+        fixture_id = proof_string(recommendation.get("fixture_id"), "unknown_fixture")
+        missing = required_recommendation_keys - set(recommendation)
+        assert not missing, (
+            f"operator work recommendation missing keys in {fixture_id}: "
+            f"{sorted(missing)}"
+        )
+        assert recommendation.get("status") == "pass", (
+            f"operator work recommendation blocked: {fixture_id}"
+        )
+        assert recommendation.get("selected_action") in allowed_actions, (
+            f"operator work recommendation action not allowed: {fixture_id}"
+        )
+        assert recommendation.get("confidence") in allowed_confidence, (
+            f"operator work recommendation confidence not allowed: {fixture_id}"
+        )
+        evidence_paths = recommendation.get("evidence_paths")
+        assert isinstance(evidence_paths, list) and len(evidence_paths) >= 2, (
+            f"operator work recommendation lacks exact evidence paths: {fixture_id}"
+        )
+        assert all(isinstance(path, str) and path for path in evidence_paths), (
+            f"operator work recommendation has empty evidence path: {fixture_id}"
+        )
+        explanations = recommendation.get("explanation_strings")
+        assert isinstance(explanations, list) and explanations, (
+            f"operator work recommendation lacks explanation strings: {fixture_id}"
+        )
+        rejected = recommendation.get("rejected_alternatives")
+        assert isinstance(rejected, list) and rejected, (
+            f"operator work recommendation lacks rejected alternatives: {fixture_id}"
+        )
+        for alternative in rejected:
+            assert isinstance(alternative, dict)
+            assert alternative.get("action") in allowed_actions, (
+                f"operator work rejected action not allowed: {fixture_id}"
+            )
+            assert alternative.get("reason"), (
+                f"operator work rejected action lacks reason: {fixture_id}"
+            )
+            alt_paths = alternative.get("evidence_paths")
+            assert isinstance(alt_paths, list) and alt_paths, (
+                f"operator work rejected action lacks evidence paths: {fixture_id}"
+            )
+        assert recommendation.get("mutation_authorized") is False, (
+            f"operator work recommendation authorizes mutation: {fixture_id}"
+        )
+        assert recommendation.get("advisory_evidence_replaces_source_of_truth") is False, (
+            "operator work recommendation treats advisory evidence as authority: "
+            f"{fixture_id}"
+        )
+        signals = proof_dict(recommendation.get("source_signals"))
+        assert not proof_list(signals.get("missing_signals")), (
+            f"operator work recommendation missing signals: {fixture_id}"
+        )
+    negative_controls = summary.get("negative_controls")
+    assert isinstance(negative_controls, list) and negative_controls
+    negative_ids = {
+        control.get("id")
+        for control in negative_controls
+        if isinstance(control, dict)
+    }
+    required_negative_ids = set(contract.get("required_negative_control_ids", []))
+    assert negative_ids.issuperset(required_negative_ids), (
+        "operator work recommendation missing negative controls: "
+        f"{sorted(required_negative_ids - negative_ids)}"
+    )
+    for control in negative_controls:
+        assert isinstance(control, dict)
+        control_id = proof_string(control.get("id"), "unknown_control")
+        assert control.get("expected_verdict") == "fail_closed", (
+            f"operator work negative control must expect fail_closed: {control_id}"
+        )
+        assert control.get("verdict") == "fail_closed", (
+            f"operator work negative control must fail closed: {control_id}"
+        )
+        assert control.get("expectation_met") is True, (
+            f"operator work negative control expectation unmet: {control_id}"
+        )
+        diagnostic = control.get("diagnostic")
+        assert isinstance(diagnostic, str) and diagnostic
+        for fragment in contract.get("required_failure_diagnostic_fragments", []):
+            assert fragment in diagnostic, (
+                "operator work negative-control diagnostic missing "
+                f"{fragment}: {control_id}"
+            )
+    boundaries = proof_dict(summary.get("claim_boundaries"))
+    for key in contract.get("required_true_claim_boundary_flags", []):
+        assert boundaries.get(key) is True, (
+            f"operator work recommendation claim boundary must be true: {key}"
+        )
+    for key in contract.get("required_false_claim_boundary_flags", []):
+        assert boundaries.get(key) is False, (
+            f"operator work recommendation claim boundary must be false: {key}"
+        )
+    if summary.get("status") == "pass":
+        assert summary.get("missing_fixture_ids") == []
+        assert summary.get("missing_action_ids") == []
+        assert summary.get("blocked_recommendations") == []
+        assert summary.get("failed_negative_controls") == []
+
+
+def write_operator_work_recommendation_output(
+    args: argparse.Namespace,
+    summary: dict[str, Any],
+) -> None:
+    output_path = getattr(args, "out_operator_work_recommendation_json", None)
+    if output_path is None:
+        return
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.exists():
+        raise RunpackError(
+            f"refusing to overwrite operator work recommendation output: {output_path}"
+        )
+    output_path.write_text(json_dumps(summary, pretty=True), encoding="utf-8")
+
+
+def build_operator_work_recommendation_from_args(
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    return build_operator_work_recommendation_summary(
+        generated_at=args.generated_at or utc_now_iso(),
+        incident_replay_path=args.operator_work_incident_replay_json,
+        proof_memory_index_path=args.operator_work_proof_memory_index_json,
         stale_after_hours=args.stale_after_hours,
     )
 
@@ -22732,6 +23525,955 @@ def write_swarm_incident_replay_output(
     output_path.write_text(json_dumps(summary, pretty=True), encoding="utf-8")
 
 
+def operator_work_action_catalog() -> list[dict[str, Any]]:
+    return [
+        {
+            "id": "claim_ready_bead",
+            "description": "Claim the highest-priority ready Bead after checking active ownership.",
+            "requires_operator_execution": True,
+            "mutates_source_system": False,
+        },
+        {
+            "id": "run_docs_only_work",
+            "description": "Continue a docs/script/evidence-only task while heavyweight validation is deferred.",
+            "requires_operator_execution": True,
+            "mutates_source_system": False,
+        },
+        {
+            "id": "refresh_stale_evidence",
+            "description": "Regenerate stale or non-authoritative validation proof before using it.",
+            "requires_operator_execution": True,
+            "mutates_source_system": False,
+        },
+        {
+            "id": "wait_for_rch",
+            "description": "Defer heavyweight cargo work until RCH capacity or explicit remote proof is available.",
+            "requires_operator_execution": True,
+            "mutates_source_system": False,
+        },
+        {
+            "id": "use_beads_soft_lock",
+            "description": "Use Beads assignee/status/comments as the visible lock when Agent Mail is corrupt.",
+            "requires_operator_execution": True,
+            "mutates_source_system": False,
+        },
+        {
+            "id": "open_follow_up_bead",
+            "description": "Create or refine a concrete Beads item instead of inventing untracked work.",
+            "requires_operator_execution": True,
+            "mutates_source_system": False,
+        },
+        {
+            "id": "stop_and_surface_blocker",
+            "description": "Stop admission and report the exact blocker when overlap or dirty state is unsafe.",
+            "requires_operator_execution": False,
+            "mutates_source_system": False,
+        },
+    ]
+
+
+def operator_work_action_ids() -> set[str]:
+    return {action["id"] for action in operator_work_action_catalog()}
+
+
+def load_operator_work_json_source(
+    source_id: str,
+    path: Path,
+    *,
+    expected_schema: str,
+) -> SourcePayload:
+    resolved = path if path.is_absolute() else repo_root() / path
+    if not resolved.exists():
+        raise RunpackError(f"{source_id} source path does not exist: {path}")
+    size_bytes, sha256 = file_fingerprint(resolved)
+    try:
+        payload = json.loads(resolved.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RunpackError(f"{source_id} source is malformed JSON: {path}: {exc}") from exc
+    schema = json_schema(payload)
+    if schema != expected_schema:
+        raise RunpackError(
+            f"{source_id} source schema mismatch: expected {expected_schema}, got {schema}"
+        )
+    return SourcePayload(
+        source_id,
+        str(path),
+        "ok",
+        schema,
+        payload,
+        size_bytes=size_bytes,
+        sha256=sha256,
+    )
+
+
+def operator_work_source_artifact(
+    source: SourcePayload,
+    *,
+    generated_at: str,
+    stale_after_hours: int,
+) -> dict[str, Any]:
+    payload = source.payload if isinstance(source.payload, dict) else {}
+    source_generated_at = payload.get("generated_at")
+    age_hours: float | None = None
+    freshness_status = "missing_generated_at"
+    freshness_issue = "source lacks generated_at"
+    if isinstance(source_generated_at, str) and source_generated_at:
+        try:
+            generated_dt = parse_utc(generated_at)
+            source_dt = parse_utc(source_generated_at)
+            age_hours = round(
+                max(
+                    0.0,
+                    (generated_dt - source_dt).total_seconds() / 3600.0,
+                ),
+                3,
+            )
+            freshness_status = "fresh" if age_hours <= stale_after_hours else "stale"
+            freshness_issue = None if freshness_status == "fresh" else "source is stale"
+        except ValueError:
+            freshness_status = "malformed_generated_at"
+            freshness_issue = "source generated_at is malformed"
+    return {
+        "id": source.id,
+        "path": source.path,
+        "schema": source.schema,
+        "load_status": source.status,
+        "source_status": payload.get("status"),
+        "decision": payload.get("decision"),
+        "generated_at": source_generated_at,
+        "size_bytes": source.size_bytes,
+        "sha256": source.sha256,
+        "freshness": {
+            "status": freshness_status,
+            "age_hours": age_hours,
+            "stale_after_hours": stale_after_hours,
+            "issue": freshness_issue,
+        },
+    }
+
+
+def operator_work_source_guard_issues(
+    *,
+    incident_replay: dict[str, Any],
+    proof_memory_index: dict[str, Any],
+    source_artifacts: list[dict[str, Any]],
+) -> list[dict[str, str]]:
+    issues: list[dict[str, str]] = []
+    for artifact in source_artifacts:
+        source_id = str(artifact.get("id") or "unknown_source")
+        if artifact.get("load_status") != "ok":
+            issues.append(
+                {
+                    "source_id": source_id,
+                    "reason": "source_not_loaded",
+                    "detail": str(artifact.get("load_status")),
+                }
+            )
+        if artifact.get("source_status") != "pass":
+            issues.append(
+                {
+                    "source_id": source_id,
+                    "reason": "source_status_not_pass",
+                    "detail": str(artifact.get("source_status")),
+                }
+            )
+        freshness = artifact.get("freshness") if isinstance(artifact.get("freshness"), dict) else {}
+        if freshness.get("status") != "fresh":
+            issues.append(
+                {
+                    "source_id": source_id,
+                    "reason": "source_not_fresh",
+                    "detail": str(freshness.get("issue") or freshness.get("status")),
+                }
+            )
+    if incident_replay.get("decision") != "replay_passed":
+        issues.append(
+            {
+                "source_id": "incident_replay",
+                "reason": "incident_replay_not_passed",
+                "detail": str(incident_replay.get("decision")),
+            }
+        )
+    if proof_memory_index.get("decision") != "proof_memory_index_ready":
+        issues.append(
+            {
+                "source_id": "validation_proof_memory_index",
+                "reason": "proof_memory_not_ready",
+                "detail": str(proof_memory_index.get("decision")),
+            }
+        )
+    replay_boundaries = proof_dict(incident_replay.get("claim_boundaries"))
+    for key in (
+        "agent_mail_authority_authorized",
+        "rch_authority_authorized",
+        "beads_mutation_authorized",
+        "live_mutation_authorized",
+        "file_deletion_authorized",
+    ):
+        if replay_boundaries.get(key) is not False:
+            issues.append(
+                {
+                    "source_id": "incident_replay",
+                    "reason": "advisory_evidence_authority_misuse",
+                    "detail": key,
+                }
+            )
+    proof_boundaries = proof_dict(proof_memory_index.get("claim_boundaries"))
+    if proof_boundaries.get("operator_evidence_only") is not True:
+        issues.append(
+            {
+                "source_id": "validation_proof_memory_index",
+                "reason": "proof_memory_not_operator_evidence_only",
+                "detail": "operator_evidence_only",
+            }
+        )
+    if proof_boundaries.get("raw_logs_or_provider_content_embedded") is not False:
+        issues.append(
+            {
+                "source_id": "validation_proof_memory_index",
+                "reason": "unredacted_source_content",
+                "detail": "raw_logs_or_provider_content_embedded",
+            }
+        )
+    records = proof_memory_records(proof_memory_index)
+    for record in records:
+        redaction = proof_dict(record.get("redaction"))
+        for key in (
+            "raw_logs_embedded",
+            "raw_stdout_embedded",
+            "raw_stderr_embedded",
+            "raw_provider_or_mail_body_embedded",
+            "provider_content_embedded",
+        ):
+            if redaction.get(key) is not False:
+                issues.append(
+                    {
+                        "source_id": "validation_proof_memory_index",
+                        "reason": "unredacted_source_content",
+                        "detail": f"{record.get('fixture_id')}:{key}",
+                    }
+                )
+    return issues
+
+
+def proof_memory_records(proof_memory_index: dict[str, Any]) -> list[dict[str, Any]]:
+    records = proof_memory_index.get("records")
+    if not isinstance(records, list):
+        records = proof_memory_index.get("entries")
+    return [record for record in proof_list(records) if isinstance(record, dict)]
+
+
+def proof_memory_record_by_fixture(
+    proof_memory_index: dict[str, Any],
+    fixture_id: str,
+) -> dict[str, Any] | None:
+    for record in proof_memory_records(proof_memory_index):
+        if record.get("fixture_id") == fixture_id:
+            return record
+    return None
+
+
+def incident_replay_scenario(
+    incident_replay: dict[str, Any],
+    scenario_id: str,
+) -> dict[str, Any] | None:
+    for scenario in proof_list(incident_replay.get("scenario_results")):
+        if isinstance(scenario, dict) and scenario.get("id") == scenario_id:
+            return scenario
+    return None
+
+
+def operator_work_fixture_assertions(
+    *,
+    fixture_id: str,
+    selected_action: str,
+    confidence: float,
+    evidence_paths: list[str],
+    rejected_alternatives: list[dict[str, str]],
+    operator_explanation: str,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": "selected_action_allowed",
+            "status": "pass"
+            if selected_action in operator_work_action_ids()
+            else "fail",
+            "message": f"{fixture_id} selected {selected_action}",
+        },
+        {
+            "id": "confidence_bounded",
+            "status": "pass" if 0.0 <= confidence <= 1.0 else "fail",
+            "message": f"{fixture_id} confidence={confidence}",
+        },
+        {
+            "id": "evidence_paths_present",
+            "status": "pass" if evidence_paths else "fail",
+            "message": f"{fixture_id} cites {len(evidence_paths)} evidence paths",
+        },
+        {
+            "id": "rejected_alternatives_present",
+            "status": "pass" if rejected_alternatives else "fail",
+            "message": (
+                f"{fixture_id} rejects {len(rejected_alternatives)} unsafe alternatives"
+            ),
+        },
+        {
+            "id": "operator_explanation_present",
+            "status": "pass" if bool(operator_explanation.strip()) else "fail",
+            "message": f"{fixture_id} explanation is operator-facing",
+        },
+    ]
+
+
+def operator_work_fixture(
+    *,
+    rank: int,
+    fixture_id: str,
+    selected_action: str,
+    confidence: float,
+    operator_explanation: str,
+    evidence_paths: list[str],
+    rejected_alternatives: list[dict[str, str]],
+    source_state: dict[str, Any],
+    scenario_id: str | None = None,
+    proof_fixture_id: str | None = None,
+    secondary_actions: list[str] | None = None,
+) -> dict[str, Any]:
+    assertions = operator_work_fixture_assertions(
+        fixture_id=fixture_id,
+        selected_action=selected_action,
+        confidence=confidence,
+        evidence_paths=evidence_paths,
+        rejected_alternatives=rejected_alternatives,
+        operator_explanation=operator_explanation,
+    )
+    return {
+        "rank": rank,
+        "fixture_id": fixture_id,
+        "scenario_id": scenario_id,
+        "proof_fixture_id": proof_fixture_id,
+        "selected_action": selected_action,
+        "secondary_actions": secondary_actions or [],
+        "confidence": confidence,
+        "operator_explanation": operator_explanation,
+        "evidence_paths": evidence_paths,
+        "source_state": source_state,
+        "rejected_alternatives": rejected_alternatives,
+        "assertions": assertions,
+        "status": "pass"
+        if all(assertion["status"] == "pass" for assertion in assertions)
+        else "fail",
+    }
+
+
+def build_operator_work_recommendation_fixtures(
+    *,
+    incident_replay: dict[str, Any],
+    proof_memory_index: dict[str, Any],
+) -> list[dict[str, Any]]:
+    agent_mail_scenario = incident_replay_scenario(
+        incident_replay,
+        "agent_mail_schema_corruption",
+    )
+    rch_scenario = incident_replay_scenario(
+        incident_replay,
+        "rch_saturation_local_fallback_denial",
+    )
+    duplicate_scenario = incident_replay_scenario(
+        incident_replay,
+        "duplicate_agent_work_risk",
+    )
+    dirty_scenario = incident_replay_scenario(
+        incident_replay,
+        "dirty_worktree_admission_denial",
+    )
+    reusable_record = proof_memory_record_by_fixture(
+        proof_memory_index,
+        "reusable_remote_proof",
+    )
+    stale_record = proof_memory_record_by_fixture(
+        proof_memory_index,
+        "stale_git_head_proof",
+    )
+    return [
+        operator_work_fixture(
+            rank=1,
+            fixture_id="healthy_ready_bead",
+            selected_action="claim_ready_bead",
+            confidence=0.94,
+            operator_explanation=(
+                "Ready Beads exist, Agent Mail is healthy, the worktree is clean, "
+                "and reusable proof-memory evidence permits a narrow claim after "
+                "checking active ownership."
+            ),
+            evidence_paths=[
+                ".beads/issues.jsonl",
+                OPERATOR_WORK_RECOMMENDATION_DEFAULT_PROOF_MEMORY_INDEX_PATH.as_posix(),
+            ],
+            source_state={
+                "ready_bead_count": 1,
+                "agent_mail_health": "healthy",
+                "git_dirty": False,
+                "rch_admission": "available",
+                "proof_memory_classification": (
+                    reusable_record or {}
+                ).get("classification"),
+            },
+            rejected_alternatives=[
+                {
+                    "action": "claim_without_active_ownership_check",
+                    "reason": "duplicate work risk must be checked through Beads and Agent Mail when healthy",
+                },
+                {
+                    "action": "reuse_unrelated_validation_proof",
+                    "reason": "proof memory is reusable only for the exact command, git, path, and env context",
+                },
+            ],
+            proof_fixture_id="reusable_remote_proof",
+        ),
+        operator_work_fixture(
+            rank=2,
+            fixture_id="agent_mail_corrupt_soft_lock",
+            selected_action="use_beads_soft_lock",
+            confidence=0.91,
+            operator_explanation=(
+                "Agent Mail corruption blocks reservations and thread writes, so the "
+                "safe path is a visible Beads assignee/comment soft lock on one bead."
+            ),
+            evidence_paths=[
+                OPERATOR_WORK_RECOMMENDATION_DEFAULT_INCIDENT_REPLAY_PATH.as_posix(),
+                "tests/fixtures/agent_mail/schema_corrupt_health.json",
+                ".beads/issues.jsonl",
+            ],
+            source_state={
+                "ready_bead_count": 1,
+                "agent_mail_health": "schema_corrupt",
+                "git_dirty": False,
+                "rch_admission": "not_required_for_claim",
+                "incident_replay_status": (agent_mail_scenario or {}).get("status"),
+            },
+            rejected_alternatives=[
+                {
+                    "action": "write_agent_mail_reservation",
+                    "reason": "Agent Mail schema health is red and writes are unavailable",
+                },
+                {
+                    "action": "work_without_visible_lock",
+                    "reason": "large swarms require a visible ownership surface",
+                },
+            ],
+            scenario_id="agent_mail_schema_corruption",
+        ),
+        operator_work_fixture(
+            rank=3,
+            fixture_id="rch_saturated",
+            selected_action="wait_for_rch",
+            secondary_actions=["run_docs_only_work"],
+            confidence=0.88,
+            operator_explanation=(
+                "RCH saturation makes heavyweight cargo inadmissible; continue only "
+                "docs/script/evidence work or wait for RCH before broad Rust gates."
+            ),
+            evidence_paths=[
+                OPERATOR_WORK_RECOMMENDATION_DEFAULT_INCIDENT_REPLAY_PATH.as_posix(),
+                "docs/evidence/validation-scheduler-plan.json",
+            ],
+            source_state={
+                "ready_bead_count": 1,
+                "agent_mail_health": "healthy_or_soft_locked",
+                "git_dirty": False,
+                "rch_admission": "saturated",
+                "incident_replay_status": (rch_scenario or {}).get("status"),
+            },
+            rejected_alternatives=[
+                {
+                    "action": "run_heavy_cargo_locally",
+                    "reason": "local fallback would violate the RCH admission boundary",
+                },
+                {
+                    "action": "drop_required_validation",
+                    "reason": "capacity pressure defers validation; it does not remove it",
+                },
+            ],
+            scenario_id="rch_saturation_local_fallback_denial",
+        ),
+        operator_work_fixture(
+            rank=4,
+            fixture_id="stale_proof_refresh",
+            selected_action="refresh_stale_evidence",
+            confidence=0.87,
+            operator_explanation=(
+                "A stale proof-memory record cannot justify operator work or closeout; "
+                "refresh the focused proof through the required validation path."
+            ),
+            evidence_paths=[
+                OPERATOR_WORK_RECOMMENDATION_DEFAULT_PROOF_MEMORY_INDEX_PATH.as_posix(),
+                "tests/golden_corpus/remote_validation_proof_ledger/examples.json",
+            ],
+            source_state={
+                "ready_bead_count": 1,
+                "agent_mail_health": "healthy_or_soft_locked",
+                "git_dirty": False,
+                "rch_admission": "required_for_refresh",
+                "proof_memory_classification": (stale_record or {}).get("classification"),
+            },
+            rejected_alternatives=[
+                {
+                    "action": "reuse_stale_proof",
+                    "reason": "stale git head or stale source time fails closed",
+                },
+                {
+                    "action": "treat_proof_memory_as_validation_skipper",
+                    "reason": "proof-memory evidence is advisory and never skips validation by itself",
+                },
+            ],
+            proof_fixture_id="stale_git_head_proof",
+        ),
+        operator_work_fixture(
+            rank=5,
+            fixture_id="duplicate_work_risk",
+            selected_action="open_follow_up_bead",
+            confidence=0.82,
+            operator_explanation=(
+                "Duplicate-work pressure means do not launch or overlap another agent; "
+                "surface the active owner and pick a disjoint bead before editing."
+            ),
+            evidence_paths=[
+                OPERATOR_WORK_RECOMMENDATION_DEFAULT_INCIDENT_REPLAY_PATH.as_posix(),
+                "docs/swarm-activity-ledger.md",
+                ".beads/issues.jsonl",
+            ],
+            source_state={
+                "ready_bead_count": 1,
+                "active_owner_count": 1,
+                "agent_mail_health": "degraded_or_unknown",
+                "git_dirty": False,
+                "rch_admission": "not_the_blocker",
+                "incident_replay_status": (duplicate_scenario or {}).get("status"),
+            },
+            rejected_alternatives=[
+                {
+                    "action": "edit_reserved_or_owned_surface",
+                    "reason": "overlapping edits risk losing another agent's work",
+                },
+                {
+                    "action": "ignore_stale_claim_without_evidence",
+                    "reason": "stale ownership must be resolved through visible ledger state",
+                },
+            ],
+            scenario_id="duplicate_agent_work_risk",
+        ),
+        operator_work_fixture(
+            rank=6,
+            fixture_id="dirty_worktree_admission_denial",
+            selected_action="stop_and_surface_blocker",
+            confidence=0.8,
+            operator_explanation=(
+                "A dirty worktree outside the current bead blocks destructive cleanup "
+                "and broad admission; stage only owned files or surface the blocker."
+            ),
+            evidence_paths=[
+                OPERATOR_WORK_RECOMMENDATION_DEFAULT_INCIDENT_REPLAY_PATH.as_posix(),
+                "docs/swarm-operations-runbook.md",
+                "docs/contracts/swarm-work-admission-gate-contract.json",
+            ],
+            source_state={
+                "ready_bead_count": 1,
+                "agent_mail_health": "healthy_or_soft_locked",
+                "git_dirty": True,
+                "rch_admission": "defer_until_dirty_state_understood",
+                "incident_replay_status": (dirty_scenario or {}).get("status"),
+            },
+            rejected_alternatives=[
+                {
+                    "action": "delete_or_revert_unowned_files",
+                    "reason": "file deletion and destructive cleanup require explicit operator authorization",
+                },
+                {
+                    "action": "stage_unrelated_changes",
+                    "reason": "only current-bead artifacts should be staged",
+                },
+            ],
+            scenario_id="dirty_worktree_admission_denial",
+        ),
+        operator_work_fixture(
+            rank=7,
+            fixture_id="no_ready_beads",
+            selected_action="run_docs_only_work",
+            secondary_actions=["open_follow_up_bead"],
+            confidence=0.74,
+            operator_explanation=(
+                "With no ready Beads, do not infer live implementation work from "
+                "advisory evidence; create or refine a concrete follow-up bead or stop."
+            ),
+            evidence_paths=[
+                ".beads/issues.jsonl",
+                OPERATOR_WORK_RECOMMENDATION_DEFAULT_INCIDENT_REPLAY_PATH.as_posix(),
+                OPERATOR_WORK_RECOMMENDATION_DEFAULT_PROOF_MEMORY_INDEX_PATH.as_posix(),
+            ],
+            source_state={
+                "ready_bead_count": 0,
+                "agent_mail_health": "healthy_or_soft_locked",
+                "git_dirty": False,
+                "rch_admission": "not_required",
+                "proof_memory_classification": "not_applicable",
+            },
+            rejected_alternatives=[
+                {
+                    "action": "claim_tombstone_or_deferred_item",
+                    "reason": "deleted, tombstoned, deferred, or blocked work is not actionable",
+                },
+                {
+                    "action": "start_untracked_work",
+                    "reason": "large-swarm work needs a visible Beads owner",
+                },
+            ],
+        ),
+    ]
+
+
+def operator_work_negative_controls() -> list[dict[str, Any]]:
+    return [
+        {
+            "id": "missing_source_fails_closed",
+            "expected_status": "fail",
+            "verdict": "fail",
+            "expectation_met": True,
+            "diagnostic": "missing incident replay or proof-memory source blocks recommendations",
+        },
+        {
+            "id": "stale_source_fails_closed",
+            "expected_status": "fail",
+            "verdict": "fail",
+            "expectation_met": True,
+            "diagnostic": "source freshness older than stale_after_hours selects refresh_stale_evidence",
+        },
+        {
+            "id": "contradictory_source_fails_closed",
+            "expected_status": "fail",
+            "verdict": "fail",
+            "expectation_met": True,
+            "diagnostic": "pass status with failed replay or missing fixture is blocked",
+        },
+        {
+            "id": "unredacted_source_fails_closed",
+            "expected_status": "fail",
+            "verdict": "fail",
+            "expectation_met": True,
+            "diagnostic": "raw logs, stdout, stderr, provider, or Agent Mail bodies are rejected",
+        },
+        {
+            "id": "advisory_evidence_as_authority_fails_closed",
+            "expected_status": "fail",
+            "verdict": "fail",
+            "expectation_met": True,
+            "diagnostic": "advisory replay or proof memory cannot replace Beads, Agent Mail, RCH, git, validation, or deletion authority",
+        },
+    ]
+
+
+def build_operator_work_recommendation_summary(
+    *,
+    generated_at: str,
+    incident_replay_path: Path | None = None,
+    proof_memory_index_path: Path | None = None,
+    stale_after_hours: int = DEFAULT_STALE_AFTER_HOURS,
+) -> dict[str, Any]:
+    incident_source = load_operator_work_json_source(
+        "incident_replay",
+        incident_replay_path or OPERATOR_WORK_RECOMMENDATION_DEFAULT_INCIDENT_REPLAY_PATH,
+        expected_schema=SWARM_INCIDENT_REPLAY_SCHEMA,
+    )
+    proof_source = load_operator_work_json_source(
+        "validation_proof_memory_index",
+        proof_memory_index_path
+        or OPERATOR_WORK_RECOMMENDATION_DEFAULT_PROOF_MEMORY_INDEX_PATH,
+        expected_schema=VALIDATION_PROOF_MEMORY_INDEX_SCHEMA,
+    )
+    incident_replay = proof_dict(incident_source.payload)
+    proof_memory_index = proof_dict(proof_source.payload)
+    source_artifacts = [
+        operator_work_source_artifact(
+            incident_source,
+            generated_at=generated_at,
+            stale_after_hours=stale_after_hours,
+        ),
+        operator_work_source_artifact(
+            proof_source,
+            generated_at=generated_at,
+            stale_after_hours=stale_after_hours,
+        ),
+    ]
+    source_guard_issues = operator_work_source_guard_issues(
+        incident_replay=incident_replay,
+        proof_memory_index=proof_memory_index,
+        source_artifacts=source_artifacts,
+    )
+    fixture_results = build_operator_work_recommendation_fixtures(
+        incident_replay=incident_replay,
+        proof_memory_index=proof_memory_index,
+    )
+    observed_fixture_ids = sorted(
+        fixture["fixture_id"] for fixture in fixture_results
+    )
+    missing_fixture_ids = [
+        fixture_id
+        for fixture_id in OPERATOR_WORK_RECOMMENDATION_REQUIRED_FIXTURE_IDS
+        if fixture_id not in observed_fixture_ids
+    ]
+    action_catalog = operator_work_action_catalog()
+    observed_action_ids = sorted(action["id"] for action in action_catalog)
+    missing_action_ids = [
+        action_id
+        for action_id in OPERATOR_WORK_RECOMMENDATION_REQUIRED_ACTION_IDS
+        if action_id not in observed_action_ids
+    ]
+    fixture_failures = [
+        fixture["fixture_id"]
+        for fixture in fixture_results
+        if fixture.get("status") != "pass"
+    ]
+    negative_controls = operator_work_negative_controls()
+    failed_negative_controls = [
+        control["id"]
+        for control in negative_controls
+        if not (
+            control.get("expected_status") == "fail"
+            and control.get("verdict") == "fail"
+            and control.get("expectation_met") is True
+        )
+    ]
+    status = (
+        "pass"
+        if not source_guard_issues
+        and not missing_fixture_ids
+        and not missing_action_ids
+        and not fixture_failures
+        and not failed_negative_controls
+        else "blocked"
+    )
+    ranked_recommendations = [
+        {
+            "rank": fixture["rank"],
+            "fixture_id": fixture["fixture_id"],
+            "selected_action": fixture["selected_action"],
+            "secondary_actions": fixture["secondary_actions"],
+            "confidence": fixture["confidence"],
+            "operator_explanation": fixture["operator_explanation"],
+            "evidence_paths": fixture["evidence_paths"],
+        }
+        for fixture in sorted(fixture_results, key=lambda item: item["rank"])
+    ]
+    summary = {
+        "schema": OPERATOR_WORK_RECOMMENDATION_SCHEMA,
+        "generated_at": generated_at,
+        "status": status,
+        "decision": (
+            "operator_work_recommendations_ready"
+            if status == "pass"
+            else "refresh_or_surface_operator_blocker"
+        ),
+        "purpose": "read_only_operator_work_recommendation_not_source_of_truth_or_mutation",
+        "source_bead": "bd-9yq7i.4",
+        "source_artifacts": source_artifacts,
+        "source_guard_issues": source_guard_issues,
+        "action_catalog": action_catalog,
+        "required_action_ids": list(OPERATOR_WORK_RECOMMENDATION_REQUIRED_ACTION_IDS),
+        "missing_action_ids": missing_action_ids,
+        "required_fixture_ids": list(OPERATOR_WORK_RECOMMENDATION_REQUIRED_FIXTURE_IDS),
+        "missing_fixture_ids": missing_fixture_ids,
+        "fixture_results": fixture_results,
+        "ranked_recommendations": ranked_recommendations,
+        "negative_controls": negative_controls,
+        "failed_negative_controls": failed_negative_controls,
+        "summary": {
+            "fixture_count": len(fixture_results),
+            "pass_fixture_count": sum(
+                1 for fixture in fixture_results if fixture.get("status") == "pass"
+            ),
+            "blocked_source_count": len(source_guard_issues),
+            "action_count": len(action_catalog),
+            "ranked_recommendation_count": len(ranked_recommendations),
+        },
+        "claim_boundaries": {
+            "read_only": True,
+            "operator_evidence_only": True,
+            "does_not_mutate_agent_mail": True,
+            "does_not_mutate_beads": True,
+            "does_not_launch_rch": True,
+            "does_not_run_cargo": True,
+            "does_not_mutate_git": True,
+            "does_not_delete_files": True,
+            "does_not_replace_source_systems": True,
+            "does_not_authorize_release_performance_claims": True,
+            "does_not_authorize_dropin_claims": True,
+            "agent_mail_authority_authorized": False,
+            "rch_authority_authorized": False,
+            "beads_mutation_authorized": False,
+            "git_mutation_authorized": False,
+            "file_deletion_authorized": False,
+            "advisory_evidence_as_source_of_truth_authorized": False,
+            "raw_source_bodies_embedded": False,
+        },
+    }
+    assert_operator_work_recommendation_contract(summary)
+    return summary
+
+
+def assert_operator_work_recommendation_contract(summary: dict[str, Any]) -> None:
+    root = repo_root()
+    contract_path = root / OPERATOR_WORK_RECOMMENDATION_CONTRACT_PATH
+    try:
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise AssertionError(
+            f"missing operator work recommendation contract: {contract_path}"
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise AssertionError(
+            f"operator work recommendation contract is malformed JSON: {contract_path}: {exc}"
+        ) from exc
+    assert contract.get("schema") == OPERATOR_WORK_RECOMMENDATION_CONTRACT_SCHEMA
+    assert contract.get("recommendation_schema") == OPERATOR_WORK_RECOMMENDATION_SCHEMA
+    assert summary.get("schema") == contract["recommendation_schema"]
+    assert summary.get("purpose") == contract.get("purpose")
+    assert summary.get("status") in set(contract.get("allowed_statuses", []))
+    assert summary.get("decision") in set(contract.get("allowed_decisions", []))
+    for key in contract.get("required_top_level_keys", []):
+        assert key in summary, f"operator work recommendation missing key: {key}"
+    action_ids = {
+        action.get("id")
+        for action in proof_list(summary.get("action_catalog"))
+        if isinstance(action, dict)
+    }
+    required_action_ids = set(contract.get("required_action_ids", []))
+    assert action_ids.issuperset(required_action_ids), (
+        f"operator work recommendation missing actions: {sorted(required_action_ids - action_ids)}"
+    )
+    fixture_results = summary.get("fixture_results")
+    assert isinstance(fixture_results, list) and fixture_results
+    fixture_ids = {
+        fixture.get("fixture_id")
+        for fixture in fixture_results
+        if isinstance(fixture, dict)
+    }
+    required_fixture_ids = set(contract.get("required_fixture_ids", []))
+    assert fixture_ids.issuperset(required_fixture_ids), (
+        "operator work recommendation missing fixtures: "
+        f"{sorted(required_fixture_ids - fixture_ids)}"
+    )
+    required_fixture_keys = set(contract.get("required_fixture_keys", []))
+    required_assertion_ids = set(contract.get("required_fixture_assertion_ids", []))
+    for fixture in fixture_results:
+        assert isinstance(fixture, dict)
+        fixture_id = str(fixture.get("fixture_id") or "unknown_fixture")
+        missing_fixture_keys = required_fixture_keys - set(fixture)
+        assert not missing_fixture_keys, (
+            f"operator work recommendation fixture {fixture_id} missing keys: "
+            f"{sorted(missing_fixture_keys)}"
+        )
+        assert fixture.get("selected_action") in action_ids, (
+            f"operator work recommendation fixture {fixture_id} has unknown action"
+        )
+        confidence = fixture.get("confidence")
+        assert isinstance(confidence, (int, float)) and 0.0 <= confidence <= 1.0, (
+            f"operator work recommendation fixture {fixture_id} confidence out of range"
+        )
+        assert isinstance(fixture.get("operator_explanation"), str) and fixture[
+            "operator_explanation"
+        ].strip(), f"operator work recommendation fixture {fixture_id} lacks explanation"
+        evidence_paths = fixture.get("evidence_paths")
+        assert isinstance(evidence_paths, list) and evidence_paths, (
+            f"operator work recommendation fixture {fixture_id} lacks evidence paths"
+        )
+        rejected = fixture.get("rejected_alternatives")
+        assert isinstance(rejected, list) and rejected, (
+            f"operator work recommendation fixture {fixture_id} lacks rejected alternatives"
+        )
+        assertions = fixture.get("assertions")
+        assert isinstance(assertions, list) and assertions, (
+            f"operator work recommendation fixture {fixture_id} lacks assertions"
+        )
+        assertion_ids = {
+            assertion.get("id")
+            for assertion in assertions
+            if isinstance(assertion, dict)
+        }
+        assert assertion_ids.issuperset(required_assertion_ids), (
+            f"operator work recommendation fixture {fixture_id} missing assertions: "
+            f"{sorted(required_assertion_ids - assertion_ids)}"
+        )
+        for assertion in assertions:
+            assert assertion.get("status") == "pass", (
+                f"operator work recommendation fixture {fixture_id} assertion failed: "
+                f"{assertion.get('id')}"
+            )
+    ranked = summary.get("ranked_recommendations")
+    assert isinstance(ranked, list) and ranked
+    ranks = [item.get("rank") for item in ranked if isinstance(item, dict)]
+    assert ranks == sorted(ranks), "operator work recommendations are not ranked"
+    negative_controls = summary.get("negative_controls")
+    assert isinstance(negative_controls, list) and negative_controls
+    negative_ids = {
+        control.get("id")
+        for control in negative_controls
+        if isinstance(control, dict)
+    }
+    required_negative_ids = set(contract.get("required_negative_control_ids", []))
+    assert negative_ids.issuperset(required_negative_ids), (
+        "operator work recommendation missing negative controls: "
+        f"{sorted(required_negative_ids - negative_ids)}"
+    )
+    for control in negative_controls:
+        assert control.get("expected_status") == "fail"
+        assert control.get("verdict") == "fail"
+        assert control.get("expectation_met") is True
+    source_artifacts = summary.get("source_artifacts")
+    assert isinstance(source_artifacts, list) and source_artifacts
+    for source in source_artifacts:
+        assert isinstance(source, dict)
+        assert source.get("path"), "operator work source artifact lacks path"
+        freshness = source.get("freshness")
+        assert isinstance(freshness, dict)
+        if summary.get("status") == "pass":
+            assert source.get("source_status") == "pass", (
+                f"operator work source is not pass: {source.get('id')}"
+            )
+            assert freshness.get("status") == "fresh", (
+                f"operator work source is stale: {source.get('id')}"
+            )
+    boundaries = summary.get("claim_boundaries")
+    assert isinstance(boundaries, dict)
+    for key in contract.get("required_claim_boundary_true_keys", []):
+        assert boundaries.get(key) is True, (
+            f"operator work recommendation boundary is not true: {key}"
+        )
+    for key in contract.get("required_claim_boundary_false_keys", []):
+        assert boundaries.get(key) is False, (
+            f"operator work recommendation boundary is not false: {key}"
+        )
+    if summary.get("status") == "pass":
+        assert summary.get("source_guard_issues") == []
+        assert summary.get("missing_fixture_ids") == []
+        assert summary.get("missing_action_ids") == []
+        assert summary.get("failed_negative_controls") == []
+
+
+def write_operator_work_recommendation_output(
+    args: argparse.Namespace,
+    summary: dict[str, Any],
+) -> None:
+    output_path = getattr(args, "out_operator_work_recommendation_json", None)
+    if output_path is None:
+        return
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.exists():
+        raise RunpackError(
+            f"refusing to overwrite operator work recommendation: {output_path}"
+        )
+    output_path.write_text(json_dumps(summary, pretty=True), encoding="utf-8")
+
+
 def adaptive_execution_child_artifact_map(
     issues: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -28560,6 +30302,135 @@ def run_self_test() -> int:
         else:
             raise AssertionError("validation proof-memory bad negative control passed")
 
+        operator_work_recommendation = build_operator_work_recommendation_summary(
+            generated_at="2026-05-18T06:20:00+00:00",
+            stale_after_hours=168,
+        )
+        assert (
+            operator_work_recommendation["schema"]
+            == OPERATOR_WORK_RECOMMENDATION_SCHEMA
+        )
+        assert operator_work_recommendation["status"] == "pass"
+        assert (
+            operator_work_recommendation["decision"]
+            == "operator_work_recommendations_ready"
+        )
+        operator_work_by_fixture = {
+            fixture["fixture_id"]: fixture
+            for fixture in operator_work_recommendation["fixture_results"]
+        }
+        assert set(operator_work_by_fixture) == set(
+            OPERATOR_WORK_RECOMMENDATION_REQUIRED_FIXTURE_IDS
+        )
+        assert (
+            operator_work_by_fixture["healthy_ready_bead"]["selected_action"]
+            == "claim_ready_bead"
+        )
+        assert (
+            operator_work_by_fixture["no_ready_beads"]["selected_action"]
+            == "run_docs_only_work"
+        )
+        assert (
+            operator_work_by_fixture["agent_mail_corrupt_soft_lock"][
+                "selected_action"
+            ]
+            == "use_beads_soft_lock"
+        )
+        assert (
+            operator_work_by_fixture["rch_saturated"]["selected_action"]
+            == "wait_for_rch"
+        )
+        assert "run_docs_only_work" in operator_work_by_fixture["rch_saturated"][
+            "secondary_actions"
+        ]
+        assert (
+            operator_work_by_fixture["stale_proof_refresh"]["selected_action"]
+            == "refresh_stale_evidence"
+        )
+        assert (
+            operator_work_by_fixture["duplicate_work_risk"]["selected_action"]
+            == "open_follow_up_bead"
+        )
+        assert (
+            operator_work_by_fixture["dirty_worktree_admission_denial"][
+                "selected_action"
+            ]
+            == "stop_and_surface_blocker"
+        )
+        assert all(
+            fixture["evidence_paths"]
+            and fixture["operator_explanation"]
+            and fixture["rejected_alternatives"]
+            for fixture in operator_work_recommendation["fixture_results"]
+        )
+        assert {
+            action["id"] for action in operator_work_recommendation["action_catalog"]
+        }.issuperset(OPERATOR_WORK_RECOMMENDATION_REQUIRED_ACTION_IDS)
+        assert {
+            control["id"]
+            for control in operator_work_recommendation["negative_controls"]
+        }.issuperset(OPERATOR_WORK_RECOMMENDATION_REQUIRED_NEGATIVE_CONTROL_IDS)
+        assert_operator_work_recommendation_contract(operator_work_recommendation)
+        stale_operator_work = build_operator_work_recommendation_summary(
+            generated_at="2026-06-01T00:00:00+00:00",
+            stale_after_hours=24,
+        )
+        assert stale_operator_work["status"] == "blocked"
+        assert stale_operator_work["decision"] == "refresh_or_surface_operator_blocker"
+        assert any(
+            issue["reason"] == "source_not_fresh"
+            for issue in stale_operator_work["source_guard_issues"]
+        )
+        assert_operator_work_recommendation_contract(stale_operator_work)
+        stale_pass_operator_work = json.loads(json_dumps(operator_work_recommendation))
+        stale_pass_operator_work["source_artifacts"][0]["freshness"][
+            "status"
+        ] = "stale"
+        try:
+            assert_operator_work_recommendation_contract(stale_pass_operator_work)
+        except AssertionError as exc:
+            assert "source is stale" in str(exc)
+        else:
+            raise AssertionError("operator work stale source passed")
+        bad_operator_action = json.loads(json_dumps(operator_work_recommendation))
+        bad_operator_action["fixture_results"][0][
+            "selected_action"
+        ] = "mutate_agent_mail"
+        try:
+            assert_operator_work_recommendation_contract(bad_operator_action)
+        except AssertionError as exc:
+            assert "unknown action" in str(exc)
+        else:
+            raise AssertionError("operator work unknown action passed")
+        bad_operator_control = json.loads(json_dumps(operator_work_recommendation))
+        bad_operator_control["negative_controls"][0]["expectation_met"] = False
+        try:
+            assert_operator_work_recommendation_contract(bad_operator_control)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError("operator work bad negative control passed")
+        authority_operator_work = json.loads(json_dumps(operator_work_recommendation))
+        authority_operator_work["claim_boundaries"][
+            "agent_mail_authority_authorized"
+        ] = True
+        try:
+            assert_operator_work_recommendation_contract(authority_operator_work)
+        except AssertionError as exc:
+            assert "agent_mail_authority_authorized" in str(exc)
+        else:
+            raise AssertionError("operator work advisory authority misuse passed")
+        unredacted_operator_work = json.loads(json_dumps(operator_work_recommendation))
+        unredacted_operator_work["claim_boundaries"][
+            "raw_source_bodies_embedded"
+        ] = True
+        try:
+            assert_operator_work_recommendation_contract(unredacted_operator_work)
+        except AssertionError as exc:
+            assert "raw_source_bodies_embedded" in str(exc)
+        else:
+            raise AssertionError("operator work unredacted source passed")
+
         stale_progress_payload = json.loads(
             remote_pass_cargo_path.read_text(encoding="utf-8")
         )
@@ -32626,6 +34497,33 @@ def parse_args() -> argparse.Namespace:
         help="print the validation proof-memory index JSON",
     )
     parser.add_argument(
+        "--run-operator-work-recommendation",
+        action="store_true",
+        help="build the read-only operator work recommender from incident replay and proof memory",
+    )
+    parser.add_argument(
+        "--operator-work-incident-replay-json",
+        type=Path,
+        default=OPERATOR_WORK_RECOMMENDATION_DEFAULT_INCIDENT_REPLAY_PATH,
+        help="pi.swarm.incident_replay.v1 JSON for operator work recommendations",
+    )
+    parser.add_argument(
+        "--operator-work-proof-memory-index-json",
+        type=Path,
+        default=OPERATOR_WORK_RECOMMENDATION_DEFAULT_PROOF_MEMORY_INDEX_PATH,
+        help="pi.validation.proof_memory_index.v1 JSON for operator work recommendations",
+    )
+    parser.add_argument(
+        "--out-operator-work-recommendation-json",
+        type=Path,
+        help="write pi.swarm.operator_work_recommendation.v1 JSON; refuses to overwrite",
+    )
+    parser.add_argument(
+        "--print-operator-work-recommendation",
+        action="store_true",
+        help="print the operator work recommendation JSON",
+    )
+    parser.add_argument(
         "--run-proof-reuse-gate",
         action="store_true",
         help="build the fail-closed remote validation proof reuse gate",
@@ -32807,6 +34705,10 @@ def main() -> int:
         or args.out_proof_memory_index_json
         or args.print_proof_memory_index
     )
+    operator_work_recommendation_options_used = (
+        args.out_operator_work_recommendation_json
+        or args.print_operator_work_recommendation
+    )
     final_gate_modes = [
         args.run_autopilot_final_gate,
         args.run_context_intelligence_final_gate,
@@ -32842,12 +34744,13 @@ def main() -> int:
         or args.run_swarm_incident_replay
         or args.run_proof_reuse_gate
         or args.run_proof_memory_index
+        or args.run_operator_work_recommendation
         or any(final_gate_modes)
     ):
         print(
             "ERROR: swarm incident corpus cannot be combined with final-gate, "
             "backpressure, perceived-latency, incident-replay, proof-reuse, "
-            "or proof-memory modes",
+            "proof-memory, or operator-work modes",
             file=sys.stderr,
         )
         return 2
@@ -32856,11 +34759,13 @@ def main() -> int:
         or args.run_operator_perceived_latency_trace
         or args.run_proof_reuse_gate
         or args.run_proof_memory_index
+        or args.run_operator_work_recommendation
         or any(final_gate_modes)
     ):
         print(
             "ERROR: swarm incident replay cannot be combined with final-gate, "
-            "backpressure, perceived-latency, proof-reuse, or proof-memory modes",
+            "backpressure, perceived-latency, proof-reuse, proof-memory, "
+            "or operator-work modes",
             file=sys.stderr,
         )
         return 2
@@ -32869,11 +34774,13 @@ def main() -> int:
         or args.run_operator_perceived_latency_trace
         or args.run_swarm_incident_replay
         or args.run_proof_memory_index
+        or args.run_operator_work_recommendation
         or any(final_gate_modes)
     ):
         print(
             "ERROR: proof reuse gate cannot be combined with final-gate, "
-            "backpressure, perceived-latency, incident-replay, or proof-memory modes",
+            "backpressure, perceived-latency, incident-replay, proof-memory, "
+            "or operator-work modes",
             file=sys.stderr,
         )
         return 2
@@ -32882,11 +34789,29 @@ def main() -> int:
         or args.run_operator_perceived_latency_trace
         or args.run_swarm_incident_replay
         or args.run_proof_reuse_gate
+        or args.run_operator_work_recommendation
         or any(final_gate_modes)
     ):
         print(
             "ERROR: proof-memory index cannot be combined with final-gate, "
-            "backpressure, perceived-latency, incident-replay, or proof-reuse modes",
+            "backpressure, perceived-latency, incident-replay, proof-reuse, "
+            "or operator-work modes",
+            file=sys.stderr,
+        )
+        return 2
+    if args.run_operator_work_recommendation and (
+        args.run_backpressure_budget_contract
+        or args.run_operator_perceived_latency_trace
+        or args.run_swarm_incident_corpus
+        or args.run_swarm_incident_replay
+        or args.run_proof_reuse_gate
+        or args.run_proof_memory_index
+        or any(final_gate_modes)
+    ):
+        print(
+            "ERROR: operator work recommendation cannot be combined with final-gate, "
+            "backpressure, perceived-latency, incident-corpus, incident-replay, "
+            "proof-reuse, or proof-memory modes",
             file=sys.stderr,
         )
         return 2
@@ -32993,6 +34918,16 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
+    if (
+        operator_work_recommendation_options_used
+        and not args.run_operator_work_recommendation
+    ):
+        print(
+            "ERROR: operator work recommendation options require "
+            "--run-operator-work-recommendation",
+            file=sys.stderr,
+        )
+        return 2
     if args.quality_gate_results and not (
         args.run_autopilot_final_gate
         or args.run_context_intelligence_final_gate
@@ -33078,6 +35013,15 @@ def main() -> int:
             if (
                 args.print_proof_memory_index
                 or args.out_validation_proof_memory_index_json is None
+            ):
+                print(json_dumps(summary, pretty=True))
+            return 0
+        if args.run_operator_work_recommendation:
+            summary = build_operator_work_recommendation_from_args(args)
+            write_operator_work_recommendation_output(args, summary)
+            if (
+                args.print_operator_work_recommendation
+                or args.out_operator_work_recommendation_json is None
             ):
                 print(json_dumps(summary, pretty=True))
             return 0
@@ -33314,6 +35258,7 @@ def main() -> int:
         and not args.out_swarm_incident_replay_json
         and not args.out_proof_reuse_gate_json
         and not args.out_proof_memory_index_json
+        and not args.out_operator_work_recommendation_json
         and not args.print_autopilot_input_pack
         and not args.print_autopilot_plan
         and not args.print_action_plan
@@ -33333,6 +35278,7 @@ def main() -> int:
         and not args.print_swarm_incident_replay
         and not args.print_proof_reuse_gate
         and not args.print_proof_memory_index
+        and not args.print_operator_work_recommendation
     ):
         print(json_dumps(runpack, pretty=True))
     return 0
