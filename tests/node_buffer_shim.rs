@@ -806,6 +806,36 @@ fn global_buffer_byte_length_byte_backed_inputs_match_node() {
 }
 
 #[test]
+fn global_buffer_byte_length_rejects_invalid_inputs_like_node() {
+    let result = eval_global_buffer(
+        r#"(() => {
+        const cases = [
+            ["null", null],
+            ["undefined", undefined],
+            ["object", {}],
+            ["length_object", { length: 3 }],
+            ["array_empty", []],
+            ["array_values", [1, 2]],
+            ["array_buffer", new ArrayBuffer(2)],
+            ["uint16", new Uint16Array(2)],
+            ["buffer", Buffer.from([1, 2, 3])],
+        ];
+        return cases.map(([label, input]) => {
+            try {
+                return label + ":" + Buffer.byteLength(input);
+            } catch (e) {
+                return label + ":" + e.name;
+            }
+        }).join("|");
+    })()"#,
+    );
+    assert_eq!(
+        result,
+        "null:TypeError|undefined:TypeError|object:TypeError|length_object:TypeError|array_empty:TypeError|array_values:TypeError|array_buffer:2|uint16:4|buffer:3"
+    );
+}
+
+#[test]
 fn global_buffer_string_and_buffer_fill_match_node_vectors() {
     let result = eval_global_buffer(
         r#"(() => {

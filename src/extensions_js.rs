@@ -20979,7 +20979,7 @@ if (typeof globalThis.Buffer === 'undefined') {
             if (typeof str !== 'string') {
                 if (str instanceof ArrayBuffer) return str.byteLength;
                 if (ArrayBuffer.isView && ArrayBuffer.isView(str)) return str.byteLength;
-                return str.length || 0;
+                throw new TypeError('The string argument must be a string, Buffer, or ArrayBuffer');
             }
             const enc = __pi_buffer_normalize_encoding(encoding, true);
             if (enc === 'base64') return __pi_buffer_base64_byte_length(str);
