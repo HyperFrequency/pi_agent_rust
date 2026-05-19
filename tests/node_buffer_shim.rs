@@ -199,6 +199,26 @@ fn single_byte_encodings_match_node_vectors() {
     assert_eq!(result, "ff41|ff41|ff41|ff,41|ff,41|7f,41|2|2|2|3");
 }
 
+#[test]
+fn utf16le_alias_encodings_match_node_vectors() {
+    let result = eval_buffer(
+        r#"(() => {
+        const aliases = ["utf16le", "utf-16le", "ucs2", "ucs-2"];
+        return aliases.map((enc) => {
+            const from = Buffer.from("A\u2603", enc);
+            const written = Buffer.alloc(4);
+            const bytesWritten = written.write("A\u2603", 0, 4, enc);
+            const codes = from.toString(enc).split("").map((ch) => ch.charCodeAt(0).toString(16)).join(",");
+            return [enc, from.toString("hex"), codes, Buffer.byteLength("A\u2603", enc), Buffer.isEncoding(enc), bytesWritten, written.toString("hex")].join(":");
+        }).join("|");
+    })()"#,
+    );
+    assert_eq!(
+        result,
+        "utf16le:41000326:41,2603:4:true:4:41000326|utf-16le:41000326:41,2603:4:true:4:41000326|ucs2:41000326:41,2603:4:true:4:41000326|ucs-2:41000326:41,2603:4:true:4:41000326"
+    );
+}
+
 // ─── Buffer.from(array) ────────────────────────────────────────────────────
 
 #[test]
@@ -633,6 +653,26 @@ fn global_buffer_unknown_encoding_strict_entrypoints_match_node() {
     assert_eq!(
         result,
         "from:Unknown encoding: bogus|toString:Unknown encoding: bogus|write:Unknown encoding: bogus|byteLength:3|isEncoding:false"
+    );
+}
+
+#[test]
+fn global_buffer_utf16le_alias_encodings_match_node_vectors() {
+    let result = eval_global_buffer(
+        r#"(() => {
+        const aliases = ["utf16le", "utf-16le", "ucs2", "ucs-2"];
+        return aliases.map((enc) => {
+            const from = Buffer.from("A\u2603", enc);
+            const written = Buffer.alloc(4);
+            const bytesWritten = written.write("A\u2603", 0, 4, enc);
+            const codes = from.toString(enc).split("").map((ch) => ch.charCodeAt(0).toString(16)).join(",");
+            return [enc, from.toString("hex"), codes, Buffer.byteLength("A\u2603", enc), Buffer.isEncoding(enc), bytesWritten, written.toString("hex")].join(":");
+        }).join("|");
+    })()"#,
+    );
+    assert_eq!(
+        result,
+        "utf16le:41000326:41,2603:4:true:4:41000326|utf-16le:41000326:41,2603:4:true:4:41000326|ucs2:41000326:41,2603:4:true:4:41000326|ucs-2:41000326:41,2603:4:true:4:41000326"
     );
 }
 

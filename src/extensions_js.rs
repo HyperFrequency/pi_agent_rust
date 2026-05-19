@@ -20802,6 +20802,30 @@ if (typeof globalThis.Buffer === 'undefined') {
         }
         return output;
     }
+    function __pi_buffer_utf16le_from_string(input) {
+        const out = new Buffer(input.length * 2);
+        for (let i = 0; i < input.length; i++) {
+            const code = input.charCodeAt(i);
+            out[i * 2] = code & 0xff;
+            out[i * 2 + 1] = (code >>> 8) & 0xff;
+        }
+        return out;
+    }
+    function __pi_buffer_utf16le_to_string(input) {
+        let output = '';
+        let chunk = [];
+        for (let i = 0; i + 1 < input.length; i += 2) {
+            chunk.push(input[i] | (input[i + 1] << 8));
+            if (chunk.length >= 4096) {
+                output += String.fromCharCode.apply(null, chunk);
+                chunk.length = 0;
+            }
+        }
+        if (chunk.length > 0) {
+            output += String.fromCharCode.apply(null, chunk);
+        }
+        return output;
+    }
     class Buffer extends Uint8Array {
         static _normalizeSearchOffset(length, byteOffset) {
             if (byteOffset == null) return 0;
@@ -20835,6 +20859,9 @@ if (typeof globalThis.Buffer === 'undefined') {
                 }
                 if (enc === 'latin1' || enc === 'binary' || enc === 'ascii') {
                     return __pi_buffer_from_one_byte_string(input);
+                }
+                if (enc === 'utf16le') {
+                    return __pi_buffer_utf16le_from_string(input);
                 }
                 const encoded = new TextEncoder().encode(input);
                 const out = new Buffer(encoded.length);
@@ -20874,6 +20901,7 @@ if (typeof globalThis.Buffer === 'undefined') {
             if (enc === 'base64') return Math.ceil(str.length * 3 / 4);
             if (enc === 'hex') return str.length >> 1;
             if (enc === 'latin1' || enc === 'binary' || enc === 'ascii') return str.length;
+            if (enc === 'utf16le') return str.length * 2;
             return new TextEncoder().encode(str).length;
         }
         static concat(list, totalLength) {
@@ -20932,6 +20960,7 @@ if (typeof globalThis.Buffer === 'undefined') {
             }
             if (enc === 'latin1' || enc === 'binary') return __pi_buffer_one_byte_to_string(view, false);
             if (enc === 'ascii') return __pi_buffer_one_byte_to_string(view, true);
+            if (enc === 'utf16le') return __pi_buffer_utf16le_to_string(view);
             return new TextDecoder().decode(view);
         }
         toJSON() {

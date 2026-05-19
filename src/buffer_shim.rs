@@ -86,6 +86,33 @@ function latin1Decode(bytes, start, end, stripHighBit) {
   return out;
 }
 
+function utf16leEncode(str) {
+  const bytes = new Uint8Array(str.length * 2);
+  for (let i = 0; i < str.length; i++) {
+    const code = str.charCodeAt(i);
+    bytes[i * 2] = code & 0xFF;
+    bytes[i * 2 + 1] = (code >>> 8) & 0xFF;
+  }
+  return bytes;
+}
+
+function utf16leDecode(bytes, start, end) {
+  let out = '';
+  let chunk = [];
+  const len = end - start;
+  for (let i = 0; i + 1 < len; i += 2) {
+    chunk.push(bytes[start + i] | (bytes[start + i + 1] << 8));
+    if (chunk.length >= 4096) {
+      out += String.fromCharCode.apply(null, chunk);
+      chunk.length = 0;
+    }
+  }
+  if (chunk.length > 0) {
+    out += String.fromCharCode.apply(null, chunk);
+  }
+  return out;
+}
+
 function normalizeEncoding(enc, allowUnknownUtf8) {
   if (!enc || enc === 'utf8' || enc === 'utf-8') return 'utf8';
   const lower = String(enc).toLowerCase();
@@ -94,6 +121,7 @@ function normalizeEncoding(enc, allowUnknownUtf8) {
   if (lower === 'base64') return 'base64';
   if (lower === 'ascii') return 'ascii';
   if (lower === 'binary' || lower === 'latin1') return 'latin1';
+  if (lower === 'ucs2' || lower === 'ucs-2' || lower === 'utf16le' || lower === 'utf-16le') return 'utf16le';
   if (allowUnknownUtf8) return 'utf8';
   throw new TypeError(`Unknown encoding: ${enc}`);
 }
@@ -104,6 +132,7 @@ function encodeString(str, encoding, allowUnknownUtf8) {
     case 'base64': return base64Decode(str);
     case 'ascii':
     case 'latin1': return latin1Encode(str);
+    case 'utf16le': return utf16leEncode(str);
     default: return utf8Encode(str);
   }
 }
@@ -116,6 +145,7 @@ function decodeBytes(bytes, encoding, start, end) {
     case 'base64': return base64Encode(bytes.subarray(start, end));
     case 'ascii': return latin1Decode(bytes, start, end, true);
     case 'latin1': return latin1Decode(bytes, start, end, false);
+    case 'utf16le': return utf16leDecode(bytes, start, end);
     default: return utf8Decode(bytes, start, end);
   }
 }
@@ -187,7 +217,7 @@ class Buffer extends Uint8Array {
   }
 
   static isEncoding(encoding) {
-    return ['utf8', 'utf-8', 'hex', 'base64', 'ascii', 'binary', 'latin1']
+    return ['utf8', 'utf-8', 'hex', 'base64', 'ascii', 'binary', 'latin1', 'ucs2', 'ucs-2', 'utf16le', 'utf-16le']
       .includes(String(encoding || '').toLowerCase());
   }
 
