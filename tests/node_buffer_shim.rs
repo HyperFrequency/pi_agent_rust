@@ -753,6 +753,17 @@ fn global_buffer_hex_truncates_at_invalid_or_incomplete_pair_like_node() {
 }
 
 #[test]
+fn global_buffer_base64_byte_length_padding_matches_node() {
+    let result = eval_global_buffer(
+        r#"(() => {
+        const cases = ["aGVsbG8=", "aGVsbG8", "TWE=", "TQ==", ""];
+        return cases.map((input) => Buffer.byteLength(input, "base64")).join("|");
+    })()"#,
+    );
+    assert_eq!(result, "5|5|2|1|0");
+}
+
+#[test]
 fn global_buffer_string_and_buffer_fill_match_node_vectors() {
     let result = eval_global_buffer(
         r#"(() => {

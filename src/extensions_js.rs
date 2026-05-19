@@ -20844,6 +20844,18 @@ if (typeof globalThis.Buffer === 'undefined') {
         }
         return output;
     }
+    function __pi_buffer_base64_byte_length(input) {
+        const len = String(input).length;
+        if (len === 0) return 0;
+        let padding = 0;
+        if (input.charCodeAt(len - 1) === 61) {
+            padding = 1;
+            if (len > 1 && input.charCodeAt(len - 2) === 61) {
+                padding = 2;
+            }
+        }
+        return Math.max(0, Math.floor((len * 3) / 4) - padding);
+    }
     class Buffer extends Uint8Array {
         static _normalizeSearchOffset(length, byteOffset) {
             if (byteOffset == null) return 0;
@@ -20960,7 +20972,7 @@ if (typeof globalThis.Buffer === 'undefined') {
         static byteLength(str, encoding) {
             if (typeof str !== 'string') return str.length || 0;
             const enc = __pi_buffer_normalize_encoding(encoding, true);
-            if (enc === 'base64') return Math.ceil(str.length * 3 / 4);
+            if (enc === 'base64') return __pi_buffer_base64_byte_length(str);
             if (enc === 'hex') return str.length >> 1;
             if (enc === 'latin1' || enc === 'binary' || enc === 'ascii') return str.length;
             if (enc === 'utf16le') return str.length * 2;
