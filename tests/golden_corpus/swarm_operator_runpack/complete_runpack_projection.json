@@ -902,6 +902,7 @@
     "Follow validation scheduler plan before running cargo gates: 0 blocked groups, 4 deferred groups",
     "Inspect remote validation proof ledger before closing RCH-required beads",
     "Back off heavy cargo validation until the RCH queue forecast recovers",
+    "Review scratch cleanup pressure before cleanup approval: 28719 candidates, 28719 unknown-owner, ARG_MAX risk True",
     "Use activity-digest saturation evidence to narrow or redirect the swarm",
     "Account for dirty files before using the runpack as handoff evidence",
     "Review temp artifact inventory; do not delete unknown-owner or candidate paths without explicit written approval",
@@ -1640,6 +1641,45 @@
     "reason": "rch_queue_saturated",
     "requested_runner": "auto",
     "resolved_runner": "none",
+    "scratch_cleanup_pressure": {
+      "arg_max_safe_scan": true,
+      "by_cleanup_safety": {
+        "unknown_owner_fail_closed": 28719
+      },
+      "by_owner_marker_status": {
+        "missing": 28719
+      },
+      "cleanup_command_authorized": false,
+      "delete_apply_mode_available": false,
+      "destructive_actions_executed": false,
+      "detail": null,
+      "guards": {
+        "advisory_only": true,
+        "explicit_operator_permission_required": true,
+        "no_destructive_commands_emitted": true,
+        "no_filesystem_deletion": true
+      },
+      "listed_entries": 100,
+      "matched_entries": 28719,
+      "omitted_entries": 28619,
+      "operator_note": "scratch cleanup planner output is advisory only; explicit written approval is required before deletion",
+      "owner_marker_schema": "pi.scratch_target_owner.v1",
+      "planner_schema": "pi.scratch_cleanup_plan.v1",
+      "reason": "cleanup_candidates_need_approval",
+      "recommended_action": "manual_review",
+      "risk_flags": {
+        "active_owner_markers": 0,
+        "arg_max_prone": true,
+        "unknown_owner_entries": 28719
+      },
+      "schema": "pi.cargo_headroom.scratch_cleanup_pressure.v1",
+      "shallow_bytes": 1048576,
+      "source_kind": "fixture",
+      "status": "ok",
+      "warnings": [
+        "fixture intentionally mirrors an ARG_MAX-prone /tmp scan"
+      ]
+    },
     "status": "ok",
     "storage_remediation": null,
     "tmpdir": "[PI_AGENT_CARGO_TMP]/test/tmp"

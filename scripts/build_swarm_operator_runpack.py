@@ -141,6 +141,7 @@ FOURTH_WAVE_CLOSEOUT_GATE_SCHEMA = "pi.swarm.fourth_wave_self_healing.closeout_g
 FOURTH_WAVE_CLOSEOUT_GATE_CONTRACT_SCHEMA = (
     "pi.swarm.fourth_wave_self_healing.closeout_gate_contract.v1"
 )
+SCRATCH_CLEANUP_PRESSURE_SCHEMA = "pi.cargo_headroom.scratch_cleanup_pressure.v1"
 ADAPTIVE_EXECUTION_CLOSEOUT_GATE_SCHEMA = (
     "pi.swarm.adaptive_execution.closeout_gate.v1"
 )
@@ -6217,6 +6218,157 @@ def summarize_swarm_replay_preview(source: SourcePayload, max_items: int) -> dic
     }
 
 
+def nullable_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    return None
+
+
+def normalize_counter_map(value: Any) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    normalized: dict[str, int] = {}
+    for key, item in value.items():
+        if not isinstance(key, str):
+            continue
+        count = nullable_int(item)
+        if count is not None:
+            normalized[key] = count
+    return normalized
+
+
+def normalize_scratch_cleanup_pressure(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {
+            "schema": SCRATCH_CLEANUP_PRESSURE_SCHEMA,
+            "status": "not_provided",
+            "recommended_action": "none",
+            "reason": "scratch_cleanup_pressure_missing",
+            "detail": None,
+            "source_kind": "none",
+            "planner_schema": None,
+            "owner_marker_schema": None,
+            "cleanup_command_authorized": False,
+            "destructive_actions_executed": False,
+            "delete_apply_mode_available": False,
+            "arg_max_safe_scan": None,
+            "matched_entries": None,
+            "listed_entries": None,
+            "omitted_entries": None,
+            "shallow_bytes": None,
+            "by_cleanup_safety": {},
+            "by_owner_marker_status": {},
+            "risk_flags": {
+                "arg_max_prone": False,
+                "unknown_owner_entries": 0,
+                "active_owner_markers": 0,
+            },
+            "warnings": [],
+            "operator_note": (
+                "scratch cleanup pressure was not present; do not infer cleanup safety"
+            ),
+            "guards": {
+                "advisory_only": True,
+                "no_filesystem_deletion": True,
+                "no_destructive_commands_emitted": True,
+                "explicit_operator_permission_required": True,
+            },
+        }
+
+    by_cleanup_safety = normalize_counter_map(value.get("by_cleanup_safety"))
+    by_owner_marker_status = normalize_counter_map(value.get("by_owner_marker_status"))
+    risk_flags = value.get("risk_flags") if isinstance(value.get("risk_flags"), dict) else {}
+    matched_entries = nullable_int(value.get("matched_entries"))
+    listed_entries = nullable_int(value.get("listed_entries"))
+    omitted_entries = nullable_int(value.get("omitted_entries"))
+    shallow_bytes = nullable_int(value.get("shallow_bytes"))
+    unknown_owner_entries = nullable_int(risk_flags.get("unknown_owner_entries"))
+    if unknown_owner_entries is None:
+        unknown_owner_entries = (
+            by_cleanup_safety.get("unknown_owner_fail_closed", 0)
+            + by_cleanup_safety.get("unknown_owner_malformed_marker_fail_closed", 0)
+        )
+    active_owner_markers = nullable_int(risk_flags.get("active_owner_markers"))
+    if active_owner_markers is None:
+        active_owner_markers = by_owner_marker_status.get("active", 0)
+    arg_max_prone = risk_flags.get("arg_max_prone")
+    if not isinstance(arg_max_prone, bool):
+        arg_max_prone = bool(matched_entries is not None and matched_entries > 1000)
+
+    cleanup_command_authorized = value.get("cleanup_command_authorized") is True
+    destructive_actions_executed = value.get("destructive_actions_executed") is True
+    delete_apply_mode_available = value.get("delete_apply_mode_available") is True
+    unsafe_planner = (
+        cleanup_command_authorized
+        or destructive_actions_executed
+        or delete_apply_mode_available
+    )
+    status = value.get("status") if isinstance(value.get("status"), str) else "malformed"
+    recommended_action = (
+        value.get("recommended_action")
+        if isinstance(value.get("recommended_action"), str)
+        else "manual_review"
+    )
+    reason = value.get("reason") if isinstance(value.get("reason"), str) else "missing_reason"
+    if value.get("schema") != SCRATCH_CLEANUP_PRESSURE_SCHEMA and status == "ok":
+        status = "malformed"
+        recommended_action = "manual_review"
+        reason = "scratch_cleanup_pressure_schema_mismatch"
+    if unsafe_planner:
+        status = "unsafe"
+        recommended_action = "backoff"
+        reason = "scratch_cleanup_pressure_reported_destructive_capability"
+
+    warnings = value.get("warnings") if isinstance(value.get("warnings"), list) else []
+    return {
+        "schema": SCRATCH_CLEANUP_PRESSURE_SCHEMA,
+        "status": status,
+        "recommended_action": recommended_action,
+        "reason": reason,
+        "detail": value.get("detail") if isinstance(value.get("detail"), str) else None,
+        "source_kind": value.get("source_kind")
+        if isinstance(value.get("source_kind"), str)
+        else "unknown",
+        "planner_schema": value.get("planner_schema")
+        if isinstance(value.get("planner_schema"), str)
+        else None,
+        "owner_marker_schema": value.get("owner_marker_schema")
+        if isinstance(value.get("owner_marker_schema"), str)
+        else None,
+        "cleanup_command_authorized": cleanup_command_authorized,
+        "destructive_actions_executed": destructive_actions_executed,
+        "delete_apply_mode_available": delete_apply_mode_available,
+        "arg_max_safe_scan": value.get("arg_max_safe_scan")
+        if isinstance(value.get("arg_max_safe_scan"), bool)
+        else None,
+        "matched_entries": matched_entries,
+        "listed_entries": listed_entries,
+        "omitted_entries": omitted_entries,
+        "shallow_bytes": shallow_bytes,
+        "by_cleanup_safety": by_cleanup_safety,
+        "by_owner_marker_status": by_owner_marker_status,
+        "risk_flags": {
+            "arg_max_prone": arg_max_prone,
+            "unknown_owner_entries": unknown_owner_entries,
+            "active_owner_markers": active_owner_markers,
+        },
+        "warnings": bounded([str(item) for item in warnings], 8),
+        "operator_note": value.get("operator_note")
+        if isinstance(value.get("operator_note"), str)
+        else "scratch cleanup pressure is advisory only; do not infer cleanup safety",
+        "guards": {
+            "advisory_only": True,
+            "no_filesystem_deletion": True,
+            "no_destructive_commands_emitted": not (
+                destructive_actions_executed or delete_apply_mode_available
+            ),
+            "explicit_operator_permission_required": True,
+        },
+    }
+
+
 def summarize_cargo_admission(source: SourcePayload) -> dict[str, Any]:
     payload = source.payload
     if not isinstance(payload, dict):
@@ -6234,6 +6386,9 @@ def summarize_cargo_admission(source: SourcePayload) -> dict[str, Any]:
         "cargo_target_dir": payload.get("cargo_target_dir"),
         "tmpdir": payload.get("tmpdir"),
         "storage_remediation": payload.get("storage_remediation"),
+        "scratch_cleanup_pressure": normalize_scratch_cleanup_pressure(
+            payload.get("scratch_cleanup_pressure")
+        ),
         "queue_forecast": {
             "status": queue_forecast.get("status"),
             "recommended_action": queue_forecast.get("recommended_action"),
@@ -13557,6 +13712,40 @@ def build_runpack(args: argparse.Namespace) -> dict[str, Any]:
     return runpack
 
 
+def scratch_cleanup_pressure_next_action(scratch: dict[str, Any]) -> str | None:
+    status = scratch.get("status")
+    recommended_action = scratch.get("recommended_action")
+    risk_flags = (
+        scratch.get("risk_flags") if isinstance(scratch.get("risk_flags"), dict) else {}
+    )
+    if (
+        scratch.get("cleanup_command_authorized") is True
+        or scratch.get("destructive_actions_executed") is True
+        or scratch.get("delete_apply_mode_available") is True
+    ):
+        return (
+            "Treat scratch cleanup pressure as unsafe; do not run cleanup until the "
+            "planner is fixed and explicit written approval names the exact command"
+        )
+    if status in {"unavailable", "malformed", "unsafe"}:
+        return "Treat scratch cleanup pressure as degraded; do not infer cleanup safety"
+    if recommended_action == "preserve_active_targets":
+        return (
+            "Review scratch cleanup pressure: active target markers present; preserve "
+            "active targets and require explicit written approval before cleanup"
+        )
+    if recommended_action == "manual_review":
+        return (
+            "Review scratch cleanup pressure before cleanup approval: "
+            f"{scratch.get('matched_entries')} candidates, "
+            f"{risk_flags.get('unknown_owner_entries')} unknown-owner, "
+            f"ARG_MAX risk {risk_flags.get('arg_max_prone')}"
+        )
+    if recommended_action == "backoff":
+        return "Back off scratch cleanup until pressure evidence no longer reports unsafe planner output"
+    return None
+
+
 def operator_next_actions(runpack: dict[str, Any]) -> list[str]:
     actions: list[str] = []
     missing = [
@@ -13625,6 +13814,11 @@ def operator_next_actions(runpack: dict[str, Any]) -> list[str]:
         actions.append("Split heavy cargo validation based on RCH queue forecast pressure")
     elif forecast_action == "backoff":
         actions.append("Back off heavy cargo validation until the RCH queue forecast recovers")
+    scratch_cleanup_pressure = runpack["rch_admission"].get("scratch_cleanup_pressure")
+    if isinstance(scratch_cleanup_pressure, dict):
+        scratch_action = scratch_cleanup_pressure_next_action(scratch_cleanup_pressure)
+        if scratch_action is not None:
+            actions.append(scratch_action)
     if runpack["activity_digest"].get("saturated"):
         actions.append("Use activity-digest saturation evidence to narrow or redirect the swarm")
     if runpack["git_state"].get("dirty"):
@@ -13777,6 +13971,22 @@ def render_markdown(runpack: dict[str, Any]) -> str:
     lines.append(f"- Beads active/stale: `{runpack['beads'].get('active_count')}` active, `{len(runpack['beads'].get('stale') or [])}` stale")
     lines.append(f"- RCH admission: `{runpack['rch_admission'].get('decision')}`")
     lines.append(f"- RCH queue forecast: `{runpack['rch_admission'].get('queue_forecast', {}).get('recommended_action')}`")
+    scratch_cleanup_pressure = runpack["rch_admission"].get("scratch_cleanup_pressure")
+    if isinstance(scratch_cleanup_pressure, dict):
+        risk_flags = (
+            scratch_cleanup_pressure.get("risk_flags")
+            if isinstance(scratch_cleanup_pressure.get("risk_flags"), dict)
+            else {}
+        )
+        lines.append(
+            "- Scratch cleanup pressure: "
+            f"`{scratch_cleanup_pressure.get('status')}` "
+            f"(`{scratch_cleanup_pressure.get('recommended_action')}`, "
+            f"candidates `{scratch_cleanup_pressure.get('matched_entries')}`, "
+            f"unknown `{risk_flags.get('unknown_owner_entries')}`, "
+            f"active markers `{risk_flags.get('active_owner_markers')}`, "
+            f"ARG_MAX risk `{risk_flags.get('arg_max_prone')}`)"
+        )
     proof_summary = runpack["remote_validation_proof_ledger"].get("summary", {})
     lines.append(
         "- Remote validation proof: "
@@ -34065,6 +34275,35 @@ def run_self_test() -> int:
             "cargo_command": "check --all-targets",
             "cargo_target_dir": "/data/tmp/pi_agent_rust_cargo/test/target",
             "tmpdir": "/data/tmp/pi_agent_rust_cargo/test/tmp",
+            "scratch_cleanup_pressure": {
+                "schema": SCRATCH_CLEANUP_PRESSURE_SCHEMA,
+                "status": "ok",
+                "recommended_action": "manual_review",
+                "reason": "cleanup_candidates_need_approval",
+                "source_kind": "fixture",
+                "planner_schema": "pi.scratch_cleanup_plan.v1",
+                "owner_marker_schema": "pi.scratch_target_owner.v1",
+                "cleanup_command_authorized": False,
+                "destructive_actions_executed": False,
+                "delete_apply_mode_available": False,
+                "arg_max_safe_scan": True,
+                "matched_entries": 28719,
+                "listed_entries": 100,
+                "omitted_entries": 28619,
+                "shallow_bytes": 1048576,
+                "by_cleanup_safety": {"unknown_owner_fail_closed": 28719},
+                "by_owner_marker_status": {"missing": 28719},
+                "risk_flags": {
+                    "arg_max_prone": True,
+                    "unknown_owner_entries": 28719,
+                    "active_owner_markers": 0,
+                },
+                "warnings": ["fixture intentionally mirrors an ARG_MAX-prone /tmp scan"],
+                "operator_note": (
+                    "scratch cleanup planner output is advisory only; explicit written "
+                    "approval is required before deletion"
+                ),
+            },
             "rch_queue_forecast": {
                 "schema": "pi.cargo_headroom.rch_queue_forecast.v1",
                 "status": "ok",
@@ -34530,6 +34769,71 @@ def run_self_test() -> int:
         assert runpack["agent_mail"]["build_slots"]["data"]["active"] == 1
         assert runpack["beads"]["stale"][0]["id"] == "bd-stale"
         assert runpack["rch_admission"]["queue_forecast"]["recommended_action"] == "backoff"
+        scratch_pressure = runpack["rch_admission"]["scratch_cleanup_pressure"]
+        assert scratch_pressure["schema"] == SCRATCH_CLEANUP_PRESSURE_SCHEMA
+        assert scratch_pressure["status"] == "ok"
+        assert scratch_pressure["recommended_action"] == "manual_review"
+        assert scratch_pressure["matched_entries"] == 28719
+        assert scratch_pressure["listed_entries"] == 100
+        assert scratch_pressure["omitted_entries"] == 28619
+        assert scratch_pressure["risk_flags"]["arg_max_prone"] is True
+        assert scratch_pressure["risk_flags"]["unknown_owner_entries"] == 28719
+        assert scratch_pressure["risk_flags"]["active_owner_markers"] == 0
+        assert scratch_pressure["cleanup_command_authorized"] is False
+        assert scratch_pressure["destructive_actions_executed"] is False
+        assert scratch_pressure["delete_apply_mode_available"] is False
+        assert scratch_pressure["guards"]["no_filesystem_deletion"] is True
+        assert scratch_pressure["guards"]["explicit_operator_permission_required"] is True
+        green_pressure = summarize_cargo_admission(
+            SourcePayload(
+                "cargo_admission",
+                None,
+                "ok",
+                "pi.cargo_headroom.admission.v1",
+                {
+                    "scratch_cleanup_pressure": {
+                        "schema": SCRATCH_CLEANUP_PRESSURE_SCHEMA,
+                        "status": "ok",
+                        "recommended_action": "none",
+                        "reason": "no_cleanup_candidates",
+                        "cleanup_command_authorized": False,
+                        "destructive_actions_executed": False,
+                        "delete_apply_mode_available": False,
+                        "matched_entries": 0,
+                        "risk_flags": {
+                            "arg_max_prone": False,
+                            "unknown_owner_entries": 0,
+                            "active_owner_markers": 0,
+                        },
+                    }
+                },
+            )
+        )["scratch_cleanup_pressure"]
+        assert green_pressure["recommended_action"] == "none"
+        assert scratch_cleanup_pressure_next_action(green_pressure) is None
+        red_pressure = summarize_cargo_admission(
+            SourcePayload(
+                "cargo_admission",
+                None,
+                "ok",
+                "pi.cargo_headroom.admission.v1",
+                {
+                    "scratch_cleanup_pressure": {
+                        "schema": SCRATCH_CLEANUP_PRESSURE_SCHEMA,
+                        "status": "ok",
+                        "recommended_action": "manual_review",
+                        "reason": "unsafe_fixture",
+                        "cleanup_command_authorized": False,
+                        "destructive_actions_executed": True,
+                        "delete_apply_mode_available": True,
+                        "matched_entries": 1,
+                    }
+                },
+            )
+        )["scratch_cleanup_pressure"]
+        assert red_pressure["status"] == "unsafe"
+        assert red_pressure["recommended_action"] == "backoff"
+        assert "unsafe" in scratch_cleanup_pressure_next_action(red_pressure)
         assert runpack["activity_digest"]["saturated"] is True
         assert runpack["git_state"]["dirty"] is True
         assert runpack["git_state"]["branch"] == "main"
@@ -34588,6 +34892,11 @@ def run_self_test() -> int:
         assert any("Treat Agent Mail read state as unavailable" in action for action in operator_actions)
         assert any("Use Beads active ownership" in action and "GreenStone" in action for action in operator_actions)
         assert any("Review temp artifact inventory" in action for action in operator_actions)
+        assert any(
+            "Review scratch cleanup pressure before cleanup approval" in action
+            and "28719 candidates" in action
+            for action in operator_actions
+        )
         assert any("do not require Agent Mail reservations before coding" in action for action in operator_actions)
         assert any("br close" in action and "br sync --flush-only" in action for action in operator_actions)
         assert not any(
@@ -36132,6 +36441,8 @@ def run_self_test() -> int:
         assert "Validation Scheduler Plan" in markdown
         assert "Context intelligence" in markdown
         assert "Progress SLO" in markdown
+        assert "Scratch cleanup pressure" in markdown
+        assert "28719" in markdown
         assert "Resume Commands" in markdown
         assert "Git Context" in markdown
         assert_runpack_contract(runpack)
