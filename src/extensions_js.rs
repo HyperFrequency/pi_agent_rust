@@ -20944,6 +20944,18 @@ if (typeof globalThis.Buffer === 'undefined') {
             if (Number.isNaN(n) || n <= 0) return 0;
             return Math.trunc(n);
         }
+        static _arrayBufferOffsetInfo(offset, byteLength) {
+            const n = offset === undefined ? 0 : Number(offset);
+            if (Number.isNaN(n)) return { offset: 0, defaultLength: byteLength };
+            const truncated = Math.trunc(n);
+            if (truncated < 0 || n === Infinity || n > byteLength) {
+                throw new RangeError('Index out of range');
+            }
+            return {
+                offset: truncated,
+                defaultLength: Math.max(0, Math.trunc(byteLength - n)),
+            };
+        }
         static from(input, encoding, length) {
             if (typeof input === 'string') {
                 const enc = __pi_buffer_normalize_encoding(encoding);
@@ -20970,9 +20982,9 @@ if (typeof globalThis.Buffer === 'undefined') {
                 return out;
             }
             if (input instanceof ArrayBuffer) {
-                const offset = encoding || 0;
-                const len = length !== undefined ? Buffer._arrayBufferLength(length) : input.byteLength - offset;
-                return new Buffer(input, offset, len);
+                const range = Buffer._arrayBufferOffsetInfo(encoding, input.byteLength);
+                const len = length !== undefined ? Buffer._arrayBufferLength(length) : range.defaultLength;
+                return new Buffer(input, range.offset, len);
             }
             if (ArrayBuffer.isView && ArrayBuffer.isView(input)) {
                 const len = typeof input.length === 'number' ? input.length : 0;

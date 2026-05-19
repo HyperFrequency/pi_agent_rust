@@ -1025,6 +1025,50 @@ fn global_buffer_arraybuffer_length_coercion_matches_node_vectors() {
 }
 
 #[test]
+fn global_buffer_arraybuffer_byte_offset_coercion_matches_node_vectors() {
+    let result = eval_global_buffer(
+        r#"(() => {
+        const ab = new ArrayBuffer(4);
+        new Uint8Array(ab).set([1, 2, 3, 4]);
+        const cases = [
+            ["undefined", undefined],
+            ["zero", 0],
+            ["positive_fraction_lt_one", 0.9],
+            ["one", 1],
+            ["fraction", 1.9],
+            ["string_one", "1"],
+            ["string_fraction", "1.9"],
+            ["negative_fraction", -0.9],
+            ["negative", -1],
+            ["string_negative", "-1"],
+            ["nan", NaN],
+            ["bad_string", "bad"],
+            ["null", null],
+            ["infinity", Infinity],
+            ["negative_infinity", -Infinity],
+            ["at_end", 4],
+            ["past_fraction", 4.1],
+            ["oversize", 99],
+            ["true", true],
+            ["false", false],
+        ];
+        return cases.map(([label, offset]) => {
+            try {
+                const out = offset === undefined ? Buffer.from(ab) : Buffer.from(ab, offset);
+                return label + ":" + out.toString("hex");
+            } catch (e) {
+                return label + ":" + e.name;
+            }
+        }).join("|");
+    })()"#,
+    );
+    assert_eq!(
+        result,
+        "undefined:01020304|zero:01020304|positive_fraction_lt_one:010203|one:020304|fraction:0203|string_one:020304|string_fraction:0203|negative_fraction:01020304|negative:RangeError|string_negative:RangeError|nan:01020304|bad_string:01020304|null:01020304|infinity:RangeError|negative_infinity:RangeError|at_end:|past_fraction:RangeError|oversize:RangeError|true:020304|false:01020304"
+    );
+}
+
+#[test]
 fn global_buffer_arraybuffer_backing_view_matches_node() {
     let result = eval_global_buffer(
         r#"(() => {
