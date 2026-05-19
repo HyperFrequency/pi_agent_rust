@@ -1320,6 +1320,87 @@ fn global_buffer_copy_range_vectors_match_node() {
 }
 
 #[test]
+fn global_buffer_copy_bound_coercion_matches_node_vectors() {
+    let result = eval_global_buffer(
+        r#"(() => {
+        const cases = [
+            ["target_fraction", () => {
+                const dst = Buffer.alloc(4);
+                return Buffer.from("abcd").copy(dst, 1.9) + ":" + dst.toString("hex");
+            }],
+            ["source_fraction", () => {
+                const dst = Buffer.alloc(4);
+                return Buffer.from("abcd").copy(dst, 0, 1.9) + ":" + dst.toString("hex");
+            }],
+            ["end_fraction", () => {
+                const dst = Buffer.alloc(4);
+                return Buffer.from("abcd").copy(dst, 0, 0, 2.9) + ":" + dst.toString("hex");
+            }],
+            ["target_nan", () => {
+                const dst = Buffer.alloc(4);
+                return Buffer.from("abcd").copy(dst, NaN) + ":" + dst.toString("hex");
+            }],
+            ["source_nan", () => {
+                const dst = Buffer.alloc(4);
+                return Buffer.from("abcd").copy(dst, 0, NaN) + ":" + dst.toString("hex");
+            }],
+            ["end_nan", () => {
+                const dst = Buffer.alloc(4);
+                return Buffer.from("abcd").copy(dst, 0, 0, NaN) + ":" + dst.toString("hex");
+            }],
+            ["target_bad_string", () => {
+                const dst = Buffer.alloc(4);
+                return Buffer.from("abcd").copy(dst, "bad") + ":" + dst.toString("hex");
+            }],
+            ["source_bad_string", () => {
+                const dst = Buffer.alloc(4);
+                return Buffer.from("abcd").copy(dst, 0, "bad") + ":" + dst.toString("hex");
+            }],
+            ["end_bad_string", () => {
+                const dst = Buffer.alloc(4);
+                return Buffer.from("abcd").copy(dst, 0, 0, "bad") + ":" + dst.toString("hex");
+            }],
+            ["target_infinity", () => {
+                const dst = Buffer.alloc(4);
+                return Buffer.from("abcd").copy(dst, Infinity) + ":" + dst.toString("hex");
+            }],
+            ["source_infinity", () => {
+                const dst = Buffer.alloc(4);
+                return Buffer.from("abcd").copy(dst, 0, Infinity) + ":" + dst.toString("hex");
+            }],
+            ["end_infinity", () => {
+                const dst = Buffer.alloc(4);
+                return Buffer.from("abcd").copy(dst, 0, 0, Infinity) + ":" + dst.toString("hex");
+            }],
+            ["target_negative_fraction", () => {
+                const dst = Buffer.alloc(4);
+                return Buffer.from("abcd").copy(dst, -0.9) + ":" + dst.toString("hex");
+            }],
+            ["source_negative_fraction", () => {
+                const dst = Buffer.alloc(4);
+                return Buffer.from("abcd").copy(dst, 0, -0.9) + ":" + dst.toString("hex");
+            }],
+            ["end_negative_fraction", () => {
+                const dst = Buffer.alloc(4);
+                return Buffer.from("abcd").copy(dst, 0, 0, -0.9) + ":" + dst.toString("hex");
+            }],
+        ];
+        return cases.map(([label, run]) => {
+            try {
+                return label + ":" + run();
+            } catch (e) {
+                return label + ":" + e.name;
+            }
+        }).join("|");
+    })()"#,
+    );
+    assert_eq!(
+        result,
+        "target_fraction:3:00616263|source_fraction:3:62636400|end_fraction:2:61620000|target_nan:4:61626364|source_nan:4:61626364|end_nan:0:00000000|target_bad_string:4:61626364|source_bad_string:4:61626364|end_bad_string:0:00000000|target_infinity:4:61626364|source_infinity:4:61626364|end_infinity:0:00000000|target_negative_fraction:RangeError|source_negative_fraction:RangeError|end_negative_fraction:RangeError"
+    );
+}
+
+#[test]
 fn global_buffer_write_range_vectors_match_node() {
     let result = eval_global_buffer(
         r#"(() => {

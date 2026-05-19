@@ -20893,10 +20893,11 @@ if (typeof globalThis.Buffer === 'undefined') {
         }
         static _copyBound(value, defaultValue) {
             const n = value === undefined ? defaultValue : Number(value);
-            if (!Number.isInteger(n) || n < 0) {
+            if (Number.isNaN(n) || !Number.isFinite(n)) return 0;
+            if (n < 0) {
                 throw new RangeError('Index out of range');
             }
-            return n;
+            return Math.trunc(n);
         }
         static _writeBound(value, defaultValue, max) {
             const n = value === undefined ? defaultValue : Number(value);
