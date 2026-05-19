@@ -20879,6 +20879,13 @@ if (typeof globalThis.Buffer === 'undefined') {
             }
             return o;
         }
+        static _copyBound(value, defaultValue) {
+            const n = value === undefined ? defaultValue : Number(value);
+            if (!Number.isInteger(n) || n < 0) {
+                throw new RangeError('Index out of range');
+            }
+            return n;
+        }
         static from(input, encoding, length) {
             if (typeof input === 'string') {
                 const enc = __pi_buffer_normalize_encoding(encoding);
@@ -21031,12 +21038,13 @@ if (typeof globalThis.Buffer === 'undefined') {
             return Buffer.compare(this.subarray(ss, se), other.subarray(ts, te));
         }
         copy(target, targetStart, sourceStart, sourceEnd) {
-            const ts = targetStart || 0;
-            const ss = sourceStart || 0;
-            const se = sourceEnd !== undefined ? sourceEnd : this.length;
-            const src = this.subarray(ss, se);
-            const copyLen = Math.min(src.length, target.length - ts);
-            target.set(src.subarray(0, copyLen), ts);
+            if (!(target instanceof Uint8Array)) throw new TypeError('target must be a Buffer');
+            const ts = Buffer._copyBound(targetStart, 0);
+            const ss = Buffer._copyBound(sourceStart, 0);
+            const se = Math.min(Buffer._copyBound(sourceEnd, this.length), this.length);
+            if (ts >= target.length || ss >= this.length || se <= ss) return 0;
+            const copyLen = Math.min(se - ss, target.length - ts);
+            target.set(this.subarray(ss, ss + copyLen), ts);
             return copyLen;
         }
         slice(start, end) {

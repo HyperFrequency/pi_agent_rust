@@ -854,6 +854,60 @@ fn global_buffer_concat_rejects_non_arrays_like_node() {
 }
 
 #[test]
+fn global_buffer_copy_range_vectors_match_node() {
+    let result = eval_global_buffer(
+        r#"(() => {
+        const cases = [
+            ["trunc_full", () => {
+                const dst = Buffer.alloc(3);
+                const copied = Buffer.from("abcdef").copy(dst);
+                return copied + ":" + dst.toString("hex");
+            }],
+            ["trunc_target_start", () => {
+                const dst = Buffer.alloc(3);
+                const copied = Buffer.from("abcdef").copy(dst, 1);
+                return copied + ":" + dst.toString("hex");
+            }],
+            ["source_range", () => {
+                const dst = Buffer.alloc(4);
+                const copied = Buffer.from("abcdef").copy(dst, 0, 2, 5);
+                return copied + ":" + dst.toString("hex");
+            }],
+            ["source_end_oob", () => {
+                const dst = Buffer.alloc(8);
+                const copied = Buffer.from("abc").copy(dst, 0, 1, 99);
+                return copied + ":" + dst.toString("hex");
+            }],
+            ["target_start_oob", () => {
+                const dst = Buffer.alloc(2);
+                const copied = Buffer.from("abc").copy(dst, 9);
+                return copied + ":" + dst.toString("hex");
+            }],
+            ["negative_target", () => {
+                const dst = Buffer.alloc(2);
+                return Buffer.from("abc").copy(dst, -1);
+            }],
+            ["negative_source", () => {
+                const dst = Buffer.alloc(2);
+                return Buffer.from("abc").copy(dst, 0, -1);
+            }],
+        ];
+        return cases.map(([label, run]) => {
+            try {
+                return label + ":" + run();
+            } catch (e) {
+                return label + ":" + e.name;
+            }
+        }).join("|");
+    })()"#,
+    );
+    assert_eq!(
+        result,
+        "trunc_full:3:616263|trunc_target_start:2:006162|source_range:3:63646500|source_end_oob:2:6263000000000000|target_start_oob:0:0000|negative_target:RangeError|negative_source:RangeError"
+    );
+}
+
+#[test]
 fn global_buffer_slice_and_subarray_are_shared_buffer_views_like_node() {
     let result = eval_global_buffer(
         r#"(() => {
