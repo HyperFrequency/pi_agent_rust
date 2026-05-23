@@ -2607,18 +2607,24 @@ fn testing_policy_exception_process_documented() {
 }
 
 #[test]
-fn ci_allowlist_regex_aligns_with_testing_policy() {
+fn ci_allowlist_aligns_with_testing_policy() {
     let ci = load_text(CI_WORKFLOW_PATH);
     let policy = load_text(TESTING_POLICY_PATH);
 
-    // CI should have an allowlist regex
-    let ci_has_allowlist = ci.contains("MockHttp") && ci.contains("allowlist");
-    let policy_has_allowlist = policy.contains("MockHttpServer");
+    // CI now reads from .no-mock-allowlist at repo root instead of an
+    // inline regex. The CI workflow must reference that file, and the
+    // policy must document the canonical core exception (MockHttpServer).
+    let ci_uses_allowlist_file = ci.contains(".no-mock-allowlist");
+    let policy_documents_allowlist =
+        policy.contains("MockHttpServer") && policy.contains(".no-mock-allowlist");
 
-    // Both CI and policy must agree on core exceptions
     assert!(
-        ci_has_allowlist || policy_has_allowlist,
-        "CI and testing-policy must both document MockHttp* allowlist"
+        ci_uses_allowlist_file,
+        "CI workflow must reference .no-mock-allowlist for the no-mock policy gate"
+    );
+    assert!(
+        policy_documents_allowlist,
+        "testing-policy must document the .no-mock-allowlist file alongside MockHttpServer"
     );
 }
 
