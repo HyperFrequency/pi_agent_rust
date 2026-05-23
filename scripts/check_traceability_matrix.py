@@ -23,6 +23,7 @@ from contextlib import contextmanager, redirect_stdout
 import glob
 from io import StringIO
 import json
+import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import tomllib
@@ -167,6 +168,40 @@ def extract_test_stem(path: str) -> str | None:
     return None
 
 
+def _git_tracked_test_stems(tests_dir: Path) -> set[str] | None:
+    """Return stems of git-tracked `tests/*.rs` files, or None if unavailable.
+
+    Filtering by git-tracked-only avoids false positives from local-only repro
+    files that developers keep around but are listed in `.gitignore` (e.g.,
+    `tests/edit_repro.rs`). CI checkouts only see tracked files, so reconciling
+    the matrix/classification against the same set keeps developer and CI runs
+    in agreement.
+    """
+
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "--", "tests/*.rs"],
+            cwd=str(REPO_ROOT),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+
+    stems: set[str] = set()
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("tests/") or not line.endswith(".rs"):
+            continue
+        # Only top-level `tests/*.rs` (matches the existing glob behaviour).
+        rel = line[len("tests/") : -len(".rs")]
+        if "/" in rel:
+            continue
+        stems.add(rel)
+    return stems
+
+
 def check_stale_mappings(
     matrix: dict[str, Any],
     errors: list[str],
@@ -197,11 +232,18 @@ def check_stale_mappings(
 
     matrix_test_stems = extract_matrix_test_stems(matrix)
 
-    # On-disk test files.
+    # On-disk test files. Only count git-tracked files so that local-only
+    # developer repro files (gitignored) don't trigger spurious classification
+    # mismatches between developer machines and CI checkouts.
     tests_dir = REPO_ROOT / "tests"
     on_disk_stems: set[str] = set()
-    for f in sorted(tests_dir.glob("*.rs")):
-        on_disk_stems.add(f.stem)
+    tracked_stems = _git_tracked_test_stems(tests_dir)
+    if tracked_stems is None:
+        # Not a git checkout (or git unavailable): fall back to filesystem scan.
+        for f in sorted(tests_dir.glob("*.rs")):
+            on_disk_stems.add(f.stem)
+    else:
+        on_disk_stems = tracked_stems
 
     stats["on_disk"] = len(on_disk_stems)
     stats["classified"] = len(classified_stems)

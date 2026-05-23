@@ -478,10 +478,6 @@
           "justification": "Classified unit suite included in the bd-8t27h.3 traceability backfill so CI governance covers all registered tests."
         },
         {
-          "path": "tests/edit_repro.rs",
-          "justification": "Classified unit suite included in the bd-8t27h.3 traceability backfill so CI governance covers all registered tests."
-        },
-        {
           "path": "tests/extension_flag_passthrough.rs",
           "justification": "Classified unit suite included in the bd-8t27h.3 traceability backfill so CI governance covers all registered tests."
         },

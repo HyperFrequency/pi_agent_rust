@@ -36,7 +36,6 @@ files = [
     "dropin_session_error_parity",
     "e2e_artifact_retention_triage",
     "e2e_replay_bundle_validation",
-    "edit_repro",
     "error_types",
     "extension_flag_passthrough",
     "extension_flag_passthrough_fixtures",
