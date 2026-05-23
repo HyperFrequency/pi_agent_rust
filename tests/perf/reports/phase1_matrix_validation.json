@@ -1,0 +1,557 @@
+{
+  "schema": "pi.perf.phase1_matrix_validation.v1",
+  "bead_id": "bd-3ar8v.2.8",
+  "generated_at": "2026-02-16T04:39:11.573098+00:00",
+  "run_id": "20260216T041030Z",
+  "correlation_id": "bd-3ar8v.3.8-20260216T041030Z",
+  "matrix_requirements": {
+    "required_partition_tags": [
+      "matched-state",
+      "realistic"
+    ],
+    "required_session_message_sizes": [
+      100000,
+      200000,
+      500000,
+      1000000,
+      5000000
+    ],
+    "required_cell_count": 10
+  },
+  "matrix_cells": [
+    {
+      "workload_partition": "matched-state",
+      "session_messages": 100000,
+      "scenario_id": "matched-state/session_100000",
+      "status": "fail",
+      "missing_reasons": [
+        "missing_matrix_source_record",
+        "missing_primary_relative_ratios",
+        "missing_stage_metrics:append_ms,open_ms,save_ms"
+      ],
+      "stage_attribution": {
+        "open_ms": null,
+        "append_ms": null,
+        "save_ms": null,
+        "index_ms": null,
+        "total_stage_ms": null
+      },
+      "primary_e2e": {
+        "wall_clock_ms": 27283.0,
+        "rust_vs_node_ratio": null,
+        "rust_vs_bun_ratio": null
+      },
+      "microbench_context": {
+        "cold_load_ms": null,
+        "per_call_us": null
+      },
+      "lineage": {
+        "source_record_index": null,
+        "source_artifacts": [
+          "tests/e2e_results/bd-3ar8v.3.8-20260216T041030Z/results/extension_benchmark_stratification.json",
+          "tests/e2e_results/bd-3ar8v.3.8-20260216T041030Z/results/baseline_variance_confidence.json"
+        ]
+      }
+    },
+    {
+      "workload_partition": "matched-state",
+      "session_messages": 200000,
+      "scenario_id": "matched-state/session_200000",
+      "status": "fail",
+      "missing_reasons": [
+        "missing_matrix_source_record",
+        "missing_primary_relative_ratios",
+        "missing_stage_metrics:append_ms,open_ms,save_ms"
+      ],
+      "stage_attribution": {
+        "open_ms": null,
+        "append_ms": null,
+        "save_ms": null,
+        "index_ms": null,
+        "total_stage_ms": null
+      },
+      "primary_e2e": {
+        "wall_clock_ms": 27283.0,
+        "rust_vs_node_ratio": null,
+        "rust_vs_bun_ratio": null
+      },
+      "microbench_context": {
+        "cold_load_ms": null,
+        "per_call_us": null
+      },
+      "lineage": {
+        "source_record_index": null,
+        "source_artifacts": [
+          "tests/e2e_results/bd-3ar8v.3.8-20260216T041030Z/results/extension_benchmark_stratification.json",
+          "tests/e2e_results/bd-3ar8v.3.8-20260216T041030Z/results/baseline_variance_confidence.json"
+        ]
+      }
+    },
+    {
+      "workload_partition": "matched-state",
+      "session_messages": 500000,
+      "scenario_id": "matched-state/session_500000",
+      "status": "fail",
+      "missing_reasons": [
+        "missing_matrix_source_record",
+        "missing_primary_relative_ratios",
+        "missing_stage_metrics:append_ms,open_ms,save_ms"
+      ],
+      "stage_attribution": {
+        "open_ms": null,
+        "append_ms": null,
+        "save_ms": null,
+        "index_ms": null,
+        "total_stage_ms": null
+      },
+      "primary_e2e": {
+        "wall_clock_ms": 27283.0,
+        "rust_vs_node_ratio": null,
+        "rust_vs_bun_ratio": null
+      },
+      "microbench_context": {
+        "cold_load_ms": null,
+        "per_call_us": null
+      },
+      "lineage": {
+        "source_record_index": null,
+        "source_artifacts": [
+          "tests/e2e_results/bd-3ar8v.3.8-20260216T041030Z/results/extension_benchmark_stratification.json",
+          "tests/e2e_results/bd-3ar8v.3.8-20260216T041030Z/results/baseline_variance_confidence.json"
+        ]
+      }
+    },
+    {
+      "workload_partition": "matched-state",
+      "session_messages": 1000000,
+      "scenario_id": "matched-state/session_1000000",
+      "status": "fail",
+      "missing_reasons": [
+        "missing_matrix_source_record",
+        "missing_primary_relative_ratios",
+        "missing_stage_metrics:append_ms,open_ms,save_ms"
+      ],
+      "stage_attribution": {
+        "open_ms": null,
+        "append_ms": null,
+        "save_ms": null,
+        "index_ms": null,
+        "total_stage_ms": null
+      },
+      "primary_e2e": {
+        "wall_clock_ms": 27283.0,
+        "rust_vs_node_ratio": null,
+        "rust_vs_bun_ratio": null
+      },
+      "microbench_context": {
+        "cold_load_ms": null,
+        "per_call_us": null
+      },
+      "lineage": {
+        "source_record_index": null,
+        "source_artifacts": [
+          "tests/e2e_results/bd-3ar8v.3.8-20260216T041030Z/results/extension_benchmark_stratification.json",
+          "tests/e2e_results/bd-3ar8v.3.8-20260216T041030Z/results/baseline_variance_confidence.json"
+        ]
+      }
+    },
+    {
+      "workload_partition": "matched-state",
+      "session_messages": 5000000,
+      "scenario_id": "matched-state/session_5000000",
+      "status": "fail",
+      "missing_reasons": [
+        "missing_matrix_source_record",
+        "missing_primary_relative_ratios",
+        "missing_stage_metrics:append_ms,open_ms,save_ms"
+      ],
+      "stage_attribution": {
+        "open_ms": null,
+        "append_ms": null,
+        "save_ms": null,
+        "index_ms": null,
+        "total_stage_ms": null
+      },
+      "primary_e2e": {
+        "wall_clock_ms": 27283.0,
+        "rust_vs_node_ratio": null,
+        "rust_vs_bun_ratio": null
+      },
+      "microbench_context": {
+        "cold_load_ms": null,
+        "per_call_us": null
+      },
+      "lineage": {
+        "source_record_index": null,
+        "source_artifacts": [
+          "tests/e2e_results/bd-3ar8v.3.8-20260216T041030Z/results/extension_benchmark_stratification.json",
+          "tests/e2e_results/bd-3ar8v.3.8-20260216T041030Z/results/baseline_variance_confidence.json"
+        ]
+      }
+    },
+    {
+      "workload_partition": "realistic",
+      "session_messages": 100000,
+      "scenario_id": "realistic/session_100000",
+      "status": "fail",
+      "missing_reasons": [
+        "missing_matrix_source_record",
+        "missing_primary_relative_ratios",
+        "missing_stage_metrics:append_ms,open_ms,save_ms"
+      ],
+      "stage_attribution": {
+        "open_ms": null,
+        "append_ms": null,
+        "save_ms": null,
+        "index_ms": null,
+        "total_stage_ms": null
+      },
+      "primary_e2e": {
+        "wall_clock_ms": 27283.0,
+        "rust_vs_node_ratio": null,
+        "rust_vs_bun_ratio": null
+      },
+      "microbench_context": {
+        "cold_load_ms": null,
+        "per_call_us": null
+      },
+      "lineage": {
+        "source_record_index": null,
+        "source_artifacts": [
+          "tests/e2e_results/bd-3ar8v.3.8-20260216T041030Z/results/extension_benchmark_stratification.json",
+          "tests/e2e_results/bd-3ar8v.3.8-20260216T041030Z/results/baseline_variance_confidence.json"
+        ]
+      }
+    },
+    {
+      "workload_partition": "realistic",
+      "session_messages": 200000,
+      "scenario_id": "realistic/session_200000",
+      "status": "fail",
+      "missing_reasons": [
+        "missing_matrix_source_record",
+        "missing_primary_relative_ratios",
+        "missing_stage_metrics:append_ms,open_ms,save_ms"
+      ],
+      "stage_attribution": {
+        "open_ms": null,
+        "append_ms": null,
+        "save_ms": null,
+        "index_ms": null,
+        "total_stage_ms": null
+      },
+      "primary_e2e": {
+        "wall_clock_ms": 27283.0,
+        "rust_vs_node_ratio": null,
+        "rust_vs_bun_ratio": null
+      },
+      "microbench_context": {
+        "cold_load_ms": null,
+        "per_call_us": null
+      },
+      "lineage": {
+        "source_record_index": null,
+        "source_artifacts": [
+          "tests/e2e_results/bd-3ar8v.3.8-20260216T041030Z/results/extension_benchmark_stratification.json",
+          "tests/e2e_results/bd-3ar8v.3.8-20260216T041030Z/results/baseline_variance_confidence.json"
+        ]
+      }
+    },
+    {
+      "workload_partition": "realistic",
+      "session_messages": 500000,
+      "scenario_id": "realistic/session_500000",
+      "status": "fail",
+      "missing_reasons": [
+        "missing_matrix_source_record",
+        "missing_primary_relative_ratios",
+        "missing_stage_metrics:append_ms,open_ms,save_ms"
+      ],
+      "stage_attribution": {
+        "open_ms": null,
+        "append_ms": null,
+        "save_ms": null,
+        "index_ms": null,
+        "total_stage_ms": null
+      },
+      "primary_e2e": {
+        "wall_clock_ms": 27283.0,
+        "rust_vs_node_ratio": null,
+        "rust_vs_bun_ratio": null
+      },
+      "microbench_context": {
+        "cold_load_ms": null,
+        "per_call_us": null
+      },
+      "lineage": {
+        "source_record_index": null,
+        "source_artifacts": [
+          "tests/e2e_results/bd-3ar8v.3.8-20260216T041030Z/results/extension_benchmark_stratification.json",
+          "tests/e2e_results/bd-3ar8v.3.8-20260216T041030Z/results/baseline_variance_confidence.json"
+        ]
+      }
+    },
+    {
+      "workload_partition": "realistic",
+      "session_messages": 1000000,
+      "scenario_id": "realistic/session_1000000",
+      "status": "fail",
+      "missing_reasons": [
+        "missing_matrix_source_record",
+        "missing_primary_relative_ratios",
+        "missing_stage_metrics:append_ms,open_ms,save_ms"
+      ],
+      "stage_attribution": {
+        "open_ms": null,
+        "append_ms": null,
+        "save_ms": null,
+        "index_ms": null,
+        "total_stage_ms": null
+      },
+      "primary_e2e": {
+        "wall_clock_ms": 27283.0,
+        "rust_vs_node_ratio": null,
+        "rust_vs_bun_ratio": null
+      },
+      "microbench_context": {
+        "cold_load_ms": null,
+        "per_call_us": null
+      },
+      "lineage": {
+        "source_record_index": null,
+        "source_artifacts": [
+          "tests/e2e_results/bd-3ar8v.3.8-20260216T041030Z/results/extension_benchmark_stratification.json",
+          "tests/e2e_results/bd-3ar8v.3.8-20260216T041030Z/results/baseline_variance_confidence.json"
+        ]
+      }
+    },
+    {
+      "workload_partition": "realistic",
+      "session_messages": 5000000,
+      "scenario_id": "realistic/session_5000000",
+      "status": "fail",
+      "missing_reasons": [
+        "missing_matrix_source_record",
+        "missing_primary_relative_ratios",
+        "missing_stage_metrics:append_ms,open_ms,save_ms"
+      ],
+      "stage_attribution": {
+        "open_ms": null,
+        "append_ms": null,
+        "save_ms": null,
+        "index_ms": null,
+        "total_stage_ms": null
+      },
+      "primary_e2e": {
+        "wall_clock_ms": 27283.0,
+        "rust_vs_node_ratio": null,
+        "rust_vs_bun_ratio": null
+      },
+      "microbench_context": {
+        "cold_load_ms": null,
+        "per_call_us": null
+      },
+      "lineage": {
+        "source_record_index": null,
+        "source_artifacts": [
+          "tests/e2e_results/bd-3ar8v.3.8-20260216T041030Z/results/extension_benchmark_stratification.json",
+          "tests/e2e_results/bd-3ar8v.3.8-20260216T041030Z/results/baseline_variance_confidence.json"
+        ]
+      }
+    }
+  ],
+  "stage_summary": {
+    "required_stage_keys": [
+      "open_ms",
+      "append_ms",
+      "save_ms",
+      "index_ms"
+    ],
+    "operation_stage_coverage": {
+      "open_ms": 0,
+      "append_ms": 0,
+      "save_ms": 0,
+      "index_ms": 0
+    },
+    "cells_with_complete_stage_breakdown": 0,
+    "cells_missing_stage_breakdown": 10,
+    "covered_cells": 0,
+    "missing_cells": [
+      {
+        "workload_partition": "matched-state",
+        "session_messages": 100000,
+        "reasons": [
+          "missing_matrix_source_record",
+          "missing_primary_relative_ratios",
+          "missing_stage_metrics:append_ms,open_ms,save_ms"
+        ]
+      },
+      {
+        "workload_partition": "matched-state",
+        "session_messages": 200000,
+        "reasons": [
+          "missing_matrix_source_record",
+          "missing_primary_relative_ratios",
+          "missing_stage_metrics:append_ms,open_ms,save_ms"
+        ]
+      },
+      {
+        "workload_partition": "matched-state",
+        "session_messages": 500000,
+        "reasons": [
+          "missing_matrix_source_record",
+          "missing_primary_relative_ratios",
+          "missing_stage_metrics:append_ms,open_ms,save_ms"
+        ]
+      },
+      {
+        "workload_partition": "matched-state",
+        "session_messages": 1000000,
+        "reasons": [
+          "missing_matrix_source_record",
+          "missing_primary_relative_ratios",
+          "missing_stage_metrics:append_ms,open_ms,save_ms"
+        ]
+      },
+      {
+        "workload_partition": "matched-state",
+        "session_messages": 5000000,
+        "reasons": [
+          "missing_matrix_source_record",
+          "missing_primary_relative_ratios",
+          "missing_stage_metrics:append_ms,open_ms,save_ms"
+        ]
+      },
+      {
+        "workload_partition": "realistic",
+        "session_messages": 100000,
+        "reasons": [
+          "missing_matrix_source_record",
+          "missing_primary_relative_ratios",
+          "missing_stage_metrics:append_ms,open_ms,save_ms"
+        ]
+      },
+      {
+        "workload_partition": "realistic",
+        "session_messages": 200000,
+        "reasons": [
+          "missing_matrix_source_record",
+          "missing_primary_relative_ratios",
+          "missing_stage_metrics:append_ms,open_ms,save_ms"
+        ]
+      },
+      {
+        "workload_partition": "realistic",
+        "session_messages": 500000,
+        "reasons": [
+          "missing_matrix_source_record",
+          "missing_primary_relative_ratios",
+          "missing_stage_metrics:append_ms,open_ms,save_ms"
+        ]
+      },
+      {
+        "workload_partition": "realistic",
+        "session_messages": 1000000,
+        "reasons": [
+          "missing_matrix_source_record",
+          "missing_primary_relative_ratios",
+          "missing_stage_metrics:append_ms,open_ms,save_ms"
+        ]
+      },
+      {
+        "workload_partition": "realistic",
+        "session_messages": 5000000,
+        "reasons": [
+          "missing_matrix_source_record",
+          "missing_primary_relative_ratios",
+          "missing_stage_metrics:append_ms,open_ms,save_ms"
+        ]
+      }
+    ]
+  },
+  "primary_outcomes": {
+    "status": "fail",
+    "wall_clock_ms": 27283.0,
+    "rust_vs_node_ratio": null,
+    "rust_vs_bun_ratio": null,
+    "missing_reasons": [
+      "missing_rust_vs_node_ratio",
+      "missing_rust_vs_bun_ratio"
+    ],
+    "ordering_policy": "primary_e2e_before_microbench"
+  },
+  "regression_guards": {
+    "memory": "fail",
+    "correctness": "fail",
+    "security": "missing",
+    "failure_or_gap_reasons": [
+      "correctness_regression",
+      "memory_regression",
+      "security_regression_unverified"
+    ]
+  },
+  "evidence_links": {
+    "phase1_unit_and_fault_injection": {
+      "suite_logs": {
+        "perf_baseline_variance": {
+          "stdout": "tests/e2e_results/bd-3ar8v.3.8-20260216T041030Z/results/perf_baseline_variance/stdout.log",
+          "stderr": "tests/e2e_results/bd-3ar8v.3.8-20260216T041030Z/results/perf_baseline_variance/stderr.log",
+          "result": "tests/e2e_results/bd-3ar8v.3.8-20260216T041030Z/results/perf_baseline_variance/result.json",
+          "status": "pass",
+          "present": true
+        },
+        "perf_regression": {
+          "stdout": "tests/e2e_results/bd-3ar8v.3.8-20260216T041030Z/results/perf_regression/stdout.log",
+          "stderr": "tests/e2e_results/bd-3ar8v.3.8-20260216T041030Z/results/perf_regression/stderr.log",
+          "result": "tests/e2e_results/bd-3ar8v.3.8-20260216T041030Z/results/perf_regression/result.json",
+          "status": "fail",
+          "present": true
+        },
+        "perf_budgets": {
+          "stdout": "tests/e2e_results/bd-3ar8v.3.8-20260216T041030Z/results/perf_budgets/stdout.log",
+          "stderr": "tests/e2e_results/bd-3ar8v.3.8-20260216T041030Z/results/perf_budgets/stderr.log",
+          "result": "tests/e2e_results/bd-3ar8v.3.8-20260216T041030Z/results/perf_budgets/result.json",
+          "status": "fail",
+          "present": true
+        }
+      },
+      "fault_injection_script": "/data/projects/pi_agent_rust/scripts/e2e/run_persistence_fault_injection.sh",
+      "fault_injection_summary_path": null
+    },
+    "required_artifacts": {
+      "scenario_runner": "tests/e2e_results/bd-3ar8v.3.8-20260216T041030Z/results/scenario_runner.jsonl",
+      "stratification": "tests/e2e_results/bd-3ar8v.3.8-20260216T041030Z/results/extension_benchmark_stratification.json",
+      "baseline_variance_confidence": "tests/e2e_results/bd-3ar8v.3.8-20260216T041030Z/results/baseline_variance_confidence.json"
+    }
+  },
+  "consumption_contract": {
+    "downstream_beads": [
+      "bd-3ar8v.2.12",
+      "bd-3ar8v.6.1",
+      "bd-3ar8v.6.2",
+      "bd-3ar8v.6.6",
+      "bd-3ar8v.6.11"
+    ],
+    "artifact_ready_for_phase5": false,
+    "fail_closed_conditions": [
+      "missing_matrix_source_record",
+      "missing_stage_metrics",
+      "missing_primary_wall_clock",
+      "missing_primary_relative_ratios",
+      "memory_regression",
+      "correctness_regression",
+      "security_regression"
+    ]
+  },
+  "lineage": {
+    "run_id_lineage": [
+      "20260216T041030Z",
+      "bd-3ar8v.3.8-20260216T041030Z"
+    ],
+    "source_manifest_path": "tests/e2e_results/bd-3ar8v.3.8-20260216T041030Z/manifest.json",
+    "source_scenario_runner_path": null,
+    "source_stratification_path": "tests/e2e_results/bd-3ar8v.3.8-20260216T041030Z/results/extension_benchmark_stratification.json",
+    "source_baseline_confidence_path": "tests/e2e_results/bd-3ar8v.3.8-20260216T041030Z/results/baseline_variance_confidence.json",
+    "source_perf_sli_contract_path": "/data/projects/pi_agent_rust/docs/perf_sli_matrix.json"
+  }
+}

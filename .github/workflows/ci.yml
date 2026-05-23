@@ -1285,9 +1285,13 @@ jobs:
         if: always() && runner.os == 'Linux'
         env:
           RELEASE_GATE_REQUIRE_DROPIN_CERTIFIED: ${{ vars.RELEASE_GATE_REQUIRE_DROPIN_CERTIFIED || '0' }}
+          # rch (remote cargo) is a developer-laptop tool and is not installed
+          # on GitHub-hosted runners; force the local runner so the script does
+          # not abort with "RELEASE_GATE_CARGO_RUNNER=rch ... not available".
+          RELEASE_GATE_CARGO_RUNNER: local
         run: |
           set -euxo pipefail
-          ./scripts/release_gate.sh --report | tee release_gate_report.json
+          ./scripts/release_gate.sh --report --no-rch | tee release_gate_report.json
           VERDICT=$(python3 -c "import json; print(json.load(open('release_gate_report.json')).get('verdict','unknown'))")
           echo "Release gate verdict: $VERDICT"
           if [ "$VERDICT" = "fail" ]; then
