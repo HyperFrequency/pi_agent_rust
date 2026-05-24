@@ -117,6 +117,16 @@ fn session_hints(error: &Error) -> ErrorHint {
 }
 
 fn auth_hints(msg: &str) -> ErrorHint {
+    if msg.contains("GitHub Copilot") && msg.contains("client_id") {
+        return ErrorHint {
+            summary: "GitHub Copilot OAuth client_id not configured",
+            hints: &[
+                "Set GITHUB_COPILOT_CLIENT_ID to your GitHub OAuth App / GitHub App client id",
+                "Or run on a workstation with a browser, or use device flow over SSH (set PI_COPILOT_FORCE_DEVICE_FLOW=1)",
+            ],
+            context_fields: &["provider"],
+        };
+    }
     if msg.contains("API key") || msg.contains("api_key") {
         return ErrorHint {
             summary: "API key not configured",

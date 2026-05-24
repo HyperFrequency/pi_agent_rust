@@ -177,6 +177,29 @@ fn provider_has_dedicated_login_flow(provider: &str) -> bool {
         .any(|(builtin, _)| provider_ids_match(builtin, provider))
 }
 
+/// Choose the GitHub Copilot device flow over the browser flow when the
+/// current process cannot rely on a localhost OAuth redirect — either because
+/// `GITHUB_COPILOT_CLIENT_ID` is unset (the browser flow rejects that early
+/// with a less actionable error than the device flow), or because the session
+/// is running headless / over SSH where the user's browser cannot reach the
+/// callback server bound on this host. `PI_COPILOT_FORCE_DEVICE_FLOW=1` opts
+/// in unconditionally.
+fn should_use_copilot_device_flow() -> bool {
+    if std::env::var("PI_COPILOT_FORCE_DEVICE_FLOW")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    if std::env::var("GITHUB_COPILOT_CLIENT_ID")
+        .map(|v| v.trim().is_empty())
+        .unwrap_or(true)
+    {
+        return true;
+    }
+    std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_TTY").is_some()
+}
+
 fn provider_supports_interactive_api_key_login(metadata: &ProviderMetadata) -> bool {
     if metadata.auth_env_keys.is_empty() || provider_has_dedicated_login_flow(metadata.canonical_id)
     {
@@ -1253,7 +1276,7 @@ impl PiApp {
                     Some(dc) => {
                         let poll_result = if provider == "kimi-for-coding" {
                             Box::pin(crate::auth::poll_kimi_code_device_flow(&dc)).await
-                        } else {
+                        } else if provider == "github-copilot" || provider == "copilot" {
                             let client_id =
                                 std::env::var("GITHUB_COPILOT_CLIENT_ID").unwrap_or_default();
                             let copilot_config = crate::auth::CopilotOAuthConfig {
@@ -1262,6 +1285,10 @@ impl PiApp {
                             };
                             Box::pin(crate::auth::poll_copilot_device_flow(&copilot_config, &dc))
                                 .await
+                        } else {
+                            crate::auth::DeviceFlowPollResult::Error(format!(
+                                "Device flow polling not supported for {provider}"
+                            ))
                         };
                         match poll_result {
                             crate::auth::DeviceFlowPollResult::Success(cred) => Ok(cred),
@@ -2241,6 +2268,51 @@ impl PiApp {
 
             runtime_handle.spawn(async move {
                 match crate::auth::start_kimi_code_device_flow().await {
+                    Ok(device) => {
+                        let _ = crate::interactive::enqueue_pi_event(
+                            &event_tx,
+                            &cx,
+                            PiMsg::OAuthDeviceFlowStarted {
+                                provider: provider_clone,
+                                device_code: device.device_code,
+                                user_code: device.user_code,
+                                verification_uri: device
+                                    .verification_uri_complete
+                                    .unwrap_or(device.verification_uri),
+                                expires_in: device.expires_in,
+                            },
+                        )
+                        .await;
+                    }
+                    Err(err) => {
+                        let _ = crate::interactive::enqueue_pi_event(
+                            &event_tx,
+                            &cx,
+                            PiMsg::AgentError(format!("OAuth login failed: {err}")),
+                        )
+                        .await;
+                    }
+                }
+            });
+            return None;
+        }
+
+        if (provider == "github-copilot" || provider == "copilot")
+            && should_use_copilot_device_flow()
+        {
+            self.status_message = Some("Starting GitHub Copilot device flow login...".to_string());
+            let event_tx = self.event_tx.clone();
+            let provider_clone = provider;
+            let runtime_handle = self.runtime_handle.clone();
+            let cx = asupersync::Cx::current().unwrap_or_else(asupersync::Cx::for_request);
+            let client_id = std::env::var("GITHUB_COPILOT_CLIENT_ID").unwrap_or_default();
+            let copilot_config = crate::auth::CopilotOAuthConfig {
+                client_id,
+                ..crate::auth::CopilotOAuthConfig::default()
+            };
+
+            runtime_handle.spawn(async move {
+                match crate::auth::start_copilot_device_flow(&copilot_config).await {
                     Ok(device) => {
                         let _ = crate::interactive::enqueue_pi_event(
                             &event_tx,
