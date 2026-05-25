@@ -36,10 +36,11 @@ const WRITE_ZERO_MAX_RETRIES: usize = 10;
 
 /// Initial backoff duration when a write returns `Ok(0)`.
 const WRITE_ZERO_BACKOFF: std::time::Duration = std::time::Duration::from_millis(10);
-/// Environment variable that overrides the request timeout (in seconds) for
-/// all providers. `0` disables the timeout entirely (unbounded). This is also
-/// the env clap binds the `--request-timeout` CLI flag and the
-/// `requestTimeoutSecs` setting to, so the three configuration surfaces share a
+/// Environment variable that overrides the request timeout, in seconds.
+///
+/// Applies to all providers; `0` disables the timeout entirely (unbounded).
+/// Clap binds the `--request-timeout` CLI flag and the `requestTimeoutSecs`
+/// setting to this same env var, so the three configuration surfaces share a
 /// single resolution path.
 pub const REQUEST_TIMEOUT_ENV: &str = "PI_HTTP_REQUEST_TIMEOUT_SECS";
 
