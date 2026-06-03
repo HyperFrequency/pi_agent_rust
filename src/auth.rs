@@ -71,6 +71,26 @@ const GITHUB_OAUTH_TOKEN_URL: &str = "https://github.com/login/oauth/access_toke
 const GITHUB_DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 /// Default scopes for Copilot access (read:user needed for identity).
 const GITHUB_COPILOT_SCOPES: &str = "read:user";
+/// GitHub Copilot's public OAuth application client id.
+///
+/// This is the same well-known, non-secret client id baked into GitHub's own
+/// editor integrations (copilot.vim, the Copilot CLI) and reused by essentially
+/// every third-party Copilot client. Shipping it as the default lets device/
+/// browser login work out of the box without the user having to register their
+/// own GitHub App (#97); `GITHUB_COPILOT_CLIENT_ID` still overrides it for
+/// Enterprise or custom-app setups.
+pub const DEFAULT_COPILOT_CLIENT_ID: &str = "Iv1.b507a08c87ecfe98";
+
+/// Resolve the Copilot OAuth client id: the `GITHUB_COPILOT_CLIENT_ID` env var
+/// when set to a non-empty value, otherwise the well-known public default.
+#[must_use]
+pub fn resolved_copilot_client_id() -> String {
+    std::env::var("GITHUB_COPILOT_CLIENT_ID")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| DEFAULT_COPILOT_CLIENT_ID.to_string())
+}
 
 // ── GitLab OAuth constants ────────────────────────────────────────
 const GITLAB_OAUTH_AUTHORIZE_PATH: &str = "/oauth/authorize";
@@ -2886,7 +2906,7 @@ pub struct CopilotOAuthConfig {
 impl Default for CopilotOAuthConfig {
     fn default() -> Self {
         Self {
-            client_id: String::new(),
+            client_id: DEFAULT_COPILOT_CLIENT_ID.to_string(),
             github_base_url: "https://github.com".to_string(),
             scopes: GITHUB_COPILOT_SCOPES.to_string(),
         }
@@ -7896,9 +7916,25 @@ mod tests {
     #[test]
     fn test_copilot_config_default() {
         let config = CopilotOAuthConfig::default();
-        assert!(config.client_id.is_empty());
+        // #97: the default now ships the well-known public Copilot client id so
+        // login works without the user registering their own GitHub App.
+        assert_eq!(config.client_id, DEFAULT_COPILOT_CLIENT_ID);
+        assert!(!config.client_id.is_empty());
         assert_eq!(config.github_base_url, "https://github.com");
         assert_eq!(config.scopes, GITHUB_COPILOT_SCOPES);
+    }
+
+    #[test]
+    fn test_resolved_copilot_client_id_falls_back_to_default() {
+        // With the env var unset/empty, the resolver returns the public default.
+        // (We avoid mutating the process env here to stay parallel-test-safe;
+        // CI runs without GITHUB_COPILOT_CLIENT_ID set.)
+        if std::env::var("GITHUB_COPILOT_CLIENT_ID")
+            .map(|v| v.trim().is_empty())
+            .unwrap_or(true)
+        {
+            assert_eq!(resolved_copilot_client_id(), DEFAULT_COPILOT_CLIENT_ID);
+        }
     }
 
     #[test]

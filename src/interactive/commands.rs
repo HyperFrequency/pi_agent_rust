@@ -183,11 +183,11 @@ fn provider_has_dedicated_login_flow(provider: &str) -> bool {
 /// the callback server bound on this host. `PI_COPILOT_FORCE_DEVICE_FLOW=1`
 /// opts in unconditionally.
 ///
-/// Note: when `GITHUB_COPILOT_CLIENT_ID` is unset, *both* flows fail with the
-/// same actionable "set GITHUB_COPILOT_CLIENT_ID" error message (the device
-/// flow's error text is slightly better, but neither flow can succeed). We
-/// still route to device flow in that case so the user sees the more explicit
-/// hint, but the only real fix is to set the env var.
+/// When `GITHUB_COPILOT_CLIENT_ID` is unset we fall back to the well-known
+/// public Copilot client id (`crate::auth::DEFAULT_COPILOT_CLIENT_ID`), so both
+/// flows now succeed out of the box (#97). We still prefer the device flow when
+/// no client id is explicitly configured, since that path is the most robust on
+/// headless/SSH sessions where a localhost OAuth redirect can't be reached.
 fn should_use_copilot_device_flow() -> bool {
     if std::env::var("PI_COPILOT_FORCE_DEVICE_FLOW")
         .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
@@ -1232,7 +1232,7 @@ impl PiApp {
                         .await
                     } else if provider == "github-copilot" || provider == "copilot" {
                         let client_id =
-                            std::env::var("GITHUB_COPILOT_CLIENT_ID").unwrap_or_default();
+                            crate::auth::resolved_copilot_client_id();
                         let copilot_config = crate::auth::CopilotOAuthConfig {
                             client_id,
                             ..crate::auth::CopilotOAuthConfig::default()
@@ -1282,7 +1282,7 @@ impl PiApp {
                             Box::pin(crate::auth::poll_kimi_code_device_flow(&dc)).await
                         } else if provider == "github-copilot" || provider == "copilot" {
                             let client_id =
-                                std::env::var("GITHUB_COPILOT_CLIENT_ID").unwrap_or_default();
+                                crate::auth::resolved_copilot_client_id();
                             let copilot_config = crate::auth::CopilotOAuthConfig {
                                 client_id,
                                 ..crate::auth::CopilotOAuthConfig::default()
@@ -2309,7 +2309,7 @@ impl PiApp {
             let provider_clone = provider;
             let runtime_handle = self.runtime_handle.clone();
             let cx = asupersync::Cx::current().unwrap_or_else(asupersync::Cx::for_request);
-            let client_id = std::env::var("GITHUB_COPILOT_CLIENT_ID").unwrap_or_default();
+            let client_id = crate::auth::resolved_copilot_client_id();
             let copilot_config = crate::auth::CopilotOAuthConfig {
                 client_id,
                 ..crate::auth::CopilotOAuthConfig::default()
@@ -2378,7 +2378,7 @@ impl PiApp {
         } else if provider == "google-antigravity" {
             crate::auth::start_google_antigravity_oauth().map(|info| (info, None))
         } else if provider == "github-copilot" || provider == "copilot" {
-            let client_id = std::env::var("GITHUB_COPILOT_CLIENT_ID").unwrap_or_default();
+            let client_id = crate::auth::resolved_copilot_client_id();
             let copilot_config = crate::auth::CopilotOAuthConfig {
                 client_id,
                 ..crate::auth::CopilotOAuthConfig::default()
