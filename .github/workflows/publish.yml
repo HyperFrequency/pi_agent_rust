@@ -113,8 +113,18 @@ jobs:
       - name: Dry run publish
         run: cargo publish --dry-run --locked
 
+      # #99: this publish job only runs on a real (non-prerelease) release tag, so
+      # reaching it without a token means the release would otherwise *silently*
+      # skip cargo publish and still report success — which is how crates.io fell
+      # behind the repo. Fail loudly instead so a missing token is visible.
+      - name: Require CARGO_REGISTRY_TOKEN for release publish
+        if: env.HAS_CARGO_REGISTRY_TOKEN != 'true'
+        run: |
+          echo "::error::CARGO_REGISTRY_TOKEN secret is not configured — cannot publish to crates.io for this release tag." >&2
+          echo "crates.io publishing would have been silently skipped (see #99). Set the CARGO_REGISTRY_TOKEN repo secret, then re-run." >&2
+          exit 1
+
       - name: Publish to crates.io
-        if: env.HAS_CARGO_REGISTRY_TOKEN == 'true'
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish --locked
