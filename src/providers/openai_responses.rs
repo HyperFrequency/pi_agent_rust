@@ -221,18 +221,23 @@ impl Provider for OpenAIResponsesProvider {
         let auth_value = if authorization_header_value.is_some() {
             None
         } else {
-            Some(
-                options
-                    .api_key
-                    .clone()
-                    .or_else(|| std::env::var("OPENAI_API_KEY").ok())
-                    .ok_or_else(|| {
-                        Error::provider(
-                            self.name(),
-                            "Missing API key for provider. Configure credentials with /login <provider> or set the provider's API key env var.",
-                        )
-                    })?,
-            )
+            let resolved = options
+                .api_key
+                .clone()
+                .or_else(|| std::env::var("OPENAI_API_KEY").ok());
+            match resolved {
+                Some(key) => Some(key),
+                // Local / self-hosted providers (ollama, llamacpp, mistralrs, …)
+                // require NO API key; proceed without an Authorization header
+                // rather than failing. (#104)
+                None if crate::provider_metadata::provider_is_keyless_local(self.name()) => None,
+                None => {
+                    return Err(Error::provider(
+                        self.name(),
+                        "Missing API key for provider. Configure credentials with /login <provider> or set the provider's API key env var.",
+                    ));
+                }
+            }
         };
 
         let request_body = self.build_request(context, options);

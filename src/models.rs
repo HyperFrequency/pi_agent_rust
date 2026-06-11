@@ -4144,6 +4144,32 @@ mod tests {
     }
 
     #[test]
+    fn local_providers_synthesize_ready_keyless_entries() {
+        // #104: ollama, llamacpp and mistralrs are local OpenAI-compatible
+        // providers with no API key. A `--provider X --model Y` invocation
+        // synthesizes an ad-hoc entry; that entry must be considered READY
+        // without any configured credential, so the agent attempts a connection
+        // to the local server instead of erroring with "Missing API key".
+        for provider in ["ollama", "llamacpp", "mistralrs"] {
+            let entry = ad_hoc_model_entry(provider, "some-local-model")
+                .unwrap_or_else(|| unreachable!("expected ad-hoc entry for '{provider}'"));
+            assert_eq!(entry.model.provider, provider);
+            assert!(
+                !entry.auth_header,
+                "{provider} ad-hoc entry must not require an auth header"
+            );
+            assert!(
+                !model_requires_configured_credential(&entry),
+                "{provider} must not require a configured credential"
+            );
+            assert!(
+                model_entry_is_ready(&entry),
+                "{provider} ad-hoc entry must be ready without an API key"
+            );
+        }
+    }
+
+    #[test]
     fn model_registry_error_none_for_valid_load() {
         let (_dir, auth) = test_auth_storage();
         let registry = ModelRegistry::load(&auth, None);

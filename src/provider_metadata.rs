@@ -1371,6 +1371,52 @@ pub const PROVIDER_METADATA: &[ProviderMetadata] = &[
         test_obligations: TEST_REQUIRED,
     },
     ProviderMetadata {
+        // llama.cpp's bundled `llama-server` exposes an OpenAI-compatible API on
+        // localhost and requires NO API key by default (parity with ollama /
+        // lmstudio). It is registered as a first-class local provider so that
+        // `pi --provider llamacpp --model <id>` works out-of-the-box without a
+        // models.json entry and, critically, without tripping the API-key gate.
+        // (#104)
+        canonical_id: "llamacpp",
+        display_name: Some("llama.cpp"),
+        aliases: &["llama-cpp", "llama.cpp", "llama-server"],
+        auth_env_keys: &[],
+        onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
+        routing_defaults: Some(ProviderRoutingDefaults {
+            api: "openai-completions",
+            // llama-server's default bind address/port.
+            base_url: "http://127.0.0.1:8080/v1",
+            auth_header: false,
+            reasoning: true,
+            input: &INPUT_TEXT,
+            context_window: 131_072,
+            max_tokens: 32_768,
+        }),
+        test_obligations: TEST_REQUIRED,
+    },
+    ProviderMetadata {
+        // mistral.rs ships an OpenAI-compatible HTTP server that listens on
+        // localhost and accepts an empty API key by default. Like ollama /
+        // llamacpp it is a LOCAL provider with no auth, so it must bypass the
+        // API-key requirement. (#104)
+        canonical_id: "mistralrs",
+        display_name: Some("mistral.rs"),
+        aliases: &["mistral.rs", "mistral-rs"],
+        auth_env_keys: &[],
+        onboarding: ProviderOnboardingMode::OpenAICompatiblePreset,
+        routing_defaults: Some(ProviderRoutingDefaults {
+            api: "openai-completions",
+            // mistral.rs server's default bind address/port.
+            base_url: "http://127.0.0.1:1234/v1",
+            auth_header: false,
+            reasoning: true,
+            input: &INPUT_TEXT,
+            context_window: 131_072,
+            max_tokens: 32_768,
+        }),
+        test_obligations: TEST_REQUIRED,
+    },
+    ProviderMetadata {
         canonical_id: "ollama-cloud",
         display_name: Some("Ollama Cloud"),
         aliases: &[],
@@ -1599,6 +1645,30 @@ pub fn provider_auth_env_keys(provider_id: &str) -> &'static [&'static str] {
 
 pub fn provider_routing_defaults(provider_id: &str) -> Option<ProviderRoutingDefaults> {
     provider_metadata(provider_id).and_then(|meta| meta.routing_defaults)
+}
+
+/// Whether `provider_id` is a known local / self-hosted, no-auth provider.
+///
+/// Such providers (e.g. `ollama`, `llamacpp`, `mistralrs`) run an
+/// OpenAI-compatible server on localhost and require NO authentication: no API
+/// key and no `Authorization` header.
+///
+/// Used by the OpenAI-completions / OpenAI-responses request paths so that a
+/// missing API key is NOT treated as a fatal error for these providers (they
+/// are simply called without a bearer token), matching how `ollama` already
+/// works. Without this, `pi --provider llamacpp ...` errors with
+/// "Missing API key for provider" even though the provider needs none. (#104)
+///
+/// The predicate is derived from the canonical metadata (`auth_env_keys` empty
+/// AND routing `auth_header == false`) rather than a hardcoded allowlist, so it
+/// stays correct as new keyless local providers are added.
+pub fn provider_is_keyless_local(provider_id: &str) -> bool {
+    provider_metadata(provider_id).is_some_and(|meta| {
+        meta.auth_env_keys.is_empty()
+            && meta
+                .routing_defaults
+                .is_some_and(|defaults| !defaults.auth_header)
+    })
 }
 
 /// Compare two provider IDs for equality, resolving aliases via
@@ -2674,6 +2744,83 @@ mod tests {
             provider_metadata("ollama-cloud").unwrap().auth_env_keys,
             &["OLLAMA_API_KEY"]
         );
+    }
+
+    #[test]
+    fn local_keyless_providers_registered_without_auth() {
+        // #104: llamacpp and mistralrs are local OpenAI-compatible providers
+        // with NO API key, exactly like ollama. They must be keyless (empty
+        // auth_env_keys) and route with auth_header == false so the request
+        // path does not demand a bearer token.
+        for (id, base_url) in [
+            ("llamacpp", "http://127.0.0.1:8080/v1"),
+            ("mistralrs", "http://127.0.0.1:1234/v1"),
+        ] {
+            let meta = provider_metadata(id)
+                .unwrap_or_else(|| unreachable!("expected metadata for '{id}'"));
+            assert_eq!(meta.canonical_id, id);
+            assert!(
+                meta.auth_env_keys.is_empty(),
+                "{id} must declare no auth env keys"
+            );
+            let defaults = provider_routing_defaults(id)
+                .unwrap_or_else(|| unreachable!("expected routing defaults for '{id}'"));
+            assert_eq!(defaults.api, "openai-completions");
+            assert!(
+                !defaults.auth_header,
+                "{id} must not require an auth header"
+            );
+            assert_eq!(defaults.base_url, base_url);
+        }
+    }
+
+    #[test]
+    fn local_keyless_provider_aliases_resolve() {
+        // #104: the common spellings users reach for must resolve to the
+        // canonical local provider so `--provider llama.cpp` / `mistral.rs` work.
+        for (alias, canonical) in [
+            ("llama-cpp", "llamacpp"),
+            ("llama.cpp", "llamacpp"),
+            ("llama-server", "llamacpp"),
+            ("mistral.rs", "mistralrs"),
+            ("mistral-rs", "mistralrs"),
+        ] {
+            let meta = provider_metadata(alias)
+                .unwrap_or_else(|| unreachable!("expected metadata for alias '{alias}'"));
+            assert_eq!(
+                meta.canonical_id, canonical,
+                "alias '{alias}' should resolve to '{canonical}'"
+            );
+        }
+    }
+
+    #[test]
+    fn keyless_local_predicate_matches_local_providers_only() {
+        // #104: the predicate that lets the OpenAI-completions request path skip
+        // the missing-API-key error must hold for ollama + llamacpp + mistralrs
+        // (and only for genuinely keyless local providers).
+        for id in ["ollama", "llamacpp", "mistralrs"] {
+            assert!(
+                provider_is_keyless_local(id),
+                "{id} should be recognised as a keyless local provider"
+            );
+        }
+        // Cloud / keyed providers must still require credentials.
+        for id in [
+            "openai",
+            "anthropic",
+            "groq",
+            "ollama-cloud", // cloud variant DOES need OLLAMA_API_KEY
+            "lmstudio",     // declares LMSTUDIO_API_KEY + auth_header true
+        ] {
+            assert!(
+                !provider_is_keyless_local(id),
+                "{id} must NOT be treated as keyless local"
+            );
+        }
+        // Unknown providers are not keyless-local (they fall back to the
+        // generic key-required gate).
+        assert!(!provider_is_keyless_local("definitely-not-a-provider"));
     }
 
     #[test]

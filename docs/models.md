@@ -147,6 +147,37 @@ API keys can be plain strings, environment variables, or shell commands.
 
 Shell commands run via `sh -c` on Unix and `cmd /C` on Windows.
 
+### Local providers (no API key)
+
+`ollama`, `llamacpp` (llama.cpp's `llama-server`), `mistralrs` (mistral.rs), and
+`lmstudio` are recognized built-in **local** providers. `ollama`, `llamacpp`, and
+`mistralrs` require **no API key** — they expose an OpenAI-compatible server on
+localhost and are called without an `Authorization` header. They work
+out-of-the-box without a `models.json` entry:
+
+```bash
+# Defaults: llama-server -> http://127.0.0.1:8080/v1, mistral.rs -> http://127.0.0.1:1234/v1
+pi --provider llamacpp  --model ggml-org/gemma-4-E4B-it-GGUF -p "hi"
+pi --provider mistralrs --model default -p "hi"
+```
+
+Provider aliases are accepted: `llama.cpp` / `llama-cpp` / `llama-server` ->
+`llamacpp`, and `mistral.rs` / `mistral-rs` -> `mistralrs`.
+
+To point at a non-default host/port, add a `models.json` entry (no `apiKey`
+needed):
+
+```json
+{
+  "providers": {
+    "llamacpp": {
+      "baseUrl": "http://127.0.0.1:9090/v1",
+      "models": [ { "id": "my-model" } ]
+    }
+  }
+}
+```
+
 ## User Model Override (extending the bundled snapshot)
 
 Pi ships with a snapshot of every provider's discovery endpoint at

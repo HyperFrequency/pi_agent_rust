@@ -304,18 +304,24 @@ impl Provider for OpenAIProvider {
         let auth_value = if authorization_override.is_some() {
             None
         } else {
-            Some(
-                options
-                    .api_key
-                    .clone()
-                    .or_else(|| std::env::var("OPENAI_API_KEY").ok())
-                    .ok_or_else(|| {
-                        Error::provider(
-                            self.name(),
-                            "Missing API key for provider. Configure credentials with /login <provider> or set the provider's API key env var.",
-                        )
-                    })?,
-            )
+            let resolved = options
+                .api_key
+                .clone()
+                .or_else(|| std::env::var("OPENAI_API_KEY").ok());
+            match resolved {
+                Some(key) => Some(key),
+                // Local / self-hosted providers (ollama, llamacpp, mistralrs, …)
+                // expose an OpenAI-compatible server on localhost and require NO
+                // API key. For these we proceed without an Authorization header
+                // instead of failing, matching how ollama already works. (#104)
+                None if crate::provider_metadata::provider_is_keyless_local(self.name()) => None,
+                None => {
+                    return Err(Error::provider(
+                        self.name(),
+                        "Missing API key for provider. Configure credentials with /login <provider> or set the provider's API key env var.",
+                    ));
+                }
+            }
         };
 
         let request_body = self.build_request_json(context, options)?;
@@ -1575,6 +1581,78 @@ mod tests {
         let body: Value = serde_json::from_str(&captured.body).expect("request body json");
         assert_eq!(body["stream"], true);
         assert_eq!(body["stream_options"]["include_usage"], true);
+    }
+
+    /// Drive `provider.stream()` once against `base_url` with no API key and
+    /// return the `Result`. Keeps the request path deterministic and fast by
+    /// pointing at an unroutable address so we observe the *auth decision*
+    /// (key required vs. not) without depending on a full network round-trip.
+    fn stream_result_without_key(
+        provider_name: &str,
+        base_url: &str,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+        let provider = OpenAIProvider::new("local-model")
+            .with_provider_name(provider_name)
+            .with_base_url(base_url.to_string());
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::User(crate::model::UserMessage {
+                content: UserContent::Text("ping".to_string()),
+                timestamp: 0,
+            })]
+            .into(),
+            tools: Vec::new().into(),
+        };
+        let options = StreamOptions {
+            api_key: None,
+            ..Default::default()
+        };
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        runtime.block_on(async { provider.stream(&context, &options).await })
+    }
+
+    #[test]
+    fn test_stream_keyless_local_provider_does_not_require_key() {
+        // #104: local OpenAI-compatible providers (ollama, llamacpp, mistralrs)
+        // need NO API key. With no api_key configured the request path must NOT
+        // raise the "Missing API key for provider" error. We point at an
+        // unroutable address so the call resolves quickly: it either starts the
+        // stream or fails with a *connection* error — never the missing-key
+        // error. (Skipped when OPENAI_API_KEY is ambient, which would satisfy
+        // the key check for every provider and make the assertion vacuous.)
+        if std::env::var("OPENAI_API_KEY").is_ok() {
+            return;
+        }
+        for provider in ["llamacpp", "mistralrs", "ollama"] {
+            // 127.0.0.1:1 is reserved/unroutable, so connect fails fast.
+            let result = stream_result_without_key(provider, "http://127.0.0.1:1/v1");
+            if let Err(err) = result {
+                assert!(
+                    !err.to_string().contains("Missing API key"),
+                    "{provider}: keyless local provider must not raise missing-key error, got: {err}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_stream_unknown_provider_without_key_still_errors() {
+        // Guard: the keyless bypass is scoped to known local providers. An
+        // unknown provider with no key (and no ambient OPENAI_API_KEY) must
+        // still fail with the missing-key error — and does so synchronously,
+        // before any network I/O.
+        if std::env::var("OPENAI_API_KEY").is_ok() {
+            return; // ambient key would satisfy the gate; skip in that env
+        }
+        let result =
+            stream_result_without_key("totally-unknown-cloud-provider", "http://127.0.0.1:1/v1");
+        let err = result.err().expect("missing key should error");
+        assert!(
+            err.to_string().contains("Missing API key"),
+            "expected missing-key error, got: {err}"
+        );
     }
 
     #[test]
