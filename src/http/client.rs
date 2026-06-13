@@ -724,15 +724,30 @@ const NOT_CONNECTED_RETRY_BACKOFFS: [std::time::Duration; 2] = [
 /// retried here.
 ///
 /// Layered transports sometimes wrap the original socket error in another
-/// `io::Error` with a different kind, so the *source chain* is inspected too,
-/// not just the top-level error.
+/// error, so the inner errors are inspected too, not just the top-level one.
+/// Two wrapping shapes are walked:
+///   * `io::Error` wrapping another `io::Error` — the inner error is reachable
+///     via [`std::io::Error::get_ref`]. (Note: `io::Error`'s `Error::source`
+///     intentionally returns the *inner's* source, not the inner error itself,
+///     so a `get_ref` walk is required to see a wrapped `io::Error`.)
+///   * a non-`io` error wrapping an `io::Error` — reachable via the generic
+///     [`std::error::Error::source`] chain.
 fn is_retryable_not_connected(err: &std::io::Error) -> bool {
     fn matches_not_connected(err: &std::io::Error) -> bool {
         err.kind() == std::io::ErrorKind::NotConnected || err.raw_os_error() == Some(WSAENOTCONN)
     }
-    if matches_not_connected(err) {
-        return true;
+    // Walk the `io::Error` -> `io::Error` `get_ref` chain.
+    let mut current = Some(err);
+    while let Some(io_err) = current {
+        if matches_not_connected(io_err) {
+            return true;
+        }
+        current = io_err
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<std::io::Error>());
     }
+    // Walk the generic `Error::source` chain for non-`io` wrappers, downcasting
+    // each link back to `io::Error` where possible.
     let mut source = std::error::Error::source(err);
     while let Some(cause) = source {
         if let Some(io_err) = cause.downcast_ref::<std::io::Error>() {
