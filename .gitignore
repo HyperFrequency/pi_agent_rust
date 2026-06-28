@@ -22,6 +22,10 @@ rustc-ice-*.txt
 # Local legacy pi-mono dependency provisioning symlink (machine-specific).
 /legacy_pi_mono_code/pi-mono/node_modules
 
+# Model-catalog generator (scripts/gen-model-catalog.mjs, gh #117)
+/scripts/node_modules
+/scripts/models.generated.candidate.ts
+
 # generated test artifacts
 tests/ext_conformance/artifacts/entry-point-scan.json
 tests/ext_conformance/reports/*
